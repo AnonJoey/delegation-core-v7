@@ -273,11 +273,18 @@ class VaultManager:
     # ── maintenance helpers ───────────────────────────────────────────────────
 
     def list_notes(self, folder: str, limit: int = 20) -> list[dict]:
-        """List notes in a folder sorted newest-first by modification time."""
+        """List notes in a folder (including subfolders) sorted newest-first by mtime.
+
+        rglob, not glob: reindex_vault() already made this exact fix (see its own
+        comment) because a non-recursive glob silently omits subfolder notes. This
+        method had the same bug independently — found while building the
+        dashboard's notes-browser endpoint, which showed 0 notes for a folder that
+        actually had its notes nested one level down.
+        """
         folder_path = self.cfg.vault / folder
         if not folder_path.exists():
             return []
-        files = sorted(folder_path.glob("*.md"), key=lambda f: f.stat().st_mtime, reverse=True)
+        files = sorted(folder_path.rglob("*.md"), key=lambda f: f.stat().st_mtime, reverse=True)
         results = []
         for f in files[:limit]:
             title, date = f.name[:-3], ""

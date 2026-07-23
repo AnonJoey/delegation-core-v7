@@ -60,6 +60,16 @@ v0.7.2 changes:
     (create/list/update/get) — previously these were MCP-only despite this
     repo already having a real installed CLI (setup/run/status/reindex/
     maintain/ingest/relink) that just didn't cover the knowledge-work tools.
+
+v0.8.0 changes:
+  - ClientTrackingMiddleware (client_tracking.py) registered via
+    mcp.add_middleware(): writes ~/.delegation_core/sessions/<pid>.json on
+    every request (client name/version from the MCP initialize handshake,
+    tool-call count, last-active time), cleaned up on exit alongside the
+    existing engine-close atexit hook. Feeds the Tauri dashboard's Connected
+    Clients panel — each running instance is one MCP client surface (Claude
+    Code, Claude Desktop, Codex, etc.), since delegation-core runs over stdio
+    and there's no single shared connection to introspect otherwise.
 """
 
 import asyncio
@@ -75,6 +85,8 @@ from fastmcp import FastMCP
 from . import graph_hook
 from . import graphbridge
 from . import jobs
+from .client_tracking import ClientTrackingMiddleware as _ClientTrackingMiddleware
+from .client_tracking import cleanup_own_session_file as _cleanup_own_session_file
 from . import session as _session
 from .config import Config
 from .engine import DelegationEngine
@@ -765,7 +777,10 @@ def run_server(cfg: Config):
                 asyncio.run(_engine.aclose())
         except Exception:
             pass
+        _cleanup_own_session_file()
     atexit.register(_cleanup)
+
+    mcp.add_middleware(_ClientTrackingMiddleware())
 
     _vault._init()   # blocking — BGE + ChromaDB must be ready before tools serve
 

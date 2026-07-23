@@ -1,26 +1,32 @@
 """
-cli.py — delegation-core v0.7.1 command-line interface.
+cli.py — delegation-core v0.8.0 command-line interface.
 
 Commands:
-  setup    Interactive setup wizard (run once per machine).
-  run      Start the MCP server (used in Claude Desktop config).
-  status   Check vault, binary, model, llama.cpp health, and feature config.
-  reindex  Rebuild the ChromaDB search index from vault folders.
-  maintain Run inbox maintenance once and exit (used by the SessionStart hook).
-  ingest   Index files from an external folder without moving them.
-  relink   Add wikilinks to notes in a vault subfolder.
-  search   Query the vault (BGE similarity search, no LLM required).
-  compress Extract key facts/decisions/action items from text via llama.cpp.
-  note     write / read / update / list / find-similar — direct vault note access.
-  graph    build / list / report / affected / hook install|uninstall|status —
-           the vendored code-graph pipeline (opt-in [graph] extra).
-  process  create / list / update / get — cross-session process tracking.
+  setup          Interactive setup wizard (run once per machine).
+  run            Start the MCP server (used in Claude Desktop config).
+  status         Check vault, binary, model, llama.cpp health, and feature config.
+  reindex        Rebuild the ChromaDB search index from vault folders.
+  maintain       Run inbox maintenance once and exit (used by the SessionStart hook).
+  dashboard-api  Run the local JSON API used by the Tauri dashboard (standalone/debug).
+  ingest         Index files from an external folder without moving them.
+  relink         Add wikilinks to notes in a vault subfolder.
+  search         Query the vault (BGE similarity search, no LLM required).
+  compress       Extract key facts/decisions/action items from text via llama.cpp.
+  note           write / read / update / list / find-similar — direct vault note access.
+  graph          build / list / report / affected / hook install|uninstall|status —
+                 the vendored code-graph pipeline (opt-in [graph] extra).
+  process        create / list / update / get — cross-session process tracking.
 
 v0.7.1: added search/compress/note/graph/process — previously these were only
 reachable through an MCP client (Claude Desktop/Code); this repo already had a
 real, installed CLI (this file) but it only covered operational/maintenance
 commands, not the actual knowledge-work tools. This closes that gap so the
 vault and the code-graph pipeline are usable standalone from a terminal.
+
+v0.8.0: added dashboard-api, the local JSON sidecar the Tauri dashboard (see
+dashboard/) talks to. Not an MCP tool — a separate small HTTP process, since
+FastMCP's mcp.run() serves one transport at a time (stdio here) and can't
+also serve HTTP for a UI in the same process.
 """
 
 import argparse
@@ -179,6 +185,11 @@ def cmd_reindex(_args):
     vault = VaultManager(cfg)
     count = vault.reindex_vault()
     console.print(f"[green]✓[/green]  {count} notes indexed.")
+
+
+def cmd_dashboard_api(args):
+    from . import dashboard_api
+    dashboard_api.run(port=args.port, host=args.host)
 
 
 def cmd_maintain(_args):
@@ -684,6 +695,12 @@ def main():
     sub.add_parser("reindex",  help="Rebuild ChromaDB search index from vault folders")
     sub.add_parser("maintain", help="Run inbox maintenance once and exit")
 
+    p_dashboard_api = sub.add_parser(
+        "dashboard-api", help="Run the local JSON API used by the Tauri dashboard (standalone/debug)"
+    )
+    p_dashboard_api.add_argument("--port", type=int, default=0, help="Port to bind (0 = pick a free one)")
+    p_dashboard_api.add_argument("--host", default="127.0.0.1")
+
     p_ingest = sub.add_parser("ingest", help="Index files from an external folder without moving them")
     p_ingest.add_argument("path",           help="Absolute path to a file or directory to index")
     p_ingest.add_argument("--no-recursive", action="store_true", help="Only index top-level files")
@@ -792,6 +809,7 @@ def main():
         "status":   cmd_status,
         "reindex":  cmd_reindex,
         "maintain": cmd_maintain,
+        "dashboard-api": cmd_dashboard_api,
         "ingest":   cmd_ingest,
         "relink":   cmd_relink,
         "search":   cmd_search,
