@@ -704,10 +704,11 @@ def run_server(cfg: Config):
         sys.stderr.write("Check sentence-transformers install and vault path.\n")
         sys.exit(1)
 
+    from . import __version__ as _version
     logger.info(
-        "delegation-core v0.6.0 ready — vault: %s | llama: %s | budget: %s "
-        "| synthesis: %s (%s) | split: %d chars / %d notes max | tools: 24",
-        cfg.vault, cfg.llama_url, cfg.budget_mode,
+        "delegation-core v%s ready — vault: %s | llama: %s | budget: %s "
+        "| synthesis: %s (%s) | split: %d chars / %d notes max | tools: 27",
+        _version, cfg.vault, cfg.llama_url, cfg.budget_mode,
         "on" if cfg.synthesis_enabled else "off", cfg.synthesis_lang,
         cfg.split_min_chars, cfg.split_max_notes,
     )

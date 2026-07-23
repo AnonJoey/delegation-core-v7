@@ -36,6 +36,20 @@ from pathlib import Path
 CONFIG_PATH = Path.home() / ".delegation_core" / "config.json"
 MAX_TEXT_LENGTH = 8000  # truncate very long individual messages
 
+
+def _yaml_quote_scalar(value: str) -> str:
+    """Double-quote a string for safe use as a YAML frontmatter scalar value.
+
+    An unquoted scalar containing ": " (colon-space) is ambiguous/invalid YAML
+    (Obsidian and any strict frontmatter parser will choke on it) — quote
+    unconditionally so titles are safe regardless of content. Duplicated from
+    delegation_core.vault.yaml_quote_scalar rather than imported: this hook is
+    stdlib-only by design (runs with system python3, no venv), so it can't
+    depend on the package.
+    """
+    escaped = value.replace("\\", "\\\\").replace('"', '\\"')
+    return f'"{escaped}"'
+
 _VENV_DIR = Path.home() / ".delegation_core" / "venv"
 VENV_BIN = (
     _VENV_DIR / "Scripts" / "delegation-core.exe"
@@ -151,7 +165,7 @@ def _format_markdown(messages: list[dict], session_id: str, cwd: str) -> str:
 
     lines = [
         "---",
-        f"title: Raw transcript — {topic}",
+        f"title: {_yaml_quote_scalar(f'Raw transcript — {topic}')}",
         f"date: {date_str}",
         f"session_id: {session_id}",
         f"cwd: {cwd}",
