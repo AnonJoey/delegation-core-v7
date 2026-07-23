@@ -1,0 +1,54 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <link rel="stylesheet" href="styles.css" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>delegation-core Dashboard</title>
+    <script type="module" src="/main.js" defer></script>
+  </head>
+
+  <body>
+    <div class="layout">
+      <aside class="sidebar">
+        <h1>delegation-core</h1>
+
+        <section class="panel" id="status-panel">
+          <h2>Server Status</h2>
+          <dl id="status-fields" class="fields">
+            <dt>loading…</dt>
+          </dl>
+        </section>
+
+        <section class="panel" id="clients-panel">
+          <h2>Connected Clients</h2>
+          <ul id="clients-list" class="clients-list">
+            <li class="muted">loading…</li>
+          </ul>
+        </section>
+      </aside>
+
+      <main class="main">
+        <nav class="tabs">
+          <button class="tab-btn active" data-tab="notes">Notes</button>
+          <button class="tab-btn" data-tab="graph">Vault Graph</button>
+        </nav>
+
+        <section class="tab-content active" id="tab-notes">
+          <div class="notes-browser">
+            <div class="folder-list" id="folder-list"></div>
+            <div class="note-list" id="note-list"></div>
+            <div class="note-view">
+              <pre id="note-content" class="note-content muted">Select a note to view it.</pre>
+            </div>
+          </div>
+        </section>
+
+        <section class="tab-content" id="tab-graph">
+          <canvas id="graph-canvas"></canvas>
+          <div class="graph-hint muted">Drag nodes to rearrange. Scroll to zoom.</div>
+        </section>
+      </main>
+    </div>
+  </body>
+</html>

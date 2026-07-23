@@ -21,6 +21,8 @@ protocol an AI agent should follow when this MCP server is connected.
   into the vault. Vendored and adapted from
   [Graphify](https://github.com/Graphify-Labs/graphify) — see `THIRD_PARTY_LICENSES/`.
 - **Process tracking**: lightweight cross-session task tracking that survives restarts.
+- **Dashboard** (`dashboard/`): a native Tauri desktop app — server status, connected MCP
+  clients, a notes browser, and the vault as an Obsidian-style graph. See `dashboard/README.md`.
 
 ## Install
 
