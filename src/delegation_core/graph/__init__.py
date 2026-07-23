@@ -1,9 +1,11 @@
 """delegation_core.graph - extract · build · cluster · analyze · report.
 
-Vendored from Graphify (github.com/Graphify-Labs/graphify) — core pipeline +
-all language extractors only. Graphify's own CLI/installer/LLM client/MCP
-server/watch daemon/wiki/reflect(memory-overlay) were intentionally left out;
-see the 2026-07-23 vault decision note for the full include/exclude list.
+Vendored from Graphify (github.com/Graphify-Labs/graphify) — core pipeline,
+all language extractors, plus callflow_html.py (Mermaid architecture diagrams),
+affected.py (blast-radius query), and wiki.py (per-community/god-node articles).
+Graphify's own CLI/installer/LLM client/MCP server (serve.py)/watch daemon/
+"reflect" memory-overlay were intentionally left out; see the 2026-07-23 vault
+decision note for the full include/exclude list.
 
 Graphify is Copyright 2026 Safi Shamsi and the Graphify contributors, dual-
 licensed under Apache-2.0 / MIT — see /THIRD_PARTY_LICENSES/ at the repo root.

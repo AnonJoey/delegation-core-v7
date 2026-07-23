@@ -9,7 +9,9 @@ AST-only: only the code-file extraction path is used. Graphify's semantic
 (doc/paper/image) extraction pass requires an LLM backend, which was deliberately
 not vendored — see delegation_core/graph/__init__.py for the include/exclude list.
 
-New in v0.7.0.
+New in v0.7.0. v0.7.1 added callflow.html (Mermaid architecture diagrams),
+wiki/ articles (one vault note per community/god-node instead of one big
+report), and graph_affected (blast-radius query).
 """
 
 import json
@@ -42,31 +44,57 @@ def _slugify(name: str) -> str:
     return safe or "graph"
 
 
-def _file_report_to_vault(cfg, vault_manager, graph_name: str, report_md: str) -> dict:
-    """Drop GRAPH_REPORT.md + a folder_hint sidecar into the vault inbox — reuses
-    the exact same extractor/classifier/synthesizer/merge path any other dropped
-    document goes through, rather than writing a bespoke graph-specific note format.
+def _file_artifacts_to_vault(cfg, graph_name: str, report_md: str, wiki_dir: Path | None) -> dict:
+    """Drop GRAPH_REPORT.md (+ any per-community/god-node wiki articles) into the
+    vault inbox, each with a folder_hint sidecar — reuses the exact same
+    extractor/classifier/synthesizer/merge path any other dropped document goes
+    through, rather than writing a bespoke graph-specific note format.
+
+    The overview report and the wiki articles are filed as siblings, not one
+    replacing the other: GRAPH_REPORT.md is the single-note summary (good for a
+    quick search hit), the wiki articles are individually-searchable per-topic
+    notes (good for "what does the X community do" style questions).
     """
     inbox = cfg.vault / "_inbox"
     inbox.mkdir(parents=True, exist_ok=True)
+    queued = []
+
     stem = f"graph-report-{graph_name}"
     report_path = inbox / f"{stem}.md"
-    sidecar_path = inbox / f"{stem}.meta.yaml"
     report_path.write_text(report_md, encoding="utf-8")
     # no_merge: a fresh report replaces the prior one in the registry/graphs_dir
     # artifact anyway; merging into an older report note would blur the two.
-    sidecar_path.write_text("folder_hint: reference\nno_merge: true\n", encoding="utf-8")
-    return {"queued_path": str(report_path)}
+    (inbox / f"{stem}.meta.yaml").write_text("folder_hint: reference\nno_merge: true\n", encoding="utf-8")
+    queued.append(str(report_path))
+
+    if wiki_dir is not None and wiki_dir.is_dir():
+        for article in wiki_dir.glob("*.md"):
+            if article.stem.lower() == "index":
+                continue  # the index is just a local nav aid; nothing to search for in it
+            article_stem = f"graph-wiki-{graph_name}-{article.stem}"
+            dest = inbox / f"{article_stem}.md"
+            dest.write_text(article.read_text(encoding="utf-8"), encoding="utf-8")
+            (inbox / f"{article_stem}.meta.yaml").write_text(
+                "folder_hint: reference\nno_merge: true\n", encoding="utf-8"
+            )
+            queued.append(str(dest))
+
+    return {"queued_paths": queued}
 
 
 async def build_graph(cfg, engine, vault_manager, source_path: str,
-                       name: str | None = None, force: bool = False) -> dict:
+                       name: str | None = None, force: bool = False,
+                       file_to_vault: bool = True) -> dict:
     """Build a code knowledge graph for source_path using the vendored pipeline.
 
-    Writes graph.json / graph.html / GRAPH_REPORT.md to cfg.graphs_dir/<name>/,
-    then files GRAPH_REPORT.md into the vault by queuing it in _inbox/ and running
-    the normal maintenance pass (organizer.run) — same code path run_maintenance()
-    uses, so it gets classified/synthesized/filed like any other document.
+    Writes graph.json / graph.html / callflow.html / GRAPH_REPORT.md / wiki/*.md
+    to cfg.graphs_dir/<name>/. When file_to_vault=True (default — the MCP tool's
+    behavior), also queues GRAPH_REPORT.md + the wiki articles into _inbox/ and
+    runs the normal maintenance pass (organizer.run) so they get classified/
+    synthesized/filed like any other document. file_to_vault=False is for the
+    git post-commit hook path (graph_hook.py): keep the on-disk artifacts fresh
+    on every commit without touching the vault each time — vault filing stays a
+    deliberate action.
     """
     from delegation_core.graph.detect import detect
     from delegation_core.graph.extract import extract as ast_extract
@@ -75,6 +103,8 @@ async def build_graph(cfg, engine, vault_manager, source_path: str,
     from delegation_core.graph.analyze import god_nodes, surprising_connections, suggest_questions
     from delegation_core.graph.report import generate as render_report
     from delegation_core.graph.export import to_json, to_html
+    from delegation_core.graph.callflow_html import write_callflow_html
+    from delegation_core.graph.wiki import to_wiki
 
     root = Path(source_path).expanduser().resolve()
     if not root.exists():
@@ -127,10 +157,30 @@ async def build_graph(cfg, engine, vault_manager, source_path: str,
         )
         (out_dir / "GRAPH_REPORT.md").write_text(report_md, encoding="utf-8")
         to_json(G, communities, str(out_dir / "graph.json"), force=True)
+
         try:
             to_html(G, communities, str(out_dir / "graph.html"))
         except Exception as e:
             logger.warning("graph.html export skipped for %s: %s", graph_name, e)
+
+        callflow_path = out_dir / "callflow.html"
+        try:
+            write_callflow_html(
+                graph=str(out_dir / "graph.json"),
+                report=str(out_dir / "GRAPH_REPORT.md"),
+                output=str(callflow_path),
+            )
+        except Exception as e:
+            logger.warning("callflow.html export skipped for %s: %s", graph_name, e)
+            callflow_path = None
+
+        wiki_dir = out_dir / "wiki"
+        wiki_count = 0
+        try:
+            wiki_count = to_wiki(G, communities, wiki_dir, cohesion=cohesion, god_nodes_data=gods)
+        except Exception as e:
+            logger.warning("wiki export skipped for %s: %s", graph_name, e)
+            wiki_dir = None
     except Exception as e:
         logger.error("Graph build failed for %s: %s", root, e)
         return {"error": f"Graph build failed: {e}"}
@@ -146,19 +196,7 @@ async def build_graph(cfg, engine, vault_manager, source_path: str,
     }
     _save_registry(cfg, registry)
 
-    queued = _file_report_to_vault(cfg, vault_manager, graph_name, report_md)
-    try:
-        maintenance_result = await organizer.run(engine, vault_manager)
-        filed = {**queued, "maintenance": {
-            "classified": maintenance_result.get("classified", []),
-            "errors": maintenance_result.get("errors", []),
-        }}
-    except Exception as e:
-        logger.warning("Maintenance pass after graph_build failed: %s", e)
-        filed = {**queued, "note": f"Report queued but maintenance pass failed ({e}); "
-                                    "call run_maintenance() to retry filing it."}
-
-    return {
+    result = {
         "status": "ok",
         "name": graph_name,
         "source_path": str(root),
@@ -168,8 +206,27 @@ async def build_graph(cfg, engine, vault_manager, source_path: str,
         "god_nodes": gods[:5],
         "graph_json": str(out_dir / "graph.json"),
         "graph_html": str(out_dir / "graph.html"),
-        "filed_to_vault": filed,
+        "callflow_html": str(callflow_path) if callflow_path else None,
+        "wiki_articles": wiki_count,
     }
+
+    if not file_to_vault:
+        result["filed_to_vault"] = None
+        return result
+
+    queued = _file_artifacts_to_vault(cfg, graph_name, report_md, wiki_dir)
+    try:
+        maintenance_result = await organizer.run(engine, vault_manager)
+        result["filed_to_vault"] = {**queued, "maintenance": {
+            "classified": maintenance_result.get("classified", []),
+            "errors": maintenance_result.get("errors", []),
+        }}
+    except Exception as e:
+        logger.warning("Maintenance pass after graph_build failed: %s", e)
+        result["filed_to_vault"] = {**queued, "note": f"Artifacts queued but maintenance pass "
+                                                        f"failed ({e}); call run_maintenance() to retry filing them."}
+
+    return result
 
 
 def list_graphs(cfg) -> dict:
@@ -185,3 +242,41 @@ def get_report(cfg, name: str) -> dict:
     if not report_path.exists():
         return {"error": f"No report found for graph '{graph_name}'. Call graph_build first."}
     return {"name": graph_name, "report": report_path.read_text(encoding="utf-8")}
+
+
+def get_affected(cfg, name: str, query: str, depth: int = 2, relations: list[str] | None = None) -> dict:
+    """Blast-radius query: what else is affected if `query` (a file path or symbol
+    label) changes? Walks calls/indirect_call/references/imports edges backward
+    from the matched node up to `depth` hops. Requires graph_build to have run
+    for this name first.
+    """
+    from delegation_core.graph.affected import (
+        DEFAULT_AFFECTED_RELATIONS, affected_nodes, format_affected, load_graph, resolve_seed,
+    )
+
+    graph_name = _slugify(name)
+    graph_path = cfg.graphs_dir / graph_name / "graph.json"
+    if not graph_path.exists():
+        return {"error": f"No graph found for '{graph_name}'. Call graph_build first."}
+
+    try:
+        G = load_graph(graph_path)
+    except Exception as e:
+        return {"error": f"Could not load graph: {e}"}
+
+    relation_list = tuple(relations) if relations else DEFAULT_AFFECTED_RELATIONS
+    seed = resolve_seed(G, query)
+    if seed is None:
+        return {"error": f"No unique node match for {query!r} in graph '{graph_name}'."}
+
+    hits = affected_nodes(G, seed, relations=relation_list, depth=depth)
+    text = format_affected(G, query, relations=relation_list, depth=depth)
+    return {
+        "name": graph_name,
+        "query": query,
+        "seed": seed,
+        "depth": depth,
+        "relations": list(relation_list),
+        "hit_count": len(hits),
+        "report": text,
+    }

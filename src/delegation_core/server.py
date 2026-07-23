@@ -2,7 +2,7 @@
 server.py — FastMCP tool definitions for delegation-core v0.4.
 Called by run_server(); never run directly.
 
-27 tools across six groups:
+31 tools across seven groups:
   Core (8):            search_vault, read_note, write_note, compress,
                        vault_stats, heartbeat, run_maintenance, export_session
   Maintenance (6):     vault_list_notes, vault_inbox_status,
@@ -10,7 +10,8 @@ Called by run_server(); never run directly.
                        search_web
   Fire-and-forget (3): run_maintenance_bg, vault_reindex_bg, task_status
   External ingestion (3): ingest_folder, ingest_folder_bg, ingest_status
-  Code graph (3):      graph_build, graph_list, graph_report
+  Code graph (7):      graph_build, graph_list, graph_report, graph_affected,
+                       graph_hook_install, graph_hook_uninstall, graph_hook_status
   Process tracking (4):   process_create, process_list, process_update, process_get
 
 v0.4 changes:
@@ -31,6 +32,20 @@ v0.7.0 changes:
     include/exclude list). Opt-in via the [graph] extra. graph_build routes its
     GRAPH_REPORT.md through the existing inbox/organizer.run() pipeline instead
     of a separate note-writing path.
+
+v0.7.1 changes:
+  - graph_build also emits callflow.html (Mermaid architecture diagrams,
+    vendored from Graphify's callflow_html.py) and wiki/ articles (one
+    per-community/god-node note instead of one big report, vendored from
+    Graphify's wiki.py) — both filed into the vault alongside GRAPH_REPORT.md.
+  - graph_affected added: blast-radius query (vendored from Graphify's
+    affected.py) — what else is affected if a file/symbol changes.
+  - graph_hook_install/uninstall/status added: a git post-commit hook that
+    keeps a graph's on-disk artifacts fresh after every commit (code-only, no
+    LLM, no vault filing — see graph_hook.py's docstring for why this is a
+    from-scratch delegation-core-native adaptation rather than a vendor of
+    Graphify's hooks.py/watch.py, which are built around a different
+    distribution model).
 """
 
 import asyncio
@@ -43,6 +58,7 @@ from pathlib import Path
 
 from fastmcp import FastMCP
 
+from . import graph_hook
 from . import graphbridge
 from . import jobs
 from . import session as _session
@@ -604,6 +620,45 @@ async def graph_report(name: str) -> str:
     return json.dumps(graphbridge.get_report(_vault.cfg, name))
 
 
+@mcp.tool()
+async def graph_affected(name: str, query: str, depth: int = 2) -> str:
+    """
+    Blast-radius query: what else is affected if `query` (a file path or symbol
+    label, e.g. "auth.py" or "AuthService.login") changes? Walks calls/
+    indirect_call/references/imports edges backward up to `depth` hops.
+    Requires graph_build(name=...) to have run first.
+    """
+    try:
+        result = graphbridge.get_affected(_vault.cfg, name, query, depth=depth)
+    except ModuleNotFoundError as e:
+        return json.dumps({"error": f"code-graph pipeline not installed: {e}. "
+                                    'Run: pip install "delegation-core[graph]"'})
+    return json.dumps(result)
+
+
+@mcp.tool()
+async def graph_hook_install(path: str, name: str = "") -> str:
+    """
+    Install a git post-commit hook that rebuilds this repo's code graph
+    automatically after every commit (background, code-only, no LLM, no vault
+    writes — call graph_build explicitly whenever you want the latest report
+    filed into the vault). path must be inside a git repository.
+    """
+    return json.dumps(graph_hook.install(path, name=name or None))
+
+
+@mcp.tool()
+async def graph_hook_uninstall(path: str) -> str:
+    """Remove the graph auto-rebuild post-commit hook installed by graph_hook_install."""
+    return json.dumps(graph_hook.uninstall(path))
+
+
+@mcp.tool()
+async def graph_hook_status(path: str) -> str:
+    """Check whether the graph auto-rebuild post-commit hook is installed for this repo."""
+    return json.dumps(graph_hook.status(path))
+
+
 # ── process tracking ──────────────────────────────────────────────────────────
 
 @mcp.tool()
@@ -707,7 +762,7 @@ def run_server(cfg: Config):
     from . import __version__ as _version
     logger.info(
         "delegation-core v%s ready — vault: %s | llama: %s | budget: %s "
-        "| synthesis: %s (%s) | split: %d chars / %d notes max | tools: 27",
+        "| synthesis: %s (%s) | split: %d chars / %d notes max | tools: 31",
         _version, cfg.vault, cfg.llama_url, cfg.budget_mode,
         "on" if cfg.synthesis_enabled else "off", cfg.synthesis_lang,
         cfg.split_min_chars, cfg.split_max_notes,
