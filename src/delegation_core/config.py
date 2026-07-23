@@ -30,6 +30,11 @@ v0.5.1 additions:
                       to the calling Claude). Embeddings + search stay local in
                       both modes. "agent" is for machines that can't spare the
                       RAM/CPU to run a local model alongside other apps.
+
+v0.7.0 additions:
+  graphs_dir, graphs_registry_path  storage for the vendored code-graph pipeline
+                      (graph_build/graph_list/graph_report tools). Opt-in via the
+                      [graph] extra — see delegation_core/graph/__init__.py.
 """
 
 import json
@@ -155,6 +160,14 @@ class Config:
     @property
     def processes_path(self) -> Path:
         return CONFIG_DIR / "processes.json"
+
+    @property
+    def graphs_dir(self) -> Path:
+        return CONFIG_DIR / "graphs"
+
+    @property
+    def graphs_registry_path(self) -> Path:
+        return CONFIG_DIR / "graphs_registry.json"
 
     @property
     def is_cpu_budget(self) -> bool:

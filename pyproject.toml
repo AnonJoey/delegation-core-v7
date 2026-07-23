@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "delegation-core"
-version = "0.6.4"
+version = "0.7.0"
 description = "Local MCP delegation server: llama.cpp + BGE + ChromaDB + Obsidian vault"
 requires-python = ">=3.11"
 dependencies = [
@@ -30,8 +30,51 @@ dependencies = [
 # and set web_search_enabled=true in config.json.
 # Uses `ddgs` — the maintained rename of `duckduckgo-search`, which now returns
 # 0 results under the old name.
+#
+# v0.7.0: code-graph pipeline vendored from Graphify (github.com/Graphify-Labs/graphify,
+# core pipeline + all language extractors — see delegation_core/graph/__init__.py).
+# Opt-in via pip install "delegation-core[graph]" — it adds ~27 native tree-sitter
+# wheels, a real weight increase for a capability most installs won't use.
+# tree-sitter-dm (BYOND DreamMaker) ships no Linux/Mac prebuilt wheel and needs a
+# C toolchain to compile, unlike every other language binding here, so it stays
+# in its own graph-dm extra rather than breaking a plain [graph] install.
 [project.optional-dependencies]
 web = ["ddgs>=6.0.0"]
+graph = [
+    "networkx>=3.4",
+    "numpy>=1.21",
+    "rapidfuzz>=3.0",
+    "tree-sitter>=0.23.0,<0.26",
+    "tree-sitter-python>=0.23,<0.26",
+    "tree-sitter-javascript>=0.23,<0.26",
+    "tree-sitter-typescript>=0.23,<0.25",
+    "tree-sitter-go>=0.23,<0.26",
+    "tree-sitter-rust>=0.23,<0.25",
+    "tree-sitter-java>=0.23,<0.25",
+    "tree-sitter-groovy>=0.1,<0.3",
+    "tree-sitter-c>=0.23,<0.25",
+    "tree-sitter-cpp>=0.23,<0.25",
+    "tree-sitter-ruby>=0.23,<0.25",
+    "tree-sitter-c-sharp>=0.23,<0.25",
+    "tree-sitter-kotlin>=1.0,<2.0",
+    "tree-sitter-scala>=0.23,<0.27",
+    "tree-sitter-php>=0.23,<0.25",
+    "tree-sitter-swift>=0.7,<0.9",
+    "tree-sitter-lua>=0.2,<0.6",
+    "tree-sitter-zig>=1.0,<2.0",
+    "tree-sitter-powershell>=0.26,<0.28",
+    "tree-sitter-elixir>=0.3,<0.5",
+    "tree-sitter-objc>=3.0,<4.0",
+    "tree-sitter-julia>=0.23,<0.25",
+    "tree-sitter-verilog>=1.0,<2.0",
+    "tree-sitter-fortran>=0.6,<0.8",
+    "tree-sitter-bash>=0.23,<0.27",
+    "tree-sitter-json>=0.23,<0.26",
+    "tree-sitter-pascal",
+    "tree-sitter-sql",
+    "tree-sitter-hcl",
+]
+graph-dm = ["tree-sitter-dm"]
 
 [project.scripts]
 delegation-core = "delegation_core.cli:main"

@@ -2,7 +2,7 @@
 server.py — FastMCP tool definitions for delegation-core v0.4.
 Called by run_server(); never run directly.
 
-24 tools across five groups:
+27 tools across six groups:
   Core (8):            search_vault, read_note, write_note, compress,
                        vault_stats, heartbeat, run_maintenance, export_session
   Maintenance (6):     vault_list_notes, vault_inbox_status,
@@ -10,6 +10,7 @@ Called by run_server(); never run directly.
                        search_web
   Fire-and-forget (3): run_maintenance_bg, vault_reindex_bg, task_status
   External ingestion (3): ingest_folder, ingest_folder_bg, ingest_status
+  Code graph (3):      graph_build, graph_list, graph_report
   Process tracking (4):   process_create, process_list, process_update, process_get
 
 v0.4 changes:
@@ -22,6 +23,14 @@ v0.4 changes:
     backlinks after every write via _post_write_links() (BGE-only, no llama.cpp)
   - vault_health added to heartbeat(); auto-calibration via budget_mode = "auto"
   - run_maintenance includes heal pass (sync + bg)
+
+v0.7.0 changes:
+  - graph_build/graph_list/graph_report added: a code-graph pipeline vendored
+    from Graphify (github.com/Graphify-Labs/graphify — core pipeline + all
+    language extractors; see delegation_core/graph/__init__.py for the
+    include/exclude list). Opt-in via the [graph] extra. graph_build routes its
+    GRAPH_REPORT.md through the existing inbox/organizer.run() pipeline instead
+    of a separate note-writing path.
 """
 
 import asyncio
@@ -34,6 +43,7 @@ from pathlib import Path
 
 from fastmcp import FastMCP
 
+from . import graphbridge
 from . import jobs
 from . import session as _session
 from .config import Config
@@ -556,6 +566,42 @@ async def ingest_folder_bg(source_path: str, recursive: bool = True) -> str:
 async def ingest_status() -> str:
     """Return the ingestion registry: which external paths have been indexed and when."""
     return json.dumps(_ingest.status())
+
+
+# ── code graph ─────────────────────────────────────────────────────────────────
+
+@mcp.tool()
+async def graph_build(path: str, name: str = "", force: bool = False) -> str:
+    """
+    Build a code knowledge graph for a local directory: detect -> AST extract
+    (tree-sitter, code files only) -> build -> cluster -> analyze -> report -> export.
+    Writes graph.json/graph.html/GRAPH_REPORT.md under ~/.delegation_core/graphs/<name>/
+    and files GRAPH_REPORT.md into the vault (folder_hint=reference) via the normal
+    maintenance pipeline, so it becomes searchable through search_vault.
+    name defaults to the directory's basename. Re-running the same name is a no-op
+    unless force=true (rebuilds and overwrites).
+    Requires the [graph] extra: pip install "delegation-core[graph]".
+    """
+    try:
+        result = await graphbridge.build_graph(
+            _vault.cfg, _engine, _vault, path, name=name or None, force=force,
+        )
+    except ModuleNotFoundError as e:
+        return json.dumps({"error": f"code-graph pipeline not installed: {e}. "
+                                    'Run: pip install "delegation-core[graph]"'})
+    return json.dumps(result)
+
+
+@mcp.tool()
+async def graph_list() -> str:
+    """List previously built code graphs: name, source path, node/edge/community counts, last built."""
+    return json.dumps(graphbridge.list_graphs(_vault.cfg))
+
+
+@mcp.tool()
+async def graph_report(name: str) -> str:
+    """Return the full GRAPH_REPORT.md for a previously built graph by name (see graph_list)."""
+    return json.dumps(graphbridge.get_report(_vault.cfg, name))
 
 
 # ── process tracking ──────────────────────────────────────────────────────────
