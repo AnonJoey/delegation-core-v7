@@ -1,9 +1,9 @@
 """
 graphbridge.py — Orchestrates the vendored code-graph pipeline (delegation_core.graph,
 adapted from Graphify: github.com/Graphify-Labs/graphify — see that package's
-docstring for exactly what was and wasn't vendored) end-to-end, and routes its
-output through delegation-core's EXISTING vault ingestion pipeline (organizer.run)
-instead of Graphify's own Obsidian writer (to_obsidian()).
+docstring for exactly what was and wasn't vendored) end-to-end, and files its
+output into the vault directly instead of Graphify's own Obsidian writer
+(to_obsidian()).
 
 AST-only: only the code-file extraction path is used. Graphify's semantic
 (doc/paper/image) extraction pass requires an LLM backend, which was deliberately
@@ -12,6 +12,17 @@ not vendored — see delegation_core/graph/__init__.py for the include/exclude l
 New in v0.7.0. v0.7.1 added callflow.html (Mermaid architecture diagrams),
 wiki/ articles (one vault note per community/god-node instead of one big
 report), and graph_affected (blast-radius query).
+
+v0.7.2 correction: the wiki/report artifacts are now written to the vault
+DIRECTLY (write + index_note + BGE-only wikilinks), not routed through
+_inbox/ + organizer.run(). The original design queued every wiki article
+(often 100+) through the FULL classify/synthesize pipeline meant for messy
+raw documents — since each synthesize() call is a real LLM round-trip, one
+graph_build() turned into 100+ sequential llama.cpp calls (tens of minutes,
+observed directly). Wiki articles and GRAPH_REPORT.md are already clean,
+structured markdown (report.generate()/wiki.py's own templates) — they don't
+need extraction or rewriting, only filing, indexing, and linking. This also
+means graph_build no longer needs a DelegationEngine at all.
 """
 
 import json
@@ -19,8 +30,6 @@ import logging
 import re
 from datetime import datetime
 from pathlib import Path
-
-from . import organizer
 
 logger = logging.getLogger("graphbridge")
 
@@ -44,57 +53,92 @@ def _slugify(name: str) -> str:
     return safe or "graph"
 
 
-def _file_artifacts_to_vault(cfg, graph_name: str, report_md: str, wiki_dir: Path | None) -> dict:
-    """Drop GRAPH_REPORT.md (+ any per-community/god-node wiki articles) into the
-    vault inbox, each with a folder_hint sidecar — reuses the exact same
-    extractor/classifier/synthesizer/merge path any other dropped document goes
-    through, rather than writing a bespoke graph-specific note format.
-
-    The overview report and the wiki articles are filed as siblings, not one
-    replacing the other: GRAPH_REPORT.md is the single-note summary (good for a
-    quick search hit), the wiki articles are individually-searchable per-topic
-    notes (good for "what does the X community do" style questions).
+def _resolve_folder(cfg, preferred: str = "reference") -> str:
+    """Case-insensitive match against cfg.vault_folders (vaults configure their
+    own casing — e.g. "Reference" vs the config.py default "reference" — and
+    writing to the wrong case silently creates a stray duplicate folder instead
+    of erroring, so this has to be resolved explicitly rather than assumed).
+    Falls back to the first configured folder if nothing matches "reference".
     """
-    inbox = cfg.vault / "_inbox"
-    inbox.mkdir(parents=True, exist_ok=True)
-    queued = []
+    for f in cfg.vault_folders:
+        if f.lower() == preferred:
+            return f
+    return cfg.vault_folders[0] if cfg.vault_folders else preferred
 
-    stem = f"graph-report-{graph_name}"
-    report_path = inbox / f"{stem}.md"
-    report_path.write_text(report_md, encoding="utf-8")
-    # no_merge: a fresh report replaces the prior one in the registry/graphs_dir
-    # artifact anyway; merging into an older report note would blur the two.
-    (inbox / f"{stem}.meta.yaml").write_text("folder_hint: reference\nno_merge: true\n", encoding="utf-8")
-    queued.append(str(report_path))
+
+def _write_vault_note(vault_manager, folder: str, title: str, content: str) -> str:
+    """Direct write: file + index_note + best-effort BGE-only wikilinks. No LLM
+    call — for content that's already well-formed (a generated report/article),
+    not raw material that needs extraction or rewriting. Mirrors write_note()'s
+    shape in server.py, minus the "ai_generated: true" framing since nothing
+    here was LLM-authored, just LLM-analyzed.
+    """
+    from .linker import inject_backlinks, wikilinks
+    from .vault import safe_filename, yaml_quote_scalar
+
+    cfg = vault_manager.cfg
+    safe = safe_filename(title)
+    dest = cfg.vault / folder / f"{datetime.now().strftime('%Y-%m-%d')}-{safe}.md"
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    full = (
+        f"---\ntitle: {yaml_quote_scalar(title)}\ndate: {datetime.now().strftime('%Y-%m-%d')}\n"
+        f"ai_generated: false\nsource: graph_build\n---\n\n{content}"
+    )
+    dest.write_text(full, encoding="utf-8")
+    rel = str(dest.relative_to(cfg.vault))
+    vault_manager.index_note(full, {"title": title, "path": rel, "folder": folder})
+
+    try:
+        hits = [h for h in vault_manager.search(full[:600], limit=6) if h.get("path") != rel][:5]
+        links = wikilinks(hits, cfg.merge_threshold)
+        if links:
+            updated = full.rstrip() + f"\n\n## Related\n{links}\n"
+            dest.write_text(updated, encoding="utf-8")
+            vault_manager.index_note(updated, {"title": title, "path": rel, "folder": folder})
+            inject_backlinks(vault_manager, dest.stem,
+                              [h["path"] for h in hits if h.get("similarity", 0) >= cfg.merge_threshold])
+    except Exception as e:
+        logger.warning("wikilink injection skipped for %s: %s", rel, e)
+
+    return rel
+
+
+def _write_artifacts_to_vault(vault_manager, graph_name: str, report_md: str, wiki_dir: Path | None) -> dict:
+    """File GRAPH_REPORT.md (+ any per-community/god-node wiki articles) into the
+    vault as siblings: GRAPH_REPORT.md is the single-note summary (good for a
+    quick search hit), the wiki articles are individually-searchable per-topic
+    notes (good for "what does the X community do" style questions). Neither
+    replaces the other.
+    """
+    folder = _resolve_folder(vault_manager.cfg, "reference")
+    written = [_write_vault_note(vault_manager, folder, f"Code Graph Report — {graph_name}", report_md)]
 
     if wiki_dir is not None and wiki_dir.is_dir():
-        for article in wiki_dir.glob("*.md"):
+        for article in sorted(wiki_dir.glob("*.md")):
             if article.stem.lower() == "index":
-                continue  # the index is just a local nav aid; nothing to search for in it
-            article_stem = f"graph-wiki-{graph_name}-{article.stem}"
-            dest = inbox / f"{article_stem}.md"
-            dest.write_text(article.read_text(encoding="utf-8"), encoding="utf-8")
-            (inbox / f"{article_stem}.meta.yaml").write_text(
-                "folder_hint: reference\nno_merge: true\n", encoding="utf-8"
-            )
-            queued.append(str(dest))
+                continue  # local nav aid only, nothing worth searching for in it
+            content = article.read_text(encoding="utf-8")
+            title = f"{graph_name}: {article.stem}"
+            written.append(_write_vault_note(vault_manager, folder, title, content))
 
-    return {"queued_paths": queued}
+    return {"written_paths": written}
 
 
-async def build_graph(cfg, engine, vault_manager, source_path: str,
+async def build_graph(cfg, vault_manager, source_path: str,
                        name: str | None = None, force: bool = False,
                        file_to_vault: bool = True) -> dict:
     """Build a code knowledge graph for source_path using the vendored pipeline.
 
     Writes graph.json / graph.html / callflow.html / GRAPH_REPORT.md / wiki/*.md
     to cfg.graphs_dir/<name>/. When file_to_vault=True (default — the MCP tool's
-    behavior), also queues GRAPH_REPORT.md + the wiki articles into _inbox/ and
-    runs the normal maintenance pass (organizer.run) so they get classified/
-    synthesized/filed like any other document. file_to_vault=False is for the
-    git post-commit hook path (graph_hook.py): keep the on-disk artifacts fresh
-    on every commit without touching the vault each time — vault filing stays a
+    behavior) also files GRAPH_REPORT.md + the wiki articles directly into the
+    vault (see _write_artifacts_to_vault). file_to_vault=False is for the git
+    post-commit hook path (graph_hook.py): keep the on-disk artifacts fresh on
+    every commit without touching the vault each time — vault filing stays a
     deliberate action.
+
+    async only because it's called from server.py's async MCP tools; nothing
+    inside actually awaits (no engine/LLM involved — see module docstring).
     """
     from delegation_core.graph.detect import detect
     from delegation_core.graph.extract import extract as ast_extract
@@ -214,17 +258,11 @@ async def build_graph(cfg, engine, vault_manager, source_path: str,
         result["filed_to_vault"] = None
         return result
 
-    queued = _file_artifacts_to_vault(cfg, graph_name, report_md, wiki_dir)
     try:
-        maintenance_result = await organizer.run(engine, vault_manager)
-        result["filed_to_vault"] = {**queued, "maintenance": {
-            "classified": maintenance_result.get("classified", []),
-            "errors": maintenance_result.get("errors", []),
-        }}
+        result["filed_to_vault"] = _write_artifacts_to_vault(vault_manager, graph_name, report_md, wiki_dir)
     except Exception as e:
-        logger.warning("Maintenance pass after graph_build failed: %s", e)
-        result["filed_to_vault"] = {**queued, "note": f"Artifacts queued but maintenance pass "
-                                                        f"failed ({e}); call run_maintenance() to retry filing them."}
+        logger.warning("Filing artifacts to vault failed for %s: %s", graph_name, e)
+        result["filed_to_vault"] = {"error": str(e)}
 
     return result
 

@@ -46,6 +46,20 @@ v0.7.1 changes:
     from-scratch delegation-core-native adaptation rather than a vendor of
     Graphify's hooks.py/watch.py, which are built around a different
     distribution model).
+
+v0.7.2 changes:
+  - graph_build no longer routes its report/wiki articles through _inbox/ +
+    organizer.run(). That queued every wiki article (often 100+) through the
+    full classify/synthesize LLM pipeline meant for messy raw documents —
+    observed directly to turn one graph_build into 30+ minutes of sequential
+    llama.cpp calls on already-clean, template-generated markdown that needed
+    no rewriting. graphbridge.py now writes artifacts to the vault directly
+    (file + index + BGE-only wikilinks, no LLM, no engine dependency).
+  - cli.py extended: search/compress/note (write/read/update/list/find-similar)/
+    graph (build/list/report/affected/hook install|uninstall|status)/process
+    (create/list/update/get) — previously these were MCP-only despite this
+    repo already having a real installed CLI (setup/run/status/reindex/
+    maintain/ingest/relink) that just didn't cover the knowledge-work tools.
 """
 
 import asyncio
@@ -591,16 +605,17 @@ async def graph_build(path: str, name: str = "", force: bool = False) -> str:
     """
     Build a code knowledge graph for a local directory: detect -> AST extract
     (tree-sitter, code files only) -> build -> cluster -> analyze -> report -> export.
-    Writes graph.json/graph.html/GRAPH_REPORT.md under ~/.delegation_core/graphs/<name>/
-    and files GRAPH_REPORT.md into the vault (folder_hint=reference) via the normal
-    maintenance pipeline, so it becomes searchable through search_vault.
+    Writes graph.json/graph.html/callflow.html/GRAPH_REPORT.md/wiki articles under
+    ~/.delegation_core/graphs/<name>/ and files the report + wiki articles directly
+    into the vault (no LLM involved — they're already well-formed), so they become
+    searchable through search_vault.
     name defaults to the directory's basename. Re-running the same name is a no-op
     unless force=true (rebuilds and overwrites).
     Requires the [graph] extra: pip install "delegation-core[graph]".
     """
     try:
         result = await graphbridge.build_graph(
-            _vault.cfg, _engine, _vault, path, name=name or None, force=force,
+            _vault.cfg, _vault, path, name=name or None, force=force,
         )
     except ModuleNotFoundError as e:
         return json.dumps({"error": f"code-graph pipeline not installed: {e}. "

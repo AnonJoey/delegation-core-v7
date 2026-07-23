@@ -72,7 +72,7 @@ def main() -> int:
         os.write(lock_fd, str(os.getpid()).encode())
         os.close(lock_fd)
         result = asyncio.run(
-            graphbridge.build_graph(cfg, None, None, repo_root, name=name, force=True, file_to_vault=False)
+            graphbridge.build_graph(cfg, None, repo_root, name=name, force=True, file_to_vault=False)
         )
         if "error" in result:
             sys.stderr.write(f"graph_hook_rebuild: {result['error']}\n")

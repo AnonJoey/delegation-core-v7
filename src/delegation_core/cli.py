@@ -1,5 +1,5 @@
 """
-cli.py — delegation-core v0.4 command-line interface.
+cli.py — delegation-core v0.7.1 command-line interface.
 
 Commands:
   setup    Interactive setup wizard (run once per machine).
@@ -9,6 +9,18 @@ Commands:
   maintain Run inbox maintenance once and exit (used by the SessionStart hook).
   ingest   Index files from an external folder without moving them.
   relink   Add wikilinks to notes in a vault subfolder.
+  search   Query the vault (BGE similarity search, no LLM required).
+  compress Extract key facts/decisions/action items from text via llama.cpp.
+  note     write / read / update / list / find-similar — direct vault note access.
+  graph    build / list / report / affected / hook install|uninstall|status —
+           the vendored code-graph pipeline (opt-in [graph] extra).
+  process  create / list / update / get — cross-session process tracking.
+
+v0.7.1: added search/compress/note/graph/process — previously these were only
+reachable through an MCP client (Claude Desktop/Code); this repo already had a
+real, installed CLI (this file) but it only covered operational/maintenance
+commands, not the actual knowledge-work tools. This closes that gap so the
+vault and the code-graph pipeline are usable standalone from a terminal.
 """
 
 import argparse
@@ -17,6 +29,23 @@ import logging
 import sys
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
+
+
+def _read_content(file_arg: str | None, what: str = "content") -> str:
+    """Read text from --file if given, else stdin if piped, else error.
+
+    Mirrors common CLI UX (`cat file | tool` or `tool --file x`) rather than
+    requiring an inline positional argument, which gets unwieldy for anything
+    beyond a one-liner.
+    """
+    if file_arg:
+        return Path(file_arg).expanduser().read_text(encoding="utf-8")
+    if not sys.stdin.isatty():
+        data = sys.stdin.read()
+        if data.strip():
+            return data
+    sys.stderr.write(f"No {what} provided — pass --file PATH or pipe it via stdin.\n")
+    sys.exit(1)
 
 
 def cmd_setup(_args):
@@ -236,6 +265,408 @@ def cmd_relink(args):
             console.print(f"  [red]{e}[/red]")
 
 
+def cmd_search(args):
+    from rich.console import Console
+    from .config import Config
+    from .vault import VaultManager
+
+    console = Console()
+    cfg = Config.load()
+    if not cfg.is_configured():
+        console.print("[yellow]Not configured.[/yellow] Run: delegation-core setup")
+        return
+
+    vault = VaultManager(cfg)
+    hits = vault.search(args.query, limit=args.limit)
+    if hits and "error" in hits[0]:
+        console.print(f"[red]Error:[/red] {hits[0]['error']}")
+        return
+    if not hits:
+        console.print("[dim]No results above similarity threshold.[/dim]")
+        return
+
+    for h in hits:
+        console.print(f"[bold]{h['title']}[/bold]  [dim]({h['similarity']:.2f}) {h['path']}[/dim]")
+        console.print(f"  {h['snippet'][:240].strip()}")
+        console.print()
+
+
+def cmd_compress(args):
+    import asyncio
+    from rich.console import Console
+    from .config import Config
+    from .engine import DelegationEngine
+
+    console = Console()
+    cfg = Config.load()
+    if not cfg.is_configured():
+        console.print("[yellow]Not configured.[/yellow] Run: delegation-core setup")
+        return
+
+    raw = _read_content(args.file, "content to compress")
+    limit = 1500 if cfg.is_cpu_budget else 6000
+
+    async def _run():
+        engine = DelegationEngine(cfg)
+        try:
+            return await engine.invoke(
+                f"Extract only key facts, decisions, and action items. No preamble.\n"
+                f"Source: {args.source}\n\n{raw[:limit]}",
+                system="Compression Engine. Be extremely concise.",
+                max_tokens=engine.budget("compress", 1200),
+                temperature=0.2,
+                task="compress",
+            )
+        finally:
+            await engine.aclose()
+
+    result = asyncio.run(_run())
+    console.print(result)
+
+
+# ── note ─────────────────────────────────────────────────────────────────────
+
+def _inject_related_links(vault, note_path, rel_path: str, folder: str, stem: str) -> None:
+    """Best-effort forward wikilinks + backlinks after a direct CLI write, mirroring
+    server.py's _post_write_links() — BGE search only, no llama.cpp call needed."""
+    from .linker import inject_backlinks, wikilinks
+    try:
+        content = note_path.read_text(encoding="utf-8")
+        hits = [h for h in vault.search(content[:600], limit=6) if h.get("path") != rel_path][:5]
+        links = wikilinks(hits, vault.cfg.merge_threshold)
+        if links:
+            updated = content.rstrip() + f"\n\n## Related\n{links}\n"
+            note_path.write_text(updated, encoding="utf-8")
+            vault.index_note(updated, {"title": stem, "path": rel_path, "folder": folder})
+            inject_backlinks(vault, stem, [h["path"] for h in hits
+                                           if h.get("similarity", 0) >= vault.cfg.merge_threshold])
+    except Exception:
+        pass  # best-effort, matches server.py's tolerance for this step
+
+
+def cmd_note_write(args):
+    from datetime import datetime
+    from rich.console import Console
+    from .config import Config
+    from .vault import VaultManager, safe_filename, yaml_quote_scalar
+
+    console = Console()
+    cfg = Config.load()
+    if not cfg.is_configured():
+        console.print("[yellow]Not configured.[/yellow] Run: delegation-core setup")
+        return
+    if args.folder not in cfg.vault_folders:
+        console.print(f"[red]Invalid folder[/red] '{args.folder}'. Valid: {cfg.vault_folders}")
+        return
+
+    content = _read_content(args.file, "note content")
+    vault = VaultManager(cfg)
+    safe = safe_filename(args.title)
+    dest = cfg.vault / args.folder / f"{datetime.now().strftime('%Y-%m-%d')}-{safe}.md"
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    full = (
+        f"---\ntitle: {yaml_quote_scalar(args.title)}\ndate: {datetime.now().strftime('%Y-%m-%d')}\n"
+        f"ai_generated: false\n---\n\n{content}"
+    )
+    dest.write_text(full, encoding="utf-8")
+    rel = str(dest.relative_to(cfg.vault))
+    vault.index_note(full, {"title": args.title, "path": rel, "folder": args.folder})
+    _inject_related_links(vault, dest, rel, args.folder, dest.stem)
+    console.print(f"[green]✓[/green]  {rel}")
+
+
+def cmd_note_read(args):
+    from rich.console import Console
+    from .config import Config
+    from .vault import VaultManager
+
+    console = Console()
+    cfg = Config.load()
+    if not cfg.is_configured():
+        console.print("[yellow]Not configured.[/yellow] Run: delegation-core setup")
+        return
+    vault = VaultManager(cfg)
+    matches = vault.find_notes_by_stem(args.name)
+    if not matches:
+        console.print(f"[red]Not found:[/red] {args.name}")
+        return
+    console.print(matches[0].read_text(encoding="utf-8"))
+
+
+def cmd_note_update(args):
+    from rich.console import Console
+    from .config import Config
+    from .vault import VaultManager
+
+    console = Console()
+    cfg = Config.load()
+    if not cfg.is_configured():
+        console.print("[yellow]Not configured.[/yellow] Run: delegation-core setup")
+        return
+
+    content = _read_content(args.file, "content to append")
+    vault = VaultManager(cfg)
+    result = vault.update_note(args.name, content)
+    if "error" in result:
+        console.print(f"[red]Error:[/red] {result['error']}")
+        return
+    matches = vault.find_notes_by_stem(args.name)
+    if matches:
+        f = matches[0]
+        _inject_related_links(vault, f, result["path"], f.parent.name, f.stem)
+    console.print(f"[green]✓[/green]  appended {result['appended_chars']} chars to {result['path']}")
+
+
+def cmd_note_list(args):
+    from rich.console import Console
+    from .config import Config
+    from .vault import VaultManager
+
+    console = Console()
+    cfg = Config.load()
+    if not cfg.is_configured():
+        console.print("[yellow]Not configured.[/yellow] Run: delegation-core setup")
+        return
+    if args.folder not in cfg.vault_folders:
+        console.print(f"[red]Invalid folder[/red] '{args.folder}'. Valid: {cfg.vault_folders}")
+        return
+    vault = VaultManager(cfg)
+    notes = vault.list_notes(args.folder, limit=args.limit)
+    if not notes:
+        console.print("[dim]No notes.[/dim]")
+        return
+    for n in notes:
+        console.print(f"[bold]{n['title']}[/bold]  [dim]{n['date']}  {n['path']}[/dim]")
+
+
+def cmd_note_find_similar(args):
+    from rich.console import Console
+    from .config import Config
+    from .vault import VaultManager
+
+    console = Console()
+    cfg = Config.load()
+    if not cfg.is_configured():
+        console.print("[yellow]Not configured.[/yellow] Run: delegation-core setup")
+        return
+    vault = VaultManager(cfg)
+    results = vault.find_similar(args.name, threshold=args.threshold, limit=args.limit)
+    if not results:
+        console.print("[dim]No similar notes found.[/dim]")
+        return
+    for r in results:
+        console.print(f"[bold]{r['title']}[/bold]  [dim]({r['similarity']:.2f}) {r['path']}[/dim]")
+
+
+# ── graph ────────────────────────────────────────────────────────────────────
+
+def _graph_config():
+    from .config import Config
+    cfg = Config.load()
+    if not cfg.is_configured():
+        return None
+    return cfg
+
+
+def cmd_graph_build(args):
+    import asyncio
+    from rich.console import Console
+    from . import graphbridge
+    from .vault import VaultManager
+
+    console = Console()
+    cfg = _graph_config()
+    if cfg is None:
+        console.print("[yellow]Not configured.[/yellow] Run: delegation-core setup")
+        return
+
+    try:
+        vault = VaultManager(cfg)
+        result = asyncio.run(
+            graphbridge.build_graph(cfg, vault, args.path, name=args.name or None, force=args.force)
+        )
+    except ModuleNotFoundError as e:
+        console.print(f"[red]Code-graph pipeline not installed:[/red] {e}\n"
+                      'Run: pip install "delegation-core[graph]"')
+        return
+
+    if "error" in result:
+        console.print(f"[red]Error:[/red] {result['error']}")
+        return
+    console.print(f"[green]✓[/green]  '{result['name']}': {result.get('node_count', 0)} nodes, "
+                  f"{result.get('edge_count', 0)} edges, {result.get('community_count', 0)} communities")
+    if result.get("graph_html"):
+        console.print(f"  graph.html:    {result['graph_html']}")
+    if result.get("callflow_html"):
+        console.print(f"  callflow.html: {result['callflow_html']}")
+    if result.get("wiki_articles"):
+        console.print(f"  wiki articles: {result['wiki_articles']}")
+
+
+def cmd_graph_list(_args):
+    from rich.console import Console
+    from . import graphbridge
+
+    console = Console()
+    cfg = _graph_config()
+    if cfg is None:
+        console.print("[yellow]Not configured.[/yellow] Run: delegation-core setup")
+        return
+    result = graphbridge.list_graphs(cfg)
+    if not result["graphs"]:
+        console.print("[dim]No graphs built yet. Run: delegation-core graph build <path>[/dim]")
+        return
+    for name, info in result["graphs"].items():
+        console.print(f"[bold]{name}[/bold]  [dim]{info['source_path']}[/dim]")
+        console.print(f"  {info['node_count']} nodes, {info['edge_count']} edges, "
+                      f"{info['community_count']} communities — built {info['built_at']}")
+
+
+def cmd_graph_report(args):
+    from rich.console import Console
+    from . import graphbridge
+
+    console = Console()
+    cfg = _graph_config()
+    if cfg is None:
+        console.print("[yellow]Not configured.[/yellow] Run: delegation-core setup")
+        return
+    result = graphbridge.get_report(cfg, args.name)
+    if "error" in result:
+        console.print(f"[red]Error:[/red] {result['error']}")
+        return
+    console.print(result["report"])
+
+
+def cmd_graph_affected(args):
+    from rich.console import Console
+    from . import graphbridge
+
+    console = Console()
+    cfg = _graph_config()
+    if cfg is None:
+        console.print("[yellow]Not configured.[/yellow] Run: delegation-core setup")
+        return
+    try:
+        result = graphbridge.get_affected(cfg, args.name, args.query, depth=args.depth)
+    except ModuleNotFoundError as e:
+        console.print(f"[red]Code-graph pipeline not installed:[/red] {e}")
+        return
+    if "error" in result:
+        console.print(f"[red]Error:[/red] {result['error']}")
+        return
+    console.print(result["report"])
+
+
+def cmd_graph_hook_install(args):
+    from rich.console import Console
+    from . import graph_hook
+
+    console = Console()
+    result = graph_hook.install(args.path, name=args.name or None)
+    if "error" in result:
+        console.print(f"[red]Error:[/red] {result['error']}")
+        return
+    console.print(f"[green]✓[/green]  {result['status']}  {result.get('path', '')}")
+
+
+def cmd_graph_hook_uninstall(args):
+    from rich.console import Console
+    from . import graph_hook
+
+    console = Console()
+    result = graph_hook.uninstall(args.path)
+    if "error" in result:
+        console.print(f"[red]Error:[/red] {result['error']}")
+        return
+    console.print(f"[green]✓[/green]  {result['status']}")
+
+
+def cmd_graph_hook_status(args):
+    from rich.console import Console
+    from . import graph_hook
+
+    console = Console()
+    result = graph_hook.status(args.path)
+    if "error" in result:
+        console.print(f"[red]Error:[/red] {result['error']}")
+        return
+    state = "[green]installed[/green]" if result.get("installed") else "[dim]not installed[/dim]"
+    console.print(state)
+
+
+# ── process ──────────────────────────────────────────────────────────────────
+
+def _process_tracker():
+    from .config import Config
+    from .tracker import ProcessTracker
+    cfg = Config.load()
+    if not cfg.is_configured():
+        return None
+    return ProcessTracker(cfg.processes_path)
+
+
+def cmd_process_create(args):
+    from rich.console import Console
+    console = Console()
+    tracker = _process_tracker()
+    if tracker is None:
+        console.print("[yellow]Not configured.[/yellow] Run: delegation-core setup")
+        return
+    steps = [s.strip() for s in args.steps.split(",") if s.strip()] if args.steps else []
+    proc = tracker.create(name=args.name, description=args.description or "", steps=steps)
+    console.print(f"[green]✓[/green]  {proc['id']}  {proc['name']}")
+
+
+def cmd_process_list(args):
+    from rich.console import Console
+    console = Console()
+    tracker = _process_tracker()
+    if tracker is None:
+        console.print("[yellow]Not configured.[/yellow] Run: delegation-core setup")
+        return
+    processes = tracker.list_processes(status=args.status, query=args.query or "")
+    if not processes:
+        console.print("[dim]No processes.[/dim]")
+        return
+    for p in processes:
+        done = sum(s["done"] for s in p["steps"]) if p["steps"] else 0
+        total = len(p["steps"])
+        console.print(f"[bold]{p['id']}[/bold]  {p['name']}  [dim]({done}/{total} — {p['status']})[/dim]")
+
+
+def cmd_process_update(args):
+    from rich.console import Console
+    console = Console()
+    tracker = _process_tracker()
+    if tracker is None:
+        console.print("[yellow]Not configured.[/yellow] Run: delegation-core setup")
+        return
+    proc = tracker.update(
+        process_id=args.process_id, note=args.note or "",
+        step_done=args.step_done if args.step_done is not None else -1,
+        status=args.status or "",
+    )
+    if proc is None:
+        console.print(f"[red]Not found:[/red] {args.process_id}")
+        return
+    console.print(f"[green]✓[/green]  {proc['id']} updated")
+
+
+def cmd_process_get(args):
+    from rich.console import Console
+    console = Console()
+    tracker = _process_tracker()
+    if tracker is None:
+        console.print("[yellow]Not configured.[/yellow] Run: delegation-core setup")
+        return
+    proc = tracker.get(args.process_id)
+    if proc is None:
+        console.print(f"[red]Not found:[/red] {args.process_id}")
+        return
+    console.print(json.dumps(proc, indent=2))
+
+
 def main():
     parser = argparse.ArgumentParser(
         prog="delegation-core",
@@ -266,6 +697,93 @@ def main():
     p_relink.add_argument("--max-links",      dest="max_links",      type=int, default=8,
                           help="Maximum wikilinks per note (default 8)")
 
+    p_search = sub.add_parser("search", help="Query the vault (BGE similarity search, no LLM required)")
+    p_search.add_argument("query")
+    p_search.add_argument("--limit", type=int, default=5)
+
+    p_compress = sub.add_parser("compress", help="Extract key facts/decisions/action items from text via llama.cpp")
+    p_compress.add_argument("source", help="Short label for what this text is (e.g. a filename or 'email thread')")
+    p_compress.add_argument("--file", default=None, help="Read content from this file instead of stdin")
+
+    # ── note ─────────────────────────────────────────────────────────────────
+    p_note = sub.add_parser("note", help="Direct vault note access: write/read/update/list/find-similar")
+    note_sub = p_note.add_subparsers(dest="note_command", metavar="note-command")
+
+    p_note_write = note_sub.add_parser("write", help="Write a new note")
+    p_note_write.add_argument("folder", help="Vault folder (see: delegation-core status)")
+    p_note_write.add_argument("title")
+    p_note_write.add_argument("--file", default=None, help="Read content from this file instead of stdin")
+
+    p_note_read = note_sub.add_parser("read", help="Print a note's full content")
+    p_note_read.add_argument("name", help="Filename stem, partial match")
+
+    p_note_update = note_sub.add_parser("update", help="Append content to an existing note")
+    p_note_update.add_argument("name", help="Filename stem, partial match")
+    p_note_update.add_argument("--file", default=None, help="Read content from this file instead of stdin")
+
+    p_note_list = note_sub.add_parser("list", help="List notes in a folder, newest first")
+    p_note_list.add_argument("folder")
+    p_note_list.add_argument("--limit", type=int, default=20)
+
+    p_note_sim = note_sub.add_parser("find-similar", help="Find notes semantically similar to a given note")
+    p_note_sim.add_argument("name")
+    p_note_sim.add_argument("--threshold", type=float, default=0.80)
+    p_note_sim.add_argument("--limit", type=int, default=5)
+
+    # ── graph ────────────────────────────────────────────────────────────────
+    p_graph = sub.add_parser("graph", help="Code-graph pipeline: build/list/report/affected/hook (needs [graph] extra)")
+    graph_sub = p_graph.add_subparsers(dest="graph_command", metavar="graph-command")
+
+    p_graph_build = graph_sub.add_parser("build", help="Build a code graph for a local directory")
+    p_graph_build.add_argument("path")
+    p_graph_build.add_argument("--name", default="", help="Graph name (default: directory basename)")
+    p_graph_build.add_argument("--force", action="store_true", help="Rebuild even if already built")
+
+    graph_sub.add_parser("list", help="List previously built graphs")
+
+    p_graph_report = graph_sub.add_parser("report", help="Print a graph's full GRAPH_REPORT.md")
+    p_graph_report.add_argument("name")
+
+    p_graph_affected = graph_sub.add_parser("affected", help="Blast-radius query: what's affected if X changes")
+    p_graph_affected.add_argument("name", help="Graph name (see: delegation-core graph list)")
+    p_graph_affected.add_argument("query", help="A file path or symbol label, e.g. auth.py or AuthService.login")
+    p_graph_affected.add_argument("--depth", type=int, default=2)
+
+    p_graph_hook = graph_sub.add_parser("hook", help="Git post-commit hook: auto-rebuild a graph after every commit")
+    hook_sub = p_graph_hook.add_subparsers(dest="hook_command", metavar="hook-command")
+
+    p_hook_install = hook_sub.add_parser("install", help="Install the post-commit hook")
+    p_hook_install.add_argument("path", nargs="?", default=".", help="Path inside the git repo (default: cwd)")
+    p_hook_install.add_argument("--name", default="", help="Graph name (default: repo directory basename)")
+
+    p_hook_uninstall = hook_sub.add_parser("uninstall", help="Remove the post-commit hook")
+    p_hook_uninstall.add_argument("path", nargs="?", default=".")
+
+    p_hook_status = hook_sub.add_parser("status", help="Check whether the hook is installed")
+    p_hook_status.add_argument("path", nargs="?", default=".")
+
+    # ── process ──────────────────────────────────────────────────────────────
+    p_process = sub.add_parser("process", help="Cross-session process tracking: create/list/update/get")
+    process_sub = p_process.add_subparsers(dest="process_command", metavar="process-command")
+
+    p_proc_create = process_sub.add_parser("create", help="Start tracking a new process")
+    p_proc_create.add_argument("name")
+    p_proc_create.add_argument("--description", default="")
+    p_proc_create.add_argument("--steps", default="", help="Comma-separated step descriptions")
+
+    p_proc_list = process_sub.add_parser("list", help="List tracked processes")
+    p_proc_list.add_argument("--status", default="active", help="active|paused|done|cancelled|all")
+    p_proc_list.add_argument("--query", default="")
+
+    p_proc_update = process_sub.add_parser("update", help="Update a tracked process")
+    p_proc_update.add_argument("process_id")
+    p_proc_update.add_argument("--note", default="")
+    p_proc_update.add_argument("--step-done", dest="step_done", type=int, default=None)
+    p_proc_update.add_argument("--status", default="")
+
+    p_proc_get = process_sub.add_parser("get", help="Full detail view of a tracked process")
+    p_proc_get.add_argument("process_id")
+
     args = parser.parse_args()
 
     dispatch = {
@@ -276,9 +794,59 @@ def main():
         "maintain": cmd_maintain,
         "ingest":   cmd_ingest,
         "relink":   cmd_relink,
+        "search":   cmd_search,
+        "compress": cmd_compress,
     }
 
-    if args.command in dispatch:
+    note_dispatch = {
+        "write":        cmd_note_write,
+        "read":         cmd_note_read,
+        "update":       cmd_note_update,
+        "list":         cmd_note_list,
+        "find-similar": cmd_note_find_similar,
+    }
+
+    graph_dispatch = {
+        "build":    cmd_graph_build,
+        "list":     cmd_graph_list,
+        "report":   cmd_graph_report,
+        "affected": cmd_graph_affected,
+    }
+
+    graph_hook_dispatch = {
+        "install":   cmd_graph_hook_install,
+        "uninstall": cmd_graph_hook_uninstall,
+        "status":    cmd_graph_hook_status,
+    }
+
+    process_dispatch = {
+        "create": cmd_process_create,
+        "list":   cmd_process_list,
+        "update": cmd_process_update,
+        "get":    cmd_process_get,
+    }
+
+    if args.command == "note":
+        if args.note_command in note_dispatch:
+            note_dispatch[args.note_command](args)
+        else:
+            p_note.print_help()
+    elif args.command == "graph":
+        if args.graph_command == "hook":
+            if args.hook_command in graph_hook_dispatch:
+                graph_hook_dispatch[args.hook_command](args)
+            else:
+                p_graph_hook.print_help()
+        elif args.graph_command in graph_dispatch:
+            graph_dispatch[args.graph_command](args)
+        else:
+            p_graph.print_help()
+    elif args.command == "process":
+        if args.process_command in process_dispatch:
+            process_dispatch[args.process_command](args)
+        else:
+            p_process.print_help()
+    elif args.command in dispatch:
         dispatch[args.command](args)
     else:
         parser.print_help()
