@@ -44,6 +44,32 @@ except Exception:
 " 2>/dev/null || true)
 fi
 
+# ── Hard safety check: if the vault itself resolves to $CFG_DIR or somewhere
+# inside it (e.g. a user who typed "~/.delegation_core" or a subfolder of it
+# as their vault path during setup), none of the targeted removals below are
+# safe — several of them (sessions/, config.json, etc.) are named exactly like
+# things a real vault could contain. Refuse to run rather than risk it. ──────
+if [ -n "$VAULT_PATH" ]; then
+    VAULT_UNDER_CFG=$(python3 -c "
+import os
+v = os.path.realpath(os.path.expanduser('$VAULT_PATH'))
+c = os.path.realpath(os.path.expanduser('$CFG_DIR'))
+print('1' if (v == c or v.startswith(c + os.sep)) else '')
+" 2>/dev/null || true)
+    if [ -n "$VAULT_UNDER_CFG" ]; then
+        echo "ERROR: your configured vault path is $VAULT_PATH,"
+        echo "which is the same as (or lives inside) $CFG_DIR."
+        echo ""
+        echo "This uninstaller removes several specifically-named items inside"
+        echo "$CFG_DIR (sessions/, config.json, graphs/, ...) — if the vault lives"
+        echo "there too, that removal could delete real vault content."
+        echo ""
+        echo "Move your vault outside of $CFG_DIR (and update vault_path in"
+        echo "config.json) before uninstalling, or remove things manually."
+        exit 1
+    fi
+fi
+
 # ── Detect an installed dashboard app ────────────────────────────────────────
 DASH_INSTALLED=""
 if command -v dpkg &>/dev/null && dpkg -s "$DASH_PKG" &>/dev/null 2>&1; then
@@ -121,9 +147,13 @@ echo "  ✓ Done."
 # ── Remove the installed dashboard app ───────────────────────────────────────
 if [ -n "$DASH_INSTALLED" ]; then
     echo "Removing dashboard app ($DASH_INSTALLED)..."
+    # `|| true` on the package-manager calls: this script runs under `set -e`,
+    # and a dpkg/rpm removal failure (e.g. dependency conflict, lock held by
+    # another process) must not abort the rest of the uninstall — the venv,
+    # config, and state cleanup below still needs to run.
     case "$DASH_INSTALLED" in
-        deb) sudo dpkg -r "$DASH_PKG" ;;
-        rpm) sudo rpm -e "$DASH_PKG" ;;
+        deb) sudo dpkg -r "$DASH_PKG" || echo "  ⚠  Failed to remove $DASH_PKG via dpkg — remove manually if needed." ;;
+        rpm) sudo rpm -e "$DASH_PKG" || echo "  ⚠  Failed to remove $DASH_PKG via rpm — remove manually if needed." ;;
         appimage)
             rm -f "$CFG_DIR/app/delegation-core-dashboard.AppImage"
             rm -f "$HOME/.local/share/applications/delegation-core-dashboard.desktop"

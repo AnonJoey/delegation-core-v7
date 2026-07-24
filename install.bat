@@ -60,7 +60,12 @@ if not defined PYTHON (
     exit /b 1
 )
 
-for /f "delims=" %%v in ('%PYTHON% -c "import sys; print(f\"{sys.version_info.major}.{sys.version_info.minor}\")"') do set "PY_VER=%%v"
+rem Avoid nested double quotes inside the -c argument: cmd's own command-line
+rem tokenizer (this runs through cmd /c to capture output) doesn't treat \"
+rem as an escaped quote the way it looks like it should, so an f-string with
+rem embedded double quotes here can arrive at Python mangled. Single quotes
+rem inside a double-quoted -c argument avoid the ambiguity entirely.
+for /f "delims=" %%v in ('%PYTHON% -c "import sys; print(str(sys.version_info.major) + '.' + str(sys.version_info.minor))"') do set "PY_VER=%%v"
 echo    OK: Python !PY_VER!  ^(!PYTHON!^)
 echo.
 
@@ -158,6 +163,26 @@ set "DASH_BUNDLE_DIR=%SCRIPT_DIR%\dashboard\src-tauri\target\release\bundle"
 set "MSI_FILE="
 set "NSIS_FILE="
 
+:: Determine the repo slug for the `gh release download` fallback below.
+:: Prefer the "fork" remote — the actively-published repo on this checkout —
+:: over "origin", which may point at an older/renamed repo and would make the
+:: release lookup silently search the wrong place.
+set "REPO_SLUG="
+set "REMOTE_URL="
+for %%R in (fork origin) do (
+    if not defined REPO_SLUG (
+        for /f "delims=" %%U in ('git -C "%SCRIPT_DIR%" remote get-url %%R 2^>nul') do set "REMOTE_URL=%%U"
+        if defined REMOTE_URL (
+            set "_slug=!REMOTE_URL:https://github.com/=!"
+            set "_slug=!_slug:git@github.com:=!"
+            set "_slug=!_slug:.git=!"
+            if not "!_slug!"=="!REMOTE_URL!" set "REPO_SLUG=!_slug!"
+        )
+        set "REMOTE_URL="
+    )
+)
+if not defined REPO_SLUG set "REPO_SLUG=AnonJoey/delegation-core-v7"
+
 if exist "%DASH_BUNDLE_DIR%\msi\*.msi" (
     for %%F in ("%DASH_BUNDLE_DIR%\msi\*.msi") do if not defined MSI_FILE set "MSI_FILE=%%F"
 )
@@ -172,11 +197,11 @@ if not defined MSI_FILE if not defined NSIS_FILE (
         set "DASH_TMP=%TEMP%\delegation_core_dashboard_dl"
         rmdir /S /Q "!DASH_TMP!" >nul 2>&1
         mkdir "!DASH_TMP!" >nul 2>&1
-        gh release download --repo AnonJoey/delegation-core-v6.4 --pattern "*.msi" --dir "!DASH_TMP!" >nul 2>&1
+        gh release download --repo %REPO_SLUG% --pattern "*.msi" --dir "!DASH_TMP!" >nul 2>&1
         if exist "!DASH_TMP!\*.msi" (
             for %%F in ("!DASH_TMP!\*.msi") do if not defined MSI_FILE set "MSI_FILE=%%F"
         ) else (
-            gh release download --repo AnonJoey/delegation-core-v6.4 --pattern "*.exe" --dir "!DASH_TMP!" >nul 2>&1
+            gh release download --repo %REPO_SLUG% --pattern "*.exe" --dir "!DASH_TMP!" >nul 2>&1
             for %%F in ("!DASH_TMP!\*.exe") do if not defined NSIS_FILE set "NSIS_FILE=%%F"
         )
     )
@@ -185,11 +210,21 @@ if not defined MSI_FILE if not defined NSIS_FILE (
 if defined MSI_FILE (
     echo    Installing !MSI_FILE! ...
     msiexec /i "!MSI_FILE!" /qb
-    echo    OK - find "delegation-core Dashboard" in your Start Menu.
+    if errorlevel 1 (
+        echo    WARNING: msiexec reported an error installing the dashboard.
+        echo    Try running it manually: msiexec /i "!MSI_FILE!"
+    ) else (
+        echo    OK - find "delegation-core Dashboard" in your Start Menu.
+    )
 ) else if defined NSIS_FILE (
     echo    Installing !NSIS_FILE! ...
     "!NSIS_FILE!" /S
-    echo    OK - find "delegation-core Dashboard" in your Start Menu.
+    if errorlevel 1 (
+        echo    WARNING: the dashboard installer reported an error.
+        echo    Try running it manually: "!NSIS_FILE!"
+    ) else (
+        echo    OK - find "delegation-core Dashboard" in your Start Menu.
+    )
 ) else (
     echo    No dashboard build found locally or on GitHub releases.
     echo    Build it manually:  cd dashboard ^&^& npm install ^&^& npm run tauri build

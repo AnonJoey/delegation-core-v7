@@ -225,14 +225,26 @@ def _step_vault() -> tuple[Path, list[str]]:
     if choice < len(vaults):
         vault_path = vaults[choice]
     elif choice == len(vaults):
-        raw = console.input("\n  Path to vault: ").strip()
-        vault_path = Path(raw).expanduser()
-        vault_path.mkdir(parents=True, exist_ok=True)
+        while True:
+            raw = console.input("\n  Path to vault: ").strip()
+            candidate = Path(raw).expanduser()
+            if _conflicts_with_config_dir(candidate):
+                _warn_config_dir_conflict(candidate)
+                continue
+            vault_path = candidate
+            vault_path.mkdir(parents=True, exist_ok=True)
+            break
     else:
-        raw = console.input("\n  New vault location (e.g. ~/Documents/MyVault): ").strip()
-        vault_path = Path(raw).expanduser()
-        vault_path.mkdir(parents=True, exist_ok=True)
-        console.print(f"  [green]Created:[/green] {vault_path}")
+        while True:
+            raw = console.input("\n  New vault location (e.g. ~/Documents/MyVault): ").strip()
+            candidate = Path(raw).expanduser()
+            if _conflicts_with_config_dir(candidate):
+                _warn_config_dir_conflict(candidate)
+                continue
+            vault_path = candidate
+            vault_path.mkdir(parents=True, exist_ok=True)
+            console.print(f"  [green]Created:[/green] {vault_path}")
+            break
 
     # Detect or create folders
     if vault_path.exists():
@@ -261,6 +273,31 @@ def _step_vault() -> tuple[Path, list[str]]:
 
     console.print(f"\n  [green]✓[/green] Vault ready: {vault_path}\n")
     return vault_path, folders
+
+
+def _conflicts_with_config_dir(path: Path) -> bool:
+    """True if `path` is delegation-core's own CONFIG_DIR, or lives inside it.
+
+    uninstall.sh / uninstall.bat remove a fixed list of CONFIG_DIR subpaths by
+    name (sessions/, config.json, graphs/, ...) without ever touching the
+    configured vault_path directly. That guarantee only holds if the vault
+    itself is never placed at/under CONFIG_DIR in the first place — otherwise
+    a targeted removal could coincidentally delete real vault content that
+    happens to share one of those names. Reject the path here instead.
+    """
+    try:
+        resolved = path.resolve()
+        cfg = CONFIG_DIR.resolve()
+    except OSError:
+        return False
+    return resolved == cfg or cfg in resolved.parents
+
+
+def _warn_config_dir_conflict(path: Path):
+    console.print(f"  [red]That path is delegation-core's own config directory "
+                  f"({CONFIG_DIR}), or is inside it.[/red]")
+    console.print("  [red]Choose a location outside of it — uninstalling could "
+                  "otherwise delete vault content.[/red]\n")
 
 
 def _step_engine_mode() -> str:
@@ -467,8 +504,12 @@ def _startup_systemd(cfg: Config):
         "After=graphical-session.target\n\n"
         "[Service]\n"
         "Type=simple\n"
-        f"ExecStart={cfg.llama_binary}"
-        f" --model {cfg.llama_model}"
+        # ExecStart= uses systemd's own shell-like word splitting on
+        # whitespace — paths must be quoted or a space anywhere in the home
+        # directory, models dir, or binary path (all user-controlled) splits
+        # into the wrong number of arguments.
+        f'ExecStart="{cfg.llama_binary}"'
+        f' --model "{cfg.llama_model}"'
         f" --port {cfg.llama_port}"
         f" --ctx-size {cfg.llama_ctx}"
         f" --n-gpu-layers {cfg.llama_ngl}\n"

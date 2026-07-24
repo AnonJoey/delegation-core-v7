@@ -33,6 +33,30 @@ if exist "%CFG_DIR%\config.json" (
     for /f "delims=" %%V in ('python -c "import json;print(json.load(open(r'%CFG_DIR%\config.json')).get('vault_path',''))" 2^>nul') do set "VAULT_PATH=%%V"
 )
 
+:: ── Hard safety check: if the vault itself resolves to %CFG_DIR% or somewhere
+:: inside it (e.g. a user who typed "%%USERPROFILE%%\.delegation_core" or a
+:: subfolder of it as their vault path during setup), the targeted removals
+:: below are not safe — several of them (sessions\, config.json, etc.) are
+:: named exactly like things a real vault could contain. Refuse rather than
+:: risk it. ────────────────────────────────────────────────────────────────
+if defined VAULT_PATH (
+    set "VAULT_UNDER_CFG="
+    for /f "delims=" %%X in ('python -c "import os; v=os.path.realpath(os.path.expanduser(r'%VAULT_PATH%')); c=os.path.realpath(os.path.expanduser(r'%CFG_DIR%')); print('1' if (v==c or v.startswith(c+os.sep)) else '')" 2^>nul') do set "VAULT_UNDER_CFG=%%X"
+    if defined VAULT_UNDER_CFG (
+        echo ERROR: your configured vault path is %VAULT_PATH%,
+        echo which is the same as ^(or lives inside^) %CFG_DIR%.
+        echo.
+        echo This uninstaller removes several specifically-named items inside
+        echo %CFG_DIR% ^(sessions\, config.json, graphs\, ...^) - if the vault
+        echo lives there too, that removal could delete real vault content.
+        echo.
+        echo Move your vault outside of %CFG_DIR% ^(and update vault_path in
+        echo config.json^) before uninstalling, or remove things manually.
+        pause
+        exit /b 1
+    )
+)
+
 :: ── Detect an installed dashboard app (Start Menu shortcut is the reliable
 :: signal on Windows; MSI/NSIS installers don't leave a simple registry name
 :: this script can query without extra tooling). ─────────────────────────────

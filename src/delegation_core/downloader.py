@@ -87,8 +87,19 @@ def download_model(model: dict, models_dir: Path) -> Path | None:
         console.print(f"  [green]Already downloaded:[/green] {dest.name}")
         return dest
     models_dir.mkdir(parents=True, exist_ok=True)
-    ok = _download_file(model["url"], dest, f"Downloading {model['name']}")
-    return dest if ok else None
+    # Download to a *.part sibling and only rename onto `dest` once the
+    # transfer completes successfully. If the process is killed mid-download
+    # (crash, OOM, lid closed) rather than raising a catchable exception,
+    # writing straight to `dest` would leave a truncated GGUF file that the
+    # `dest.exists()` check above would treat as a fully valid model on the
+    # next run. A partial file at a different, non-matching name can never
+    # be mistaken for a complete download.
+    partial = dest.with_name(dest.name + ".part")
+    ok = _download_file(model["url"], partial, f"Downloading {model['name']}")
+    if not ok:
+        return None
+    partial.rename(dest)
+    return dest
 
 
 def download_llama_binary(llama_dir: Path) -> Path | None:
@@ -114,18 +125,28 @@ def download_llama_binary(llama_dir: Path) -> Path | None:
     with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as tmp:
         tmp_path = Path(tmp.name)
 
+    # Extract into a scratch staging dir first, not llama_dir directly. If the
+    # process is killed mid-extraction (crash, power loss), llama_dir must not
+    # end up containing the main binary alongside missing/truncated sibling
+    # .so/.dll files — find_llama_binary() only checks whether the binary
+    # itself exists, so a partial extraction there would be picked up on the
+    # next run as if it were a complete, working install. Only merge into
+    # llama_dir once every file has been extracted and the binary verified
+    # present in the staging dir.
+    llama_dir.mkdir(parents=True, exist_ok=True)
+    stage_dir = Path(tempfile.mkdtemp(prefix="llama_dl_", dir=str(llama_dir.parent)))
+
     try:
         if not _download_file(url, tmp_path, "Downloading llama.cpp"):
             return None
 
-        llama_dir.mkdir(parents=True, exist_ok=True)
         # llama-server.exe / llama-server is a thin binary dynamically linked
         # against ~10-50 sibling .dll/.so files in the same archive
         # (llama-server-impl, ggml-*, llama-common, per-CPU-microarch ggml-cpu-*,
         # etc.) — extracting only the named binary produces a file that exists
         # but can't launch (missing shared library). Extract the whole archive
         # instead, flattening the release's single top-level folder (e.g.
-        # "llama-b9941/") so everything lands directly in llama_dir.
+        # "llama-b9941/") so everything lands directly in the staging dir.
         if is_targz:
             with tarfile.open(tmp_path, "r:gz") as t:
                 # Include symlinks (m.issym()), not just regular files: the
@@ -148,7 +169,7 @@ def download_llama_binary(llama_dir: Path) -> Path | None:
                     rel = m.name[len(prefix):] if prefix else m.name
                     if not rel:
                         continue
-                    out_path = llama_dir / rel
+                    out_path = stage_dir / rel
                     out_path.parent.mkdir(parents=True, exist_ok=True)
                     if m.issym():
                         out_path.unlink(missing_ok=True)
@@ -171,20 +192,37 @@ def download_llama_binary(llama_dir: Path) -> Path | None:
                     rel = m.filename[len(prefix):] if prefix else m.filename
                     if not rel:
                         continue
-                    out_path = llama_dir / rel
+                    out_path = stage_dir / rel
                     out_path.parent.mkdir(parents=True, exist_ok=True)
                     with z.open(m) as src, open(out_path, "wb") as out:
                         shutil.copyfileobj(src, out)
 
+        staged_binary = stage_dir / binary_name
+        if not staged_binary.exists():
+            console.print(f"[red]  Extraction completed but {binary_name} is missing from the archive.[/red]")
+            return None
+        if system != "Windows":
+            staged_binary.chmod(0o755)
+
+        # Everything extracted successfully — merge the staging dir's contents
+        # into llama_dir, overwriting any stale/partial files from a prior
+        # interrupted attempt.
+        for item in stage_dir.iterdir():
+            target = llama_dir / item.name
+            if target.is_dir() and not target.is_symlink():
+                shutil.rmtree(target, ignore_errors=True)
+            else:
+                target.unlink(missing_ok=True)
+            shutil.move(str(item), str(target))
+
         if not dest.exists():
             console.print(f"[red]  Extraction completed but {binary_name} is missing from {llama_dir}.[/red]")
             return None
-        if system != "Windows":
-            dest.chmod(0o755)
         return dest
 
     finally:
         tmp_path.unlink(missing_ok=True)
+        shutil.rmtree(stage_dir, ignore_errors=True)
 
 
 def _common_dir_prefix(names: list[str]) -> str:
@@ -222,6 +260,7 @@ def _download_file(url: str, dest: Path, label: str) -> bool:
         with requests.get(url, stream=True, timeout=60) as r:
             r.raise_for_status()
             total = int(r.headers.get("content-length", 0))
+            written = 0
             with Progress(
                 SpinnerColumn(),
                 "[progress.description]{task.description}",
@@ -235,7 +274,17 @@ def _download_file(url: str, dest: Path, label: str) -> bool:
                 with open(dest, "wb") as f:
                     for chunk in r.iter_content(chunk_size=65536):
                         f.write(chunk)
+                        written += len(chunk)
                         progress.advance(task, len(chunk))
+        # A server/proxy that closes the connection cleanly but early won't
+        # always surface as an exception from iter_content — verify the byte
+        # count against Content-Length (when the server sent one) so a
+        # silently truncated response is treated as a failure, not a valid
+        # model/binary.
+        if total and written != total:
+            console.print(f"  [red]Download incomplete:[/red] got {written} of {total} bytes.")
+            dest.unlink(missing_ok=True)
+            return False
         return True
     except Exception as e:
         console.print(f"  [red]Download failed:[/red] {e}")

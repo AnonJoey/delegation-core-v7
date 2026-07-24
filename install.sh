@@ -193,12 +193,19 @@ DASH_BUNDLE_DIR="$SCRIPT_DIR/dashboard/src-tauri/target/release/bundle"
 
 _repo_slug() {
     local url
-    url=$(git -C "$SCRIPT_DIR" remote get-url origin 2>/dev/null || true)
-    if [[ "$url" =~ github\.com[:/]([^/]+/[^/.]+)(\.git)?$ ]]; then
-        echo "${BASH_REMATCH[1]}"
-    else
-        echo "AnonJoey/delegation-core-v6.4"
-    fi
+    # Prefer the "fork" remote — on this checkout it's the active repo that
+    # actually publishes releases; "origin" (if present at all) may point at
+    # an older/renamed repo and would make the `gh release download` fallback
+    # below silently look in the wrong place. Fall back to origin, then a
+    # hardcoded default, if "fork" isn't configured.
+    for remote in fork origin; do
+        url=$(git -C "$SCRIPT_DIR" remote get-url "$remote" 2>/dev/null || true)
+        if [[ "$url" =~ github\.com[:/]([^/]+/[^/.]+)(\.git)?$ ]]; then
+            echo "${BASH_REMATCH[1]}"
+            return
+        fi
+    done
+    echo "AnonJoey/delegation-core-v7"
 }
 
 _no_dashboard_found() {
@@ -229,12 +236,21 @@ _install_dashboard_linux() {
 
     if [ -n "$deb" ] && command -v dpkg &>/dev/null; then
         echo "  Installing $(basename "$deb") via dpkg (requires sudo)..."
-        sudo dpkg -i "$deb" || sudo apt-get install -f -y
-        echo "  ✓ Dashboard installed — find \"delegation-core Dashboard\" in your applications menu."
+        # Never let a dashboard packaging failure take down the whole install
+        # (script runs under `set -e`) — the Python/MCP side above is what
+        # matters most; report a clear warning instead of aborting.
+        if sudo dpkg -i "$deb" || sudo apt-get install -f -y; then
+            echo "  ✓ Dashboard installed — find \"delegation-core Dashboard\" in your applications menu."
+        else
+            echo "  ⚠  Dashboard install failed — try manually: sudo dpkg -i \"$deb\""
+        fi
     elif [ -n "$rpm" ] && command -v rpm &>/dev/null; then
         echo "  Installing $(basename "$rpm") (requires sudo)..."
-        sudo rpm -i "$rpm" 2>/dev/null || sudo dnf install -y "$rpm"
-        echo "  ✓ Dashboard installed — find \"delegation-core Dashboard\" in your applications menu."
+        if sudo rpm -i "$rpm" 2>/dev/null || sudo dnf install -y "$rpm"; then
+            echo "  ✓ Dashboard installed — find \"delegation-core Dashboard\" in your applications menu."
+        else
+            echo "  ⚠  Dashboard install failed — try manually: sudo rpm -i \"$rpm\""
+        fi
     elif [ -n "$appimage" ]; then
         mkdir -p "$HOME/.local/share/applications" "$HOME/.delegation_core/app"
         local dest="$HOME/.delegation_core/app/delegation-core-dashboard.AppImage"
@@ -266,12 +282,22 @@ _install_dashboard_macos() {
     if [ -n "$dmg" ]; then
         echo "  Mounting $(basename "$dmg")..."
         mnt=$(hdiutil attach "$dmg" -nobrowse -readonly | tail -1 | awk '{print $NF}')
-        app=$(compgen -G "$mnt/*.app" 2>/dev/null | head -1 || true)
-        if [ -n "$app" ]; then
-            cp -R "$app" /Applications/
-            echo "  ✓ Installed to /Applications/$(basename "$app")"
+        # Guard against a failed/garbled `hdiutil attach` (its exit code is lost
+        # in the pipeline above): if $mnt ends up empty, "$mnt/*.app" collapses
+        # to "/*.app" and would glob-match unrelated .app bundles at the
+        # filesystem root, which the next step would then copy into
+        # /Applications. Require a real mounted directory first.
+        if [ -n "$mnt" ] && [ -d "$mnt" ]; then
+            app=$(compgen -G "$mnt/*.app" 2>/dev/null | head -1 || true)
+            if [ -n "$app" ]; then
+                cp -R "$app" /Applications/
+                echo "  ✓ Installed to /Applications/$(basename "$app")"
+            fi
+            hdiutil detach "$mnt" -quiet 2>/dev/null || true
+        else
+            echo "  ⚠  Could not mount $(basename "$dmg")."
+            _no_dashboard_found
         fi
-        hdiutil detach "$mnt" -quiet 2>/dev/null || true
     else
         _no_dashboard_found
     fi
