@@ -256,14 +256,38 @@ _install_dashboard_linux() {
         local dest="$HOME/.delegation_core/app/delegation-core-dashboard.AppImage"
         cp -f "$appimage" "$dest"
         chmod +x "$dest"
+
+        # Install the real app icon into the standard XDG hicolor theme dirs
+        # so the desktop entry below can reference it by name (Icon=<name>,
+        # resolved by every desktop environment's icon theme lookup) instead
+        # of falling back to a generic placeholder — this only works from a
+        # source checkout that still has dashboard/src-tauri/icons/ next to
+        # it; harmless no-op (falls back to the placeholder) if run from a
+        # stripped-down distribution that doesn't include those source assets.
+        local icon_src="$SCRIPT_DIR/dashboard/src-tauri/icons"
+        local icon_name="utilities-terminal"  # fallback if the source icons aren't present
+        if [ -f "$icon_src/128x128.png" ]; then
+            mkdir -p "$HOME/.local/share/icons/hicolor/128x128/apps" \
+                     "$HOME/.local/share/icons/hicolor/32x32/apps"
+            cp -f "$icon_src/128x128.png" "$HOME/.local/share/icons/hicolor/128x128/apps/delegation-core-dashboard.png" 2>/dev/null || true
+            [ -f "$icon_src/128x128@2x.png" ] && {
+                mkdir -p "$HOME/.local/share/icons/hicolor/256x256@2/apps"
+                cp -f "$icon_src/128x128@2x.png" "$HOME/.local/share/icons/hicolor/256x256@2/apps/delegation-core-dashboard.png" 2>/dev/null || true
+            }
+            [ -f "$icon_src/32x32.png" ] && cp -f "$icon_src/32x32.png" "$HOME/.local/share/icons/hicolor/32x32/apps/delegation-core-dashboard.png" 2>/dev/null || true
+            icon_name="delegation-core-dashboard"
+            command -v gtk-update-icon-cache &>/dev/null && gtk-update-icon-cache -q "$HOME/.local/share/icons/hicolor" 2>/dev/null || true
+        fi
+
         cat > "$HOME/.local/share/applications/delegation-core-dashboard.desktop" <<EOF
 [Desktop Entry]
 Type=Application
 Name=delegation-core Dashboard
 Exec=$dest
-Icon=utilities-terminal
+Icon=$icon_name
 Categories=Utility;
 EOF
+        command -v update-desktop-database &>/dev/null && update-desktop-database -q "$HOME/.local/share/applications" 2>/dev/null || true
         echo "  ✓ AppImage installed to $dest — find \"delegation-core Dashboard\" in your applications menu."
     else
         _no_dashboard_found
