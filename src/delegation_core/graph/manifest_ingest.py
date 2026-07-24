@@ -36,6 +36,20 @@ PACKAGE_MANIFEST_NAMES: dict[str, str] = {
 _MAX_MANIFEST_BYTES = 2_000_000  # 2 MB cap — manifests are small; this rejects junk
 
 
+def _xml_is_safe(text: str) -> bool:
+    """Reject XML that declares a DTD or entity (billion-laughs guard).
+
+    Mirrors ``extract._project_xml_is_safe`` (not imported directly: extract.py
+    imports this module, so the reverse import would cycle). Stdlib
+    ``xml.etree.ElementTree`` does not cap entity expansion, and the
+    ``_MAX_MANIFEST_BYTES`` size cap on the raw file is not a substitute — a
+    small ``pom.xml`` with a crafted internal DTD can still expand to gigabytes
+    once parsed. Legitimate Maven POMs never declare a DOCTYPE or ENTITY.
+    """
+    lowered = text.lower()
+    return "<!doctype" not in lowered and "<!entity" not in lowered
+
+
 def is_package_manifest_path(path: Path) -> bool:
     """True if ``path`` is a recognized package manifest (by filename)."""
     return path.name.lower() in PACKAGE_MANIFEST_NAMES
@@ -222,6 +236,8 @@ def _parse_gomod(text: str) -> dict | None:
 
 
 def _parse_pom(text: str) -> dict | None:
+    if not _xml_is_safe(text):
+        raise ValueError("refusing XML with DOCTYPE/ENTITY declaration")
     # Drop the default namespace so findtext/findall don't need the {uri} prefix.
     text = re.sub(r'\sxmlns="[^"]*"', '', text, count=1)
     root = ET.fromstring(text)

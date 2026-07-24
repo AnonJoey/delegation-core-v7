@@ -445,14 +445,14 @@ def deduplicate_entities(
                 candidates.append(node)
 
     fuzzy_merges = 0
+    lsh: MinHashLSH | None = None
+    minhashes: dict[str, MinHash] = {}
+    candidates_by_id: dict[str, dict] = {}
+    norm_cache: dict[str, str] = {}
     if len(candidates) >= 2:
         lsh = MinHashLSH(threshold=_LSH_THRESHOLD, num_perm=_NUM_PERM)
-        minhashes: dict[str, MinHash] = {}
         # Pre-build O(1) lookup structures so the query loop below doesn't scan
         # the candidates list linearly for every LSH neighbor (was O(n²×B)).
-        candidates_by_id: dict[str, dict] = {}
-        norm_cache: dict[str, str] = {}
-
         for node in candidates:
             node_id = node["id"]
             candidates_by_id[node_id] = node
@@ -542,7 +542,10 @@ def deduplicate_entities(
 
     # ── pass 3: LLM tiebreaker for ambiguous pairs (opt-in) ──────────────────
     if dedup_llm_backend is not None:
-        _llm_tiebreak(candidates, uf, communities, backend=dedup_llm_backend)
+        _llm_tiebreak(
+            candidates, lsh, minhashes, candidates_by_id, norm_cache,
+            uf, communities, backend=dedup_llm_backend,
+        )
 
     # ── build remap table from union-find components ──────────────────────────
     components = uf.components()
@@ -614,6 +617,10 @@ def _pick_winner(nodes: list[dict]) -> dict:
 
 def _llm_tiebreak(
     candidates: list[dict],
+    lsh: "MinHashLSH | None",
+    minhashes: dict[str, MinHash],
+    candidates_by_id: dict[str, dict],
+    norm_cache: dict[str, str],
     uf: _UF,
     communities: dict[str, int],
     *,
@@ -622,7 +629,17 @@ def _llm_tiebreak(
     low: float = 75.0,
     high: float = 92.0,
 ) -> None:
-    """Batch-resolve ambiguous pairs (score in [low, high)) via LLM."""
+    """Batch-resolve ambiguous pairs (score in [low, high)) via LLM.
+
+    Candidate pairs are drawn from pass 2's LSH blocking result (same lsh/
+    minhashes/candidates_by_id/norm_cache it already built), not from a fresh
+    scan of every (i, j) pair in ``candidates`` — that full scan is exactly
+    the O(n²) blowup LSH blocking was added to pass 2 to avoid (see its
+    "was O(n²×B)" comment), and this tiebreaker runs over the same
+    high-entropy candidate set so it would reintroduce it on a large repo.
+    """
+    if lsh is None:
+        return
     try:
         from delegation_core.graph.llm import BACKENDS, _format_backend_env_keys, _get_backend_api_key
         if backend not in BACKENDS:
@@ -636,13 +653,23 @@ def _llm_tiebreak(
         return
 
     ambiguous: list[tuple[dict, dict, float]] = []
-    for i, node in enumerate(candidates):
-        norm_i = _norm(node.get("label", node.get("id", "")))
-        for j in range(i + 1, len(candidates)):
-            neighbor = candidates[j]
-            if uf.find(node["id"]) == uf.find(neighbor["id"]):
+    seen_pairs: set[tuple[str, str]] = set()
+    for node in candidates:
+        node_id = node["id"]
+        norm_i = norm_cache.get(node_id) or _norm(node.get("label", node.get("id", "")))
+        for neighbor_id in lsh.query(minhashes[node_id]):
+            if neighbor_id == node_id:
                 continue
-            norm_j = _norm(neighbor.get("label", neighbor.get("id", "")))
+            pair_key = (node_id, neighbor_id) if node_id < neighbor_id else (neighbor_id, node_id)
+            if pair_key in seen_pairs:
+                continue
+            seen_pairs.add(pair_key)
+            if uf.find(node_id) == uf.find(neighbor_id):
+                continue
+            neighbor = candidates_by_id.get(neighbor_id)
+            if neighbor is None:
+                continue
+            norm_j = norm_cache.get(neighbor_id) or _norm(neighbor.get("label", neighbor.get("id", "")))
             # Mirror pass 2: plain Jaro for cross-file long labels (#1243).
             _xfile = (node.get("source_file") or "") != (neighbor.get("source_file") or "")
             if _xfile and max(len(norm_i), len(norm_j)) >= 12:
@@ -661,8 +688,8 @@ def _llm_tiebreak(
                 continue
             if _crossfile_fileanchored_blocked(node, neighbor):
                 continue
-            c1 = communities.get(node["id"])
-            c2 = communities.get(neighbor["id"])
+            c1 = communities.get(node_id)
+            c2 = communities.get(neighbor_id)
             if (c1 is not None and c2 is not None and c1 == c2
                     and min(len(norm_i), len(norm_j)) >= 12):
                 score += _COMMUNITY_BOOST

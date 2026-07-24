@@ -15,7 +15,44 @@ from __future__ import annotations
 
 import asyncio
 import os
+import platform
 import sys
+import time
+from pathlib import Path
+
+# A hard-killed rebuild (OOM-killer — this process explicitly nices/caps itself
+# to be a preferred kill target — SIGKILL, or a host crash) never reaches the
+# `finally: os.unlink(lock_path)` cleanup, so the lock file is left behind
+# forever. Without a staleness check, every subsequent post-commit hook would
+# see FileExistsError and silently skip the rebuild indefinitely, with no
+# surfaced error beyond a line in graph_rebuild.log nobody is watching.
+_LOCK_MAX_AGE_SECONDS = 3600
+
+
+def _lock_is_stale(lock_path: Path) -> bool:
+    """A lock is stale if it has aged past the cutoff, or its owning PID is
+    provably dead. On POSIX, liveness is checked with a signal-0 kill (raises
+    ProcessLookupError for a dead PID without actually signaling it). Windows
+    has no equally cheap check here, so it relies on the age cutoff alone."""
+    try:
+        age = time.time() - lock_path.stat().st_mtime
+    except OSError:
+        return True
+    if age > _LOCK_MAX_AGE_SECONDS:
+        return True
+    if platform.system() == "Windows":
+        return False
+    try:
+        pid = int(lock_path.read_text().strip())
+    except (OSError, ValueError):
+        return True
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return True
+    except OSError:
+        return False
+    return False
 
 
 def _apply_resource_limits() -> None:
@@ -65,8 +102,19 @@ def main() -> int:
     try:
         lock_fd = os.open(str(lock_path), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
     except FileExistsError:
-        sys.stderr.write(f"graph_hook_rebuild: rebuild already in progress for '{graph_name}' — skipping\n")
-        return 0
+        if not _lock_is_stale(lock_path):
+            sys.stderr.write(f"graph_hook_rebuild: rebuild already in progress for '{graph_name}' — skipping\n")
+            return 0
+        sys.stderr.write(f"graph_hook_rebuild: clearing stale lock for '{graph_name}'\n")
+        try:
+            lock_path.unlink()
+        except OSError:
+            pass
+        try:
+            lock_fd = os.open(str(lock_path), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+        except FileExistsError:
+            sys.stderr.write(f"graph_hook_rebuild: rebuild already in progress for '{graph_name}' — skipping\n")
+            return 0
 
     try:
         os.write(lock_fd, str(os.getpid()).encode())
