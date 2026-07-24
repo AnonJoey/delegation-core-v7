@@ -1,12 +1,26 @@
 :root {
   --bg: #f6f6f6;
   --bg-panel: #ffffff;
+  --bg-hover: rgba(15, 15, 15, 0.06);
   --fg: #0f0f0f;
   --fg-muted: #6b6b6b;
   --border: #e0e0e0;
   --accent: #396cd8;
   --ok: #2a8f4d;
   --bad: #c0392b;
+  --radius: 6px;
+
+  /* Vault-graph categorical palette (per-theme steps, not an automatic flip —
+     validated for adjacent-pair CVD separation and contrast on each theme's
+     panel surface). --graph-other is the shared swatch for folders past the
+     first six, never a seventh hue. */
+  --graph-1: #3d6fd0;
+  --graph-2: #c96a1e;
+  --graph-3: #0d9c8d;
+  --graph-4: #8a56c9;
+  --graph-5: #7a8c1e;
+  --graph-6: #bd4a8d;
+  --graph-other: #8a8a8a;
 
   font-family: Inter, Avenir, Helvetica, Arial, sans-serif;
   font-size: 14px;
@@ -19,17 +33,58 @@
   :root {
     --bg: #1e1e1e;
     --bg-panel: #2a2a2a;
+    --bg-hover: rgba(234, 234, 234, 0.08);
     --fg: #eaeaea;
     --fg-muted: #9a9a9a;
     --border: #3d3d3d;
     --accent: #6ea8ff;
     --ok: #4fbf76;
     --bad: #e0685c;
+
+    --graph-1: #5b8de0;
+    --graph-2: #cc8133;
+    --graph-3: #1fa392;
+    --graph-4: #9a74d8;
+    --graph-5: #8f9c33;
+    --graph-6: #c9609c;
+    --graph-other: #7d7d7d;
   }
 }
 
 * {
   box-sizing: border-box;
+  scrollbar-width: thin;
+  scrollbar-color: var(--border) transparent;
+}
+
+*::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+
+*::-webkit-scrollbar-thumb {
+  background: var(--border);
+  border-radius: 4px;
+}
+
+*::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+[hidden] {
+  display: none !important;
+}
+
+:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+
+button,
+select,
+input,
+textarea {
+  transition: border-color 120ms ease, background-color 120ms ease, color 120ms ease;
 }
 
 body {
@@ -53,6 +108,9 @@ body {
   padding: 10px 16px;
   background: var(--bg-panel);
   border-bottom: 1px solid var(--border);
+  position: relative;
+  z-index: 1;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.05);
 }
 
 .topbar-title {
@@ -86,8 +144,13 @@ body {
 .status-fields {
   display: flex;
   flex-wrap: wrap;
+  align-items: center;
   gap: 6px 16px;
   font-size: 12px;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 4px 12px;
 }
 
 .stat {
@@ -106,7 +169,7 @@ body {
   background: var(--bg);
   color: var(--fg);
   border: 1px solid var(--border);
-  border-radius: 6px;
+  border-radius: var(--radius);
   padding: 4px 10px;
   font-size: 12px;
   font-family: inherit;
@@ -196,9 +259,14 @@ body {
   padding: 12px 20px;
   font-size: 13px;
   font-weight: 500;
+  font-family: inherit;
   color: var(--fg-muted);
   cursor: pointer;
   border-bottom: 2px solid transparent;
+}
+
+.tab-btn:hover {
+  color: var(--fg);
 }
 
 .tab-btn.active {
@@ -215,6 +283,28 @@ body {
 .tab-content.active {
   display: flex;
   flex-direction: column;
+}
+
+.notes-toolbar {
+  display: flex;
+  padding: 8px;
+  border-bottom: 1px solid var(--border);
+  background: var(--bg-panel);
+}
+
+.notes-toolbar input {
+  flex: 0 1 300px;
+  background: var(--bg);
+  color: var(--fg);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 5px 10px;
+  font-size: 12px;
+  font-family: inherit;
+}
+
+.notes-toolbar input::placeholder {
+  color: var(--fg-muted);
 }
 
 .notes-browser {
@@ -235,8 +325,12 @@ body {
 .note-view {
   flex: 1;
   overflow-y: auto;
-  padding: 16px;
+  padding: 20px 24px;
   min-width: 0;
+}
+
+.note-state {
+  height: 100%;
 }
 
 .note-content {
@@ -244,21 +338,24 @@ body {
   word-wrap: break-word;
   font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
   font-size: 12px;
+  line-height: 1.65;
+  max-width: 84ch;
   margin: 0;
 }
 
 .list-item {
   padding: 6px 8px;
-  border-radius: 6px;
+  border-radius: var(--radius);
   cursor: pointer;
   font-size: 13px;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
+  transition: background-color 120ms ease, color 120ms ease;
 }
 
 .list-item:hover {
-  background: var(--border);
+  background: var(--bg-hover);
 }
 
 .list-item.active {
@@ -303,6 +400,88 @@ body {
   pointer-events: none;
 }
 
+.graph-state {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  pointer-events: none;
+}
+
+.graph-legend {
+  position: absolute;
+  top: 14px;
+  right: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 8px 10px;
+  font-size: 11px;
+  color: var(--fg-muted);
+  background: var(--bg-panel);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  pointer-events: none;
+  max-height: 50%;
+  overflow: hidden;
+}
+
+.legend-item {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  white-space: nowrap;
+}
+
+.legend-swatch {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+
+/* ── shared empty / loading / error panel states ─────────────────────────── */
+
+.pane-state {
+  height: 100%;
+  min-height: 80px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+  padding: 24px 16px;
+  text-align: center;
+}
+
+.pane-state-title {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--fg-muted);
+}
+
+.pane-state-hint {
+  font-size: 12px;
+  color: var(--fg-muted);
+  opacity: 0.75;
+  max-width: 34ch;
+}
+
+.pane-state.loading .pane-state-title {
+  animation: pane-pulse 1.4s ease-in-out infinite;
+}
+
+@keyframes pane-pulse {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.4;
+  }
+}
+
 .tasks-browser {
   display: flex;
   flex: 1;
@@ -334,7 +513,7 @@ body {
   background: var(--bg);
   color: var(--fg);
   border: 1px solid var(--border);
-  border-radius: 6px;
+  border-radius: var(--radius);
   padding: 5px 8px;
   font-size: 12px;
   font-family: inherit;
@@ -364,13 +543,14 @@ body {
 
 .task-list-item {
   padding: 8px;
-  border-radius: 6px;
+  border-radius: var(--radius);
   cursor: pointer;
   margin-bottom: 4px;
+  transition: background-color 120ms ease, color 120ms ease;
 }
 
 .task-list-item:hover {
-  background: var(--border);
+  background: var(--bg-hover);
 }
 
 .task-list-item.active {
@@ -434,9 +614,10 @@ body {
   background: var(--bg-panel);
   color: var(--fg);
   border: 1px solid var(--border);
-  border-radius: 6px;
+  border-radius: var(--radius);
   padding: 5px 10px;
   font-size: 12px;
+  font-family: inherit;
   cursor: pointer;
 }
 

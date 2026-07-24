@@ -34,6 +34,16 @@ function escapeHtml(value) {
   })[c]);
 }
 
+// Shared empty/loading/error treatment for panel bodies. Both title and hint
+// pass through escapeHtml even though every current call site uses literal
+// strings — keeps the helper safe if a message ever interpolates data.
+function paneState(title, hint = "", cls = "") {
+  return `<div class="pane-state${cls ? ` ${cls}` : ""}">
+    <div class="pane-state-title">${escapeHtml(title)}</div>
+    ${hint ? `<div class="pane-state-hint">${escapeHtml(hint)}</div>` : ""}
+  </div>`;
+}
+
 // ── status panel ─────────────────────────────────────────────────────────────
 
 function dot(ok) {
@@ -78,7 +88,7 @@ async function refreshStatus() {
     ].join("");
     updateLlamaButton(s.llama_state);
   } catch (e) {
-    el.innerHTML = `<span class="muted">status unavailable</span>`;
+    el.innerHTML = `<span class="muted">status unavailable — retrying</span>`;
   }
 }
 
@@ -127,74 +137,112 @@ async function refreshClients() {
       )
       .join("");
   } catch (e) {
-    el.innerHTML = `<span class="muted">unavailable</span>`;
+    el.innerHTML = `<span class="muted">clients unavailable — retrying</span>`;
   }
 }
 
 // ── notes browser ────────────────────────────────────────────────────────────
 
 let vaultTree = null;
+let notesFilter = "";
+let selectedFolder = null;
 
-async function loadNotesBrowser() {
+function noteMatchesFilter(n) {
+  return !notesFilter || n.title.toLowerCase().includes(notesFilter);
+}
+
+function renderFolderList() {
   const folderList = document.getElementById("folder-list");
-  try {
-    vaultTree = await apiGet("/api/vault/tree");
-  } catch (e) {
-    folderList.innerHTML = `<div class="muted list-item">unavailable</div>`;
-    throw e; // still surfaces to the caller — see main()'s Promise.allSettled
-  }
   const folders = Object.keys(vaultTree.folders);
+  if (!folders.length) {
+    folderList.innerHTML = paneState("No folders", "The vault has no configured folders yet.");
+    return;
+  }
   folderList.innerHTML = folders
-    .map(
-      (f) =>
-        `<div class="list-item" data-folder="${escapeHtml(f)}">${escapeHtml(f)} <span class="count">${vaultTree.folders[f].length}</span></div>`
-    )
+    .map((f) => {
+      const count = vaultTree.folders[f].filter(noteMatchesFilter).length;
+      return `<div class="list-item ${f === selectedFolder ? "active" : ""}" data-folder="${escapeHtml(f)}" tabindex="0">${escapeHtml(f)} <span class="count">${count}</span></div>`;
+    })
     .join("");
   folderList.querySelectorAll(".list-item").forEach((el) => {
     el.addEventListener("click", () => selectFolder(el.dataset.folder));
   });
-  if (folders.length) selectFolder(folders[0]);
 }
 
-function selectFolder(folder) {
-  document.querySelectorAll("#folder-list .list-item").forEach((el) => {
-    el.classList.toggle("active", el.dataset.folder === folder);
-  });
+function renderNoteList() {
   const noteList = document.getElementById("note-list");
-  const notes = vaultTree.folders[folder] || [];
+  const notes = (vaultTree.folders[selectedFolder] || []).filter(noteMatchesFilter);
   if (!notes.length) {
-    noteList.innerHTML = `<div class="muted list-item">empty</div>`;
+    noteList.innerHTML = notesFilter
+      ? paneState("No matches", "No note titles in this folder match the filter.")
+      : paneState("Empty folder", "Notes filed here will appear in this list.");
     return;
   }
   noteList.innerHTML = notes
-    .map((n) => `<div class="list-item" data-path="${escapeHtml(n.path)}">${escapeHtml(n.title)}</div>`)
+    .map((n) => `<div class="list-item" data-path="${escapeHtml(n.path)}" tabindex="0">${escapeHtml(n.title)}</div>`)
     .join("");
   noteList.querySelectorAll(".list-item").forEach((el) => {
     el.addEventListener("click", () => selectNote(el.dataset.path, el));
   });
 }
 
+async function loadNotesBrowser() {
+  const folderList = document.getElementById("folder-list");
+  try {
+    vaultTree = await apiGet("/api/vault/tree");
+  } catch (e) {
+    folderList.innerHTML = paneState("Vault unavailable", "Could not load the note tree.");
+    throw e; // still surfaces to the caller — see main()'s Promise.allSettled
+  }
+  renderFolderList();
+  const folders = Object.keys(vaultTree.folders);
+  if (folders.length) selectFolder(folders[0]);
+}
+
+function selectFolder(folder) {
+  selectedFolder = folder;
+  document.querySelectorAll("#folder-list .list-item").forEach((el) => {
+    el.classList.toggle("active", el.dataset.folder === folder);
+  });
+  renderNoteList();
+}
+
+function setupNotesFilter() {
+  const input = document.getElementById("notes-filter");
+  input.addEventListener("input", () => {
+    notesFilter = input.value.trim().toLowerCase();
+    if (!vaultTree) return;
+    renderFolderList(); // counts reflect the filter
+    renderNoteList();
+  });
+}
+
 async function selectNote(path, el) {
   document.querySelectorAll("#note-list .list-item").forEach((e) => e.classList.remove("active"));
   el.classList.add("active");
+  const state = document.getElementById("note-state");
   const content = document.getElementById("note-content");
-  content.textContent = "loading…";
-  content.classList.add("muted");
+  content.hidden = true;
+  state.hidden = false;
+  state.innerHTML = paneState("Loading note…", "", "loading");
   try {
     const { content: text } = await apiGet(`/api/vault/note?path=${encodeURIComponent(path)}`);
     content.textContent = text; // textContent, not innerHTML — raw note body, never parsed as markup
-    content.classList.remove("muted");
+    state.hidden = true;
+    content.hidden = false;
   } catch (e) {
-    content.textContent = "could not load note";
+    state.innerHTML = paneState("Could not load note", "The file may have been moved or deleted.");
   }
 }
 
 // ── vault graph (custom force-directed layout, canvas, no external library) ─
 
 class ForceGraph {
-  constructor(canvas, data) {
+  constructor(canvas, data, opts = {}) {
     this.canvas = canvas;
     this.ctx = canvas.getContext("2d");
+    this.folderIndex = opts.folderIndex || {}; // folder name -> palette slot, shared with the legend
+    this.onNodeClick = opts.onNodeClick || null;
     this._resizeCanvas(); // sets this.width/height (logical) + this.dpr before anything below uses them
     this.nodes = data.nodes.map((n) => ({
       ...n,
@@ -207,10 +255,25 @@ class ForceGraph {
     this.edges = data.edges
       .map((e) => ({ source: this.byId[e.source], target: this.byId[e.target] }))
       .filter((e) => e.source && e.target);
+    // Degree, radius, and neighbor sets are static once edges are built —
+    // precomputed here so _draw() and hover highlighting don't refilter the
+    // edge list every frame.
+    for (const n of this.nodes) {
+      n.degree = 0;
+      n.neighbors = new Set();
+    }
+    for (const e of this.edges) {
+      e.source.degree++;
+      e.target.degree++;
+      e.source.neighbors.add(e.target);
+      e.target.neighbors.add(e.source);
+    }
+    for (const n of this.nodes) n.r = Math.min(4 + n.degree * 1.2, 16);
     this.scale = 1;
     this.offsetX = 0;
     this.offsetY = 0;
     this.dragNode = null;
+    this.hoverNode = null;
     this._watchResize();
     this._bindEvents();
     this._tick();
@@ -266,13 +329,20 @@ class ForceGraph {
     watchDpr();
   }
 
+  _nodeAt(sx, sy) {
+    const { x, y } = this._toWorld(sx, sy);
+    return this.nodes.find((n) => Math.hypot(n.x - x, n.y - y) < Math.max(n.r + 4, 10));
+  }
+
   _bindEvents() {
     const c = this.canvas;
     let panStart = null;
 
     c.addEventListener("mousedown", (e) => {
-      const { x, y } = this._toWorld(e.offsetX, e.offsetY);
-      const hit = this.nodes.find((n) => Math.hypot(n.x - x, n.y - y) < 10);
+      const hit = this._nodeAt(e.offsetX, e.offsetY);
+      // Remembered so mouseup can tell a click (open the note) apart from a
+      // drag (reposition the node) by how far the pointer traveled.
+      this._pressAt = { x: e.offsetX, y: e.offsetY, node: hit };
       if (hit) {
         this.dragNode = hit;
       } else {
@@ -289,7 +359,19 @@ class ForceGraph {
       } else if (panStart) {
         this.offsetX = panStart.offX + (e.offsetX - panStart.x);
         this.offsetY = panStart.offY + (e.offsetY - panStart.y);
+        this.hoverNode = null;
+      } else {
+        this.hoverNode = this._nodeAt(e.offsetX, e.offsetY);
+        c.style.cursor = this.hoverNode ? "pointer" : "grab";
       }
+    });
+    c.addEventListener("mouseleave", () => {
+      this.hoverNode = null;
+    });
+    c.addEventListener("click", (e) => {
+      const p = this._pressAt;
+      if (!p || !p.node || !this.onNodeClick) return;
+      if (Math.hypot(e.offsetX - p.x, e.offsetY - p.y) < 5) this.onNodeClick(p.node);
     });
     window.addEventListener("mouseup", () => {
       this.dragNode = null;
@@ -363,6 +445,13 @@ class ForceGraph {
     const border = styles.getPropertyValue("--border").trim();
     const accent = styles.getPropertyValue("--accent").trim();
     const fg = styles.getPropertyValue("--fg").trim();
+    const halo = styles.getPropertyValue("--bg-panel").trim();
+    // Read per frame like the vars above, so a live theme switch recolors the
+    // graph without a reload.
+    const palette = [1, 2, 3, 4, 5, 6].map((i) => styles.getPropertyValue(`--graph-${i}`).trim());
+    const other = styles.getPropertyValue("--graph-other").trim();
+    const hover = this.hoverNode;
+    const dimmed = (n) => hover && n !== hover && !hover.neighbors.has(n);
 
     ctx.clearRect(0, 0, this.canvas.width, this.canvas.height);
     ctx.save();
@@ -372,30 +461,66 @@ class ForceGraph {
 
     ctx.strokeStyle = border;
     ctx.lineWidth = 1 / this.scale;
+    ctx.globalAlpha = hover ? 0.25 : 1;
     for (const e of this.edges) {
+      if (hover && (e.source === hover || e.target === hover)) continue; // redrawn highlighted below
       ctx.beginPath();
       ctx.moveTo(e.source.x, e.source.y);
       ctx.lineTo(e.target.x, e.target.y);
       ctx.stroke();
     }
+    if (hover) {
+      ctx.globalAlpha = 1;
+      ctx.strokeStyle = accent;
+      ctx.lineWidth = 1.5 / this.scale;
+      for (const e of this.edges) {
+        if (e.source !== hover && e.target !== hover) continue;
+        ctx.beginPath();
+        ctx.moveTo(e.source.x, e.source.y);
+        ctx.lineTo(e.target.x, e.target.y);
+        ctx.stroke();
+      }
+    }
 
     for (const n of this.nodes) {
-      const degree = this.edges.filter((e) => e.source === n || e.target === n).length;
-      const r = Math.min(4 + degree * 1.2, 16);
+      const slot = this.folderIndex[n.folder];
+      ctx.fillStyle = slot === undefined ? other : palette[slot];
+      ctx.globalAlpha = dimmed(n) ? 0.3 : 1;
       ctx.beginPath();
-      ctx.arc(n.x, n.y, r, 0, Math.PI * 2);
-      ctx.fillStyle = accent;
+      ctx.arc(n.x, n.y, n.r, 0, Math.PI * 2);
       ctx.fill();
+    }
+    ctx.globalAlpha = 1;
+    if (hover) {
+      ctx.strokeStyle = accent;
+      ctx.lineWidth = 2 / this.scale;
+      ctx.beginPath();
+      ctx.arc(hover.x, hover.y, hover.r + 3 / this.scale, 0, Math.PI * 2);
+      ctx.stroke();
     }
 
     if (this.scale > 0.6) {
       ctx.fillStyle = fg;
       ctx.font = `${11 / this.scale}px sans-serif`;
       for (const n of this.nodes) {
+        if (n === hover) continue; // its label is drawn below, at any zoom
         // fillText, not innerHTML — canvas text draws characters directly,
         // never interpreted as markup, so n.title needs no escaping here.
-        ctx.fillText(n.title, n.x + 10, n.y + 4);
+        ctx.globalAlpha = dimmed(n) ? 0.3 : 1;
+        ctx.fillText(n.title, n.x + n.r + 4, n.y + 4);
       }
+      ctx.globalAlpha = 1;
+    }
+
+    if (hover) {
+      // Full title regardless of zoom threshold, with a panel-colored halo so
+      // it stays readable over edges and neighboring labels.
+      ctx.font = `600 ${12 / this.scale}px sans-serif`;
+      ctx.strokeStyle = halo;
+      ctx.lineWidth = 3 / this.scale;
+      ctx.strokeText(hover.title, hover.x + hover.r + 5, hover.y + 4);
+      ctx.fillStyle = fg;
+      ctx.fillText(hover.title, hover.x + hover.r + 5, hover.y + 4);
     }
     ctx.restore();
   }
@@ -415,14 +540,57 @@ class ForceGraph {
   }
 }
 
+// Jump from a graph node to its note in the Notes tab, reusing the existing
+// browser flow (tab click handler, selectFolder, selectNote) rather than a
+// parallel code path. Clears the filter first so the target can't be hidden.
+function openNoteFromGraph(node) {
+  if (!vaultTree || !node.path || !vaultTree.folders[node.folder]) return;
+  document.querySelector('.tab-btn[data-tab="notes"]').click();
+  if (notesFilter) {
+    document.getElementById("notes-filter").value = "";
+    notesFilter = "";
+    renderFolderList();
+  }
+  selectFolder(node.folder);
+  const item = [...document.querySelectorAll("#note-list .list-item")].find(
+    (el) => el.dataset.path === node.path
+  );
+  if (item) {
+    selectNote(node.path, item);
+    item.scrollIntoView({ block: "nearest" });
+  }
+}
+
 async function loadVaultGraph() {
   const canvas = document.getElementById("graph-canvas");
-  const hint = document.querySelector("#graph-pane .graph-hint");
+  const stateEl = document.getElementById("graph-state");
+  const legend = document.getElementById("graph-legend");
   try {
     const data = await apiGet("/api/vault/graph");
-    new ForceGraph(canvas, data); // sizes the canvas itself — see _resizeCanvas()
+    if (!data.nodes.length) {
+      stateEl.innerHTML = paneState("Vault graph is empty", "Notes linked with [[wikilinks]] will appear here.");
+      return;
+    }
+    // First six folders (sorted, so the assignment is stable across reloads)
+    // get a categorical color; any beyond that share the muted "other" swatch
+    // rather than cycling hues into ambiguity.
+    const folders = [...new Set(data.nodes.map((n) => n.folder).filter(Boolean))].sort();
+    const folderIndex = {};
+    folders.forEach((f, i) => {
+      if (i < 6) folderIndex[f] = i;
+    });
+    legend.innerHTML = folders
+      .map((f) => {
+        const swatch = folderIndex[f] === undefined ? "var(--graph-other)" : `var(--graph-${folderIndex[f] + 1})`;
+        return `<span class="legend-item"><span class="legend-swatch" style="background: ${swatch}"></span>${escapeHtml(f)}</span>`;
+      })
+      .join("");
+    legend.hidden = false;
+    stateEl.hidden = true;
+    new ForceGraph(canvas, data, { folderIndex, onNodeClick: openNoteFromGraph }); // sizes the canvas itself — see _resizeCanvas()
   } catch (e) {
-    if (hint) hint.textContent = "Could not load the vault graph.";
+    stateEl.hidden = false;
+    stateEl.innerHTML = paneState("Could not load the vault graph", "It will not retry on its own — restart the app once the sidecar is up.");
     throw e; // still surfaces to the caller — see main()'s Promise.allSettled
   }
 }
@@ -434,17 +602,24 @@ let selectedTaskId = null;
 async function loadTaskList() {
   const status = document.getElementById("tasks-status-filter").value;
   const el = document.getElementById("task-list");
+  // Only show the loading state when there's nothing on screen yet — this
+  // also runs after every step/status update, where a flash of "Loading…"
+  // over an already-rendered list would just be churn.
+  if (!el.childElementCount) el.innerHTML = paneState("Loading processes…", "", "loading");
   try {
     const { processes } = await apiGet(`/api/processes?status=${encodeURIComponent(status)}`);
     if (!processes.length) {
-      el.innerHTML = `<div class="muted list-item">no processes</div>`;
+      el.innerHTML =
+        status === "active"
+          ? paneState("No active processes", "Start one with + New, or switch the filter to All.")
+          : paneState("No processes", "Nothing matches this filter.");
       return;
     }
     el.innerHTML = processes
       .map((p) => {
         const done = p.steps.filter((s) => s.done).length;
         const stepsLabel = p.steps.length ? `${done}/${p.steps.length} steps` : p.status;
-        return `<div class="task-list-item ${p.id === selectedTaskId ? "active" : ""}" data-id="${escapeHtml(p.id)}">
+        return `<div class="task-list-item ${p.id === selectedTaskId ? "active" : ""}" data-id="${escapeHtml(p.id)}" tabindex="0">
           <div class="task-name">${escapeHtml(p.name)}</div>
           <div class="task-meta">${escapeHtml(stepsLabel)}</div>
         </div>`;
@@ -454,7 +629,7 @@ async function loadTaskList() {
       item.addEventListener("click", () => selectTask(item.dataset.id));
     });
   } catch (e) {
-    el.innerHTML = `<div class="muted list-item">unavailable</div>`;
+    el.innerHTML = paneState("Tasks unavailable", "Could not reach the process store — change the filter to retry.");
   }
 }
 
@@ -468,12 +643,12 @@ async function selectTask(id) {
 
 async function renderTaskDetail(id) {
   const el = document.getElementById("task-detail");
-  el.innerHTML = `<div class="muted">loading…</div>`;
+  el.innerHTML = paneState("Loading process…", "", "loading");
   let proc;
   try {
     proc = await apiGet(`/api/processes/get?id=${encodeURIComponent(id)}`);
   } catch (e) {
-    el.innerHTML = `<div class="muted">could not load process</div>`;
+    el.innerHTML = paneState("Could not load process", "It may have been removed — refresh the list.");
     return;
   }
 
@@ -605,6 +780,22 @@ function setupTasksPanel() {
   document.getElementById("tasks-new-btn").addEventListener("click", showNewTaskForm);
 }
 
+// List rows are divs with tabindex, not buttons — delegate Enter/Space so
+// keyboard focus can activate them like a click. Attached once per container;
+// survives every innerHTML re-render inside.
+function setupListKeyboard() {
+  for (const id of ["folder-list", "note-list", "task-list"]) {
+    document.getElementById(id).addEventListener("keydown", (e) => {
+      if (e.key !== "Enter" && e.key !== " ") return;
+      const item = e.target.closest(".list-item, .task-list-item");
+      if (item) {
+        e.preventDefault();
+        item.click();
+      }
+    });
+  }
+}
+
 // ── tabs ─────────────────────────────────────────────────────────────────────
 // The vault graph is no longer one of these — it's always visible in its own
 // pane (see #graph-pane in index.html) rather than a tab someone has to click
@@ -639,6 +830,8 @@ async function main() {
   apiBase = `http://127.0.0.1:${port}`;
 
   setupTabs();
+  setupNotesFilter();
+  setupListKeyboard();
   document.getElementById("llama-toggle-btn").addEventListener("click", toggleLlama);
   // refreshStatus/refreshClients/loadVaultGraph already catch their own
   // errors (or, for loadNotesBrowser, re-throw so its own caller can tell) —

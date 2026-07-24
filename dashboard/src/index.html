@@ -15,7 +15,7 @@
 
         <section class="topbar-section" id="status-panel">
           <h2>Status</h2>
-          <div id="status-fields" class="status-fields">loading…</div>
+          <div id="status-fields" class="status-fields"><span class="muted">loading…</span></div>
           <button id="llama-toggle-btn" type="button" disabled>…</button>
         </section>
 
@@ -31,7 +31,13 @@
         <section class="graph-pane" id="graph-pane">
           <h1 class="graph-pane-title">Vault Graph</h1>
           <canvas id="graph-canvas"></canvas>
-          <div class="graph-hint muted">Drag nodes to rearrange. Scroll to zoom.</div>
+          <div class="graph-state" id="graph-state">
+            <div class="pane-state loading">
+              <div class="pane-state-title">Loading vault graph…</div>
+            </div>
+          </div>
+          <div class="graph-legend" id="graph-legend" hidden></div>
+          <div class="graph-hint muted">Drag nodes to rearrange. Scroll to zoom. Click a node to open its note.</div>
         </section>
 
         <main class="main">
@@ -41,11 +47,31 @@
           </nav>
 
           <section class="tab-content active" id="tab-notes">
+            <div class="notes-toolbar">
+              <input
+                type="search"
+                id="notes-filter"
+                placeholder="Filter notes by title…"
+                aria-label="Filter notes by title"
+                autocomplete="off"
+                spellcheck="false"
+              />
+            </div>
             <div class="notes-browser">
-              <div class="folder-list" id="folder-list"></div>
+              <div class="folder-list" id="folder-list">
+                <div class="pane-state loading">
+                  <div class="pane-state-title">Loading…</div>
+                </div>
+              </div>
               <div class="note-list" id="note-list"></div>
               <div class="note-view">
-                <pre id="note-content" class="note-content muted">Select a note to view it.</pre>
+                <div id="note-state" class="note-state">
+                  <div class="pane-state">
+                    <div class="pane-state-title">No note selected</div>
+                    <div class="pane-state-hint">Choose a note from the list to read it here.</div>
+                  </div>
+                </div>
+                <pre id="note-content" class="note-content" hidden></pre>
               </div>
             </div>
           </section>
@@ -66,7 +92,10 @@
                 <div class="task-list" id="task-list"></div>
               </div>
               <div class="task-detail" id="task-detail">
-                <div class="muted">Select a process, or create a new one.</div>
+                <div class="pane-state">
+                  <div class="pane-state-title">No process selected</div>
+                  <div class="pane-state-hint">Pick a process from the list, or start one with + New.</div>
+                </div>
               </div>
             </div>
           </section>
