@@ -21,11 +21,12 @@ def export(vault, title: str, summary: str, key_decisions: str = "") -> dict:
     cfg = vault.cfg
     folder = "sessions" if "sessions" in cfg.vault_folders else cfg.vault_folders[0]
 
-    from .vault import safe_filename, yaml_quote_scalar
+    from .vault import safe_filename, unique_note_path, yaml_quote_scalar
     safe = safe_filename(title)
     date_str = datetime.now().strftime("%Y-%m-%d")
     dest = cfg.vault / folder / f"{date_str}-{safe}.md"
     dest.parent.mkdir(parents=True, exist_ok=True)
+    dest = unique_note_path(dest)
 
     decisions_list = [d.strip() for d in key_decisions.split(",") if d.strip()] if key_decisions else []
 

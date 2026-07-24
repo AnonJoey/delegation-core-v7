@@ -55,7 +55,6 @@ from __future__ import annotations
 import json
 import logging
 import re
-import socket
 import sys
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -72,13 +71,6 @@ _vault = None   # set once in run() — VaultManager, shared across every reques
                 # instance, initialized once at startup, matches server.py's
                 # own _vault global pattern.
 _tracker = None  # set once in run() — ProcessTracker, same shared-instance reasoning
-
-
-def _pick_port(preferred: int = 0) -> int:
-    """Bind-test a port; 0 lets the OS assign a free one."""
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-        s.bind(("127.0.0.1", preferred))
-        return s.getsockname()[1]
 
 
 def _build_vault_graph(cfg) -> dict:
@@ -427,8 +419,12 @@ def run(port: int = 0, host: str = "127.0.0.1") -> None:
     from .tracker import ProcessTracker
     _tracker = ProcessTracker(_cfg.processes_path)
 
-    actual_port = _pick_port(port)
-    server = ThreadingHTTPServer((host, actual_port), _Handler)
+    # Bind directly instead of test-binding a throwaway socket to pick a port
+    # and then binding a second socket at that number for the real server —
+    # that TOCTOU gap lets another process grab the port in between and crash
+    # startup. ThreadingHTTPServer's own bind is the only bind that matters.
+    server = ThreadingHTTPServer((host, port), _Handler)
+    actual_port = server.server_address[1]
     # Printed as the first line so a spawning parent (the Tauri sidecar) can
     # read it off stdout to learn which port got assigned when port=0.
     print(f"dashboard_api listening on http://{host}:{actual_port}", flush=True)

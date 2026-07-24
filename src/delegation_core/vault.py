@@ -66,6 +66,26 @@ def safe_filename(title: str, max_len: int = 50) -> str:
     return safe[:max_len] or "untitled"
 
 
+def unique_note_path(dest: Path) -> Path:
+    """Disambiguate a note destination that already exists on disk.
+
+    write_note/export_session/maintenance-classify all derive the filename
+    from just {date}-{safe title}.md — two notes with the same title on the
+    same day would otherwise silently overwrite the first note's file *and*
+    its ChromaDB index row, permanently losing its content. Appends -2, -3,
+    ... before the suffix until a free path is found.
+    """
+    if not dest.exists():
+        return dest
+    stem, suffix = dest.stem, dest.suffix
+    n = 2
+    while True:
+        candidate = dest.with_name(f"{stem}-{n}{suffix}")
+        if not candidate.exists():
+            return candidate
+        n += 1
+
+
 def yaml_quote_scalar(value: str) -> str:
     """Double-quote a string for safe use as a YAML frontmatter scalar value.
 
@@ -254,8 +274,16 @@ class VaultManager:
             with _chroma_write_lock:
                 # get() and delete() share the lock — prevents newly-indexed notes from
                 # being identified as orphans between the get() and delete() calls.
+                # The `on_disk` snapshot itself is stale by the time we get here: it was
+                # built by the folder walk above, which can take a while, and a
+                # concurrent write_note()/vault_update_note() on the main thread can
+                # index a brand-new note in that window. Re-check the filesystem for
+                # each orphan candidate rather than trusting on_disk alone, or a note
+                # written mid-reindex gets its just-created ChromaDB row deleted here
+                # (file survives, but silently drops out of search_vault).
                 existing_ids = self.collection.get(include=[]).get("ids") or []
-                orphans = [i for i in existing_ids if "::" not in i and i not in on_disk]
+                orphans = [i for i in existing_ids if "::" not in i and i not in on_disk
+                          and not (self.cfg.vault / i).exists()]
                 if orphans:
                     self.collection.delete(ids=orphans)
                 # Remove orphan entries from saved state
@@ -324,13 +352,19 @@ class VaultManager:
                 "unsupported": unsupported, "inbox_path": str(inbox)}
 
     def find_notes_by_stem(self, note_name: str) -> list[Path]:
-        """Find notes whose filename stem contains note_name (case-insensitive)."""
+        """Find notes whose filename stem contains note_name (case-insensitive).
+
+        rglob, not glob: same subfolder-visibility fix as reindex_vault/list_notes
+        (see their comments) — a non-recursive glob here made read_note,
+        vault_update_note, and vault_find_similar all silently miss any note
+        nested one level down (e.g. research/Client/...).
+        """
         matches: list[Path] = []
         for folder in self.cfg.vault_folders:
             folder_path = self.cfg.vault / folder
             if not folder_path.exists():
                 continue
-            for f in folder_path.glob("*.md"):
+            for f in folder_path.rglob("*.md"):
                 if note_name.lower() in f.name[:-3].lower():
                     matches.append(f)
         if len(matches) > 1:
@@ -504,7 +538,10 @@ class VaultManager:
             fp = self.cfg.vault / folder
             if not fp.exists():
                 continue
-            for f in fp.glob("*.md"):
+            # rglob, not glob: same subfolder-visibility fix as reindex_vault/
+            # list_notes/get_health_summary — otherwise a note nested one folder
+            # down never surfaces for healing even when its quality_score is low.
+            for f in fp.rglob("*.md"):
                 try:
                     content = f.read_text(encoding="utf-8")
                     fm = self._parse_frontmatter(content)
@@ -534,7 +571,10 @@ class VaultManager:
         folder_counts = {}
         for folder in self.cfg.vault_folders:
             p = self.cfg.vault / folder
-            folder_counts[folder] = len(list(p.glob("*.md"))) if p.exists() else 0
+            # rglob, not glob: indexed_notes below counts recursively (reindex_vault
+            # uses rglob), so a non-recursive count here made folder_counts
+            # undercount vs indexed_notes for any folder with subfolder notes.
+            folder_counts[folder] = len(list(p.rglob("*.md"))) if p.exists() else 0
         return {
             "indexed_notes": self.collection.count() if self.collection else 0,
             "vault_path": str(self.cfg.vault),

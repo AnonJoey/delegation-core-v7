@@ -105,7 +105,7 @@ from .organizer import heal as _heal_notes
 from .organizer import relink_folder as _relink_folder
 from .organizer import run as _run_maintenance
 from .tracker import ProcessTracker
-from .vault import VaultManager, safe_filename, yaml_quote_scalar
+from .vault import VaultManager, safe_filename, unique_note_path, yaml_quote_scalar
 
 
 def _post_write_links(note_path: Path, rel_path: str, folder: str, stem: str) -> None:
@@ -254,6 +254,7 @@ async def write_note(folder: str, title: str, content: str) -> str:
     safe = safe_filename(title)
     dest = cfg.vault / folder / f"{datetime.now().strftime('%Y-%m-%d')}-{safe}.md"
     dest.parent.mkdir(parents=True, exist_ok=True)
+    dest = unique_note_path(dest)
     full = (
         f"---\ntitle: {yaml_quote_scalar(title)}\ndate: {datetime.now().strftime('%Y-%m-%d')}\n"
         f"ai_generated: true\n---\n\n{content}"

@@ -34,7 +34,7 @@ from .merger import try_merge
 from .sidecar import is_sidecar, is_valid_folder_hint, load as load_sidecar, sidecar_for
 from .splitter import inject_sibling_links, should_split
 from .synthesizer import synthesize
-from .vault import safe_filename, yaml_quote_scalar, yaml_unquote_scalar
+from .vault import safe_filename, unique_note_path, yaml_quote_scalar, yaml_unquote_scalar
 
 logger = logging.getLogger("organizer")
 
@@ -385,6 +385,7 @@ async def run(engine, vault_manager) -> dict:
                 final = ensure_aliases(final, [clean_display(f"{today_str}-{safe}"), f.stem])
                 dest = cfg.vault / folder / f"{today_str}-{safe}.md"
                 dest.parent.mkdir(parents=True, exist_ok=True)
+                dest = unique_note_path(dest)
                 dest.write_text(final, encoding="utf-8")
                 rel = str(dest.relative_to(cfg.vault))
                 vault_manager.index_note(final, {"title": f.stem, "path": rel, "folder": folder})
@@ -477,6 +478,7 @@ async def _process_sections(
                 final = ensure_aliases(final, [clean_display(f"{today_str}-{safe}"), label])
                 dest  = cfg.vault / folder / f"{today_str}-{safe}.md"
                 dest.parent.mkdir(parents=True, exist_ok=True)
+                dest = unique_note_path(dest)
                 dest.write_text(final, encoding="utf-8")
                 rel = str(dest.relative_to(cfg.vault))
                 vault_manager.index_note(final, {"title": title, "path": rel, "folder": folder})
