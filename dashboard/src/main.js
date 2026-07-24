@@ -44,6 +44,25 @@ function stat(label, valueHtml) {
   return `<span class="stat"><span class="stat-label">${label}</span>${valueHtml}</span>`;
 }
 
+// True only for the brief window right after a start/stop click — keeps the
+// button showing "Starting…/Stopping…" through that click's own explicit
+// refreshStatus() (see toggleLlama()) instead of the regular 5s poll
+// clobbering it back to "Start/Stop" a split second later.
+let llamaTogglePending = false;
+
+function updateLlamaButton(llamaState) {
+  const btn = document.getElementById("llama-toggle-btn");
+  if (llamaTogglePending) return;
+  btn.disabled = false;
+  if (llamaState === "online" || llamaState === "unhealthy") {
+    btn.textContent = "Stop llama.cpp";
+    btn.dataset.action = "stop";
+  } else {
+    btn.textContent = "Start llama.cpp";
+    btn.dataset.action = "start";
+  }
+}
+
 async function refreshStatus() {
   const el = document.getElementById("status-fields");
   try {
@@ -57,9 +76,29 @@ async function refreshStatus() {
       stat("Engine mode", escapeHtml(s.engine_mode)),
       stat("Synthesis", s.synthesis_enabled ? "on" : "off"),
     ].join("");
+    updateLlamaButton(s.llama_state);
   } catch (e) {
     el.innerHTML = `<span class="muted">status unavailable</span>`;
   }
+}
+
+async function toggleLlama() {
+  const btn = document.getElementById("llama-toggle-btn");
+  const action = btn.dataset.action; // "start" or "stop", set by the last updateLlamaButton()
+  llamaTogglePending = true;
+  btn.disabled = true;
+  btn.textContent = action === "start" ? "Starting…" : "Stopping…";
+  try {
+    await apiPost(`/api/llama/${action}`, {});
+  } catch (e) {
+    alert(`Could not ${action} llama.cpp: ${e.message}`);
+  }
+  llamaTogglePending = false;
+  // Stopping is fast (a few seconds at most); starting can take up to ~90s
+  // (see engine.py's health-poll loop) — either way, re-check shortly rather
+  // than waiting out the regular 5s interval, but don't pretend to know the
+  // real state before actually asking.
+  setTimeout(refreshStatus, action === "start" ? 3000 : 1500);
 }
 
 // ── connected clients panel ──────────────────────────────────────────────────
@@ -561,6 +600,7 @@ async function main() {
   apiBase = `http://127.0.0.1:${port}`;
 
   setupTabs();
+  document.getElementById("llama-toggle-btn").addEventListener("click", toggleLlama);
   // refreshStatus/refreshClients/loadVaultGraph already catch their own
   // errors (or, for loadNotesBrowser, re-throw so its own caller can tell) —
   // Promise.allSettled (not awaiting each in sequence) means one of these

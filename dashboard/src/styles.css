@@ -101,6 +101,27 @@ body {
   color: var(--fg-muted);
 }
 
+#llama-toggle-btn {
+  flex-shrink: 0;
+  background: var(--bg);
+  color: var(--fg);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 4px 10px;
+  font-size: 12px;
+  font-family: inherit;
+  cursor: pointer;
+}
+
+#llama-toggle-btn:hover:not(:disabled) {
+  border-color: var(--accent);
+}
+
+#llama-toggle-btn:disabled {
+  cursor: default;
+  opacity: 0.6;
+}
+
 .dot {
   display: inline-block;
   width: 8px;

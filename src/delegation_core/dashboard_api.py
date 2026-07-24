@@ -52,10 +52,12 @@ Also runnable standalone (without Tauri) via:
 
 from __future__ import annotations
 
+import atexit
 import json
 import logging
 import re
 import sys
+import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
@@ -71,6 +73,51 @@ _vault = None   # set once in run() — VaultManager, shared across every reques
                 # instance, initialized once at startup, matches server.py's
                 # own _vault global pattern.
 _tracker = None  # set once in run() — ProcessTracker, same shared-instance reasoning
+_engine = None   # lazy DelegationEngine, only for llama.cpp start/stop — see _get_engine()
+
+
+def _get_engine():
+    """Lazily build the DelegationEngine used to start llama.cpp.
+
+    Only used for _start_locked() here (start-if-not-healthy, with the binary/
+    model checks and log rotation already implemented there) — stopping goes
+    through _find_llama_process() below instead, since DelegationEngine's own
+    _shutdown() only kills a process *it* spawned, and llama.cpp on a real
+    setup is just as likely to have been started by the MCP server's own
+    engine, an autostart service, or by hand (as it was during development of
+    this feature) — the dashboard's stop button needs to work regardless.
+
+    DelegationEngine.__init__ registers its own atexit shutdown hook, which
+    would kill llama.cpp when *this sidecar process* exits — wrong here, since
+    the whole point of a manual start/stop button is that llama.cpp's lifetime
+    is under the user's control, not tied to whether the dashboard window
+    happens to be open. Unregistered immediately after construction.
+    """
+    global _engine
+    if _engine is None:
+        from .engine import DelegationEngine
+        _engine = DelegationEngine(_cfg)
+        atexit.unregister(_engine._shutdown)
+    return _engine
+
+
+def _find_llama_process():
+    """Find the running llama-server process by binary + configured port,
+    regardless of what started it. Returns a psutil.Process or None."""
+    import psutil
+
+    binary_name = Path(_cfg.llama_binary).name
+    port_str = str(_cfg.llama_port)
+    for proc in psutil.process_iter(["cmdline"]):
+        try:
+            cmdline = proc.info["cmdline"] or []
+            if not cmdline or binary_name not in cmdline[0]:
+                continue
+            if port_str in cmdline:
+                return proc
+        except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
+            continue
+    return None
 
 
 def _build_vault_graph(cfg) -> dict:
@@ -284,6 +331,10 @@ class _Handler(BaseHTTPRequestHandler):
                 self._handle_processes_create()
             elif parsed.path == "/api/processes/update":
                 self._handle_processes_update()
+            elif parsed.path == "/api/llama/start":
+                self._handle_llama_start()
+            elif parsed.path == "/api/llama/stop":
+                self._handle_llama_stop()
             else:
                 self._send_json({"error": f"not found: {parsed.path}"}, status=404)
         except Exception as e:
@@ -358,6 +409,30 @@ class _Handler(BaseHTTPRequestHandler):
             self._send_json({"error": f"not found: {process_id}"}, status=404)
             return
         self._send_json(proc)
+
+    def _handle_llama_start(self) -> None:
+        # _start_locked() can block up to ~90s polling for health (see
+        # engine.py) — run it in a background thread so this request returns
+        # immediately; the frontend already polls /api/status every 5s and
+        # will see llama_state flip to "online" once it's actually up.
+        engine = _get_engine()
+        threading.Thread(target=engine._start_locked, daemon=True).start()
+        self._send_json({"status": "starting"})
+
+    def _handle_llama_stop(self) -> None:
+        proc = _find_llama_process()
+        if proc is None:
+            self._send_json({"status": "not_running"})
+            return
+        import psutil
+        try:
+            proc.terminate()
+            proc.wait(timeout=8)
+        except psutil.TimeoutExpired:
+            proc.kill()
+        except psutil.NoSuchProcess:
+            pass
+        self._send_json({"status": "stopped"})
 
     def _handle_vault_tree(self) -> None:
         tree = {folder: _vault.list_notes(folder, limit=1000) for folder in _cfg.vault_folders}
