@@ -9,6 +9,17 @@ on:
     tags:
       - "dashboard-v*"
 
+# tauri-action's "Build and publish release draft" step creates a GitHub
+# Release using secrets.GITHUB_TOKEN (tagName/releaseDraft below). Many orgs
+# now default the auto-generated GITHUB_TOKEN to read-only (Settings > Actions
+# > General > Workflow permissions), which would make that step fail with a
+# 403 on the very first tag push, silently (from this file's point of view —
+# the failure only surfaces at run time in the Actions log, not here) unless
+# permissions are declared explicitly. Declared at the workflow level since
+# the one job here is the only consumer.
+permissions:
+  contents: write
+
 jobs:
   build:
     strategy:

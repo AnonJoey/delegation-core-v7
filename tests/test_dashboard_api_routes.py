@@ -1,0 +1,169 @@
+"""dashboard_api.py's remaining GET routes: /api/status, /api/clients,
+/api/vault/tree, /api/vault/search, /api/graphs, and the do_GET 404 fallback.
+
+test_dashboard_api.py only covers _build_vault_graph directly, and
+test_dashboard_api_{cors,processes,vault_note}.py cover CORS, the process
+endpoints, and /api/vault/note — but nothing previously drove an actual HTTP
+request through do_GET's dispatch table for these five routes, so a typo'd
+route string or a broken query-param pass-through here would only be caught
+manually, by actually clicking around the dashboard. A lightweight FakeVault
+stands in for VaultManager (no BGE/ChromaDB), same fake-object convention as
+test_graphbridge.py's FakeVaultManager.
+"""
+
+import http.client
+import json
+import threading
+from http.server import ThreadingHTTPServer
+
+import pytest
+
+from delegation_core import dashboard_api
+from delegation_core.config import Config
+from delegation_core.tracker import ProcessTracker
+
+
+class FakeVault:
+    def __init__(self):
+        self.list_notes_calls = []
+        self.search_calls = []
+
+    def list_notes(self, folder, limit=20):
+        self.list_notes_calls.append((folder, limit))
+        return [{"title": f"note-in-{folder}", "path": f"{folder}/x.md"}]
+
+    def search(self, query, limit=5):
+        self.search_calls.append((query, limit))
+        return [{"title": "hit", "path": "reference/hit.md", "similarity": 0.9}]
+
+    def get_stats(self):
+        return {"indexed_notes": 3}
+
+
+@pytest.fixture
+def server(monkeypatch, tmp_path):
+    vault_path = tmp_path / "vault"
+    vault_path.mkdir()
+    cfg = Config(vault_path=str(vault_path), vault_folders=["reference", "decisions"])
+    fake_vault = FakeVault()
+    monkeypatch.setattr(dashboard_api, "_cfg", cfg)
+    monkeypatch.setattr(dashboard_api, "_vault", fake_vault)
+    monkeypatch.setattr(dashboard_api, "_tracker", ProcessTracker(tmp_path / "processes.json"))
+
+    srv = ThreadingHTTPServer(("127.0.0.1", 0), dashboard_api._Handler)
+    port = srv.server_address[1]
+    thread = threading.Thread(target=srv.serve_forever, daemon=True)
+    thread.start()
+    yield port, cfg, fake_vault
+    srv.shutdown()
+    srv.server_close()
+
+
+def _get(port, path):
+    conn = http.client.HTTPConnection("127.0.0.1", port, timeout=5)
+    conn.request("GET", path)
+    res = conn.getresponse()
+    body = json.loads(res.read())
+    conn.close()
+    return res.status, body
+
+
+def test_status_reports_vault_and_engine_state(server, monkeypatch):
+    """_status() makes a real `requests.get(cfg.llama_url + "/health")` call —
+    stub it out rather than relying on nothing (or something!) actually
+    listening on the configured llama_port. This dev machine happens to run a
+    real llama.cpp on the default port 8181, so without this stub the test's
+    result silently depended on host state instead of dashboard_api's own
+    logic — exactly the kind of environment-coupled flakiness real/local
+    services must be mocked away from."""
+    def fake_get(url, timeout=3):
+        class Resp:
+            status_code = 200
+        return Resp()
+    monkeypatch.setattr("requests.get", fake_get)
+
+    port, cfg, _ = server
+    status, body = _get(port, "/api/status")
+    assert status == 200
+    assert body["vault_ok"] is True  # tmp_path vault dir exists
+    assert body["binary_ok"] is False  # no llama_binary configured
+    assert body["chroma_indexed_notes"] == 3
+    assert body["llama_state"] == "online"
+
+
+def test_status_reports_llama_offline_when_health_check_fails(server, monkeypatch):
+    def fake_get(url, timeout=3):
+        raise ConnectionError("refused")
+    monkeypatch.setattr("requests.get", fake_get)
+
+    port, _, _ = server
+    status, body = _get(port, "/api/status")
+    assert status == 200
+    assert body["llama_state"] == "offline"
+
+
+def test_clients_endpoint_returns_empty_list_with_no_sessions(server, monkeypatch, tmp_path):
+    from delegation_core import client_tracking
+    monkeypatch.setattr(client_tracking, "SESSIONS_DIR", tmp_path / "no-such-sessions-dir")
+    port, _, _ = server
+    status, body = _get(port, "/api/clients")
+    assert status == 200
+    assert body == {"clients": []}
+
+
+def test_vault_tree_lists_every_configured_folder(server):
+    port, cfg, fake_vault = server
+    status, body = _get(port, "/api/vault/tree")
+    assert status == 200
+    assert set(body["folders"].keys()) == {"reference", "decisions"}
+    assert body["folders"]["reference"][0]["title"] == "note-in-reference"
+    assert set(fake_vault.list_notes_calls) == {("reference", 1000), ("decisions", 1000)}
+
+
+def test_vault_search_passes_query_and_limit_through(server):
+    port, _, fake_vault = server
+    status, body = _get(port, "/api/vault/search?q=budget&limit=3")
+    assert status == 200
+    assert body["query"] == "budget"
+    assert body["results"][0]["title"] == "hit"
+    assert fake_vault.search_calls == [("budget", 3)]
+
+
+def test_vault_search_missing_q_returns_400(server):
+    port, _, _ = server
+    status, body = _get(port, "/api/vault/search")
+    assert status == 400
+    assert "error" in body
+
+
+def test_vault_search_defaults_limit_to_five_when_not_given(server):
+    port, _, fake_vault = server
+    _get(port, "/api/vault/search?q=budget")
+    assert fake_vault.search_calls == [("budget", 5)]
+
+
+def test_graphs_endpoint_reports_empty_registry_when_none_built(server, monkeypatch, tmp_path):
+    import delegation_core.config as config_mod
+    monkeypatch.setattr(config_mod, "CONFIG_DIR", tmp_path / "graphs-config-dir")
+    port, _, _ = server
+    status, body = _get(port, "/api/graphs")
+    assert status == 200
+    assert body == {"count": 0, "graphs": {}}
+
+
+def test_unknown_get_route_returns_404(server):
+    port, _, _ = server
+    status, body = _get(port, "/api/nonexistent")
+    assert status == 404
+    assert "error" in body
+
+
+def test_vault_search_non_numeric_limit_returns_clean_500_not_a_crash(server):
+    """`int((query.get("limit") or ["5"])[0])` raises ValueError for a
+    non-numeric limit; do_GET's blanket try/except must turn that into a
+    JSON 500 rather than an unhandled exception killing the request thread
+    or leaking a raw traceback to the client."""
+    port, _, _ = server
+    status, body = _get(port, "/api/vault/search?q=x&limit=notanumber")
+    assert status == 500
+    assert "error" in body

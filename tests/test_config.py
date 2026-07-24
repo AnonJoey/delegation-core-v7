@@ -91,6 +91,22 @@ def test_save_then_load_roundtrips(monkeypatch, tmp_path):
     assert reloaded.synthesis_lang == "pt"
 
 
+def test_load_corrupt_file_falls_back_to_defaults_not_raises(monkeypatch, tmp_path):
+    """A truncated/corrupt config.json (crash mid-write, manual edit, disk full)
+    must not take down every tool that calls Config.load() at startup — it
+    should log and fall back to defaults, same resilience convention as
+    graphbridge._load_registry and tracker.ProcessTracker._read."""
+    import delegation_core.config as config_mod
+
+    config_file = tmp_path / "config.json"
+    monkeypatch.setattr(config_mod, "CONFIG_DIR", tmp_path)
+    monkeypatch.setattr(config_mod, "CONFIG_FILE", config_file)
+    config_file.write_text("{not valid json", encoding="utf-8")
+
+    cfg = config_mod.Config.load()
+    assert cfg.vault_path == ""
+
+
 def test_load_ignores_unknown_keys(monkeypatch, tmp_path):
     import json
     import delegation_core.config as config_mod

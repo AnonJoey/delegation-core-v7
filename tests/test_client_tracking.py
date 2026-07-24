@@ -118,6 +118,55 @@ def test_list_connected_clients_ignores_corrupt_files(tmp_path):
     assert ct.list_connected_clients() == []
 
 
+def test_list_connected_clients_ignores_files_missing_last_seen(tmp_path):
+    """A heartbeat file that's valid JSON but missing "last_seen" (e.g. written
+    by a future/older schema version) hits the same `except Exception: continue`
+    path as a corrupt file via the KeyError on data["last_seen"] — must not
+    crash the whole /api/clients response over one bad entry."""
+    (tmp_path / "55555.json").write_text(
+        json.dumps({"pid": 55555, "client_name": "no-last-seen"}), encoding="utf-8"
+    )
+    assert ct.list_connected_clients() == []
+
+
+def test_list_connected_clients_sorts_multiple_clients_newest_first(tmp_path):
+    now = datetime.now(timezone.utc)
+
+    def _write(pid, name, seconds_ago):
+        (tmp_path / f"{pid}.json").write_text(json.dumps({
+            "pid": pid, "client_name": name, "client_version": "1.0",
+            "first_seen": (now - timedelta(seconds=seconds_ago)).isoformat(),
+            "last_seen": (now - timedelta(seconds=seconds_ago)).isoformat(),
+            "tool_calls": 1,
+        }), encoding="utf-8")
+
+    _write(111, "older-client", seconds_ago=60)
+    _write(222, "newer-client", seconds_ago=5)
+
+    clients = ct.list_connected_clients()
+    assert [c["client_name"] for c in clients] == ["newer-client", "older-client"]
+
+
+def test_list_connected_clients_keeps_entry_just_under_stale_threshold(tmp_path):
+    """A session updated just inside SESSION_STALE_SECONDS must still show as
+    connected. (Deliberately not testing the exact `age == SESSION_STALE_SECONDS`
+    instant — real wall-clock time elapses between writing the fixture and
+    list_connected_clients() computing `now`, which makes an exact-equality
+    boundary test flaky by construction; a comfortable margin is used instead.)
+    """
+    just_under = {
+        "pid": 33333, "client_name": "boundary-client", "client_version": "1.0",
+        "first_seen": "2020-01-01T00:00:00+00:00",
+        "last_seen": (datetime.now(timezone.utc)
+                      - timedelta(seconds=ct.SESSION_STALE_SECONDS - 5)).isoformat(),
+        "tool_calls": 1,
+    }
+    (tmp_path / "33333.json").write_text(json.dumps(just_under), encoding="utf-8")
+    clients = ct.list_connected_clients()
+    assert len(clients) == 1
+    assert clients[0]["client_name"] == "boundary-client"
+
+
 def test_cleanup_own_session_file_removes_this_pid(monkeypatch, tmp_path):
     import os
     fake_path = tmp_path / f"{os.getpid()}.json"
