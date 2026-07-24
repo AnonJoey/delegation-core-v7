@@ -40,21 +40,25 @@ function dot(ok) {
   return `<span class="dot ${ok ? "ok" : "bad"}"></span>`;
 }
 
+function stat(label, valueHtml) {
+  return `<span class="stat"><span class="stat-label">${label}</span>${valueHtml}</span>`;
+}
+
 async function refreshStatus() {
   const el = document.getElementById("status-fields");
   try {
     const s = await apiGet("/api/status");
-    el.innerHTML = `
-      <dt>Vault</dt><dd>${dot(s.vault_ok)}${s.vault_ok ? "ok" : "missing"}</dd>
-      <dt>Binary</dt><dd>${dot(s.binary_ok)}${s.binary_ok ? "ok" : "missing"}</dd>
-      <dt>Model</dt><dd>${dot(s.model_ok)}${s.model_ok ? "ok" : "missing"}</dd>
-      <dt>llama.cpp</dt><dd>${dot(s.llama_state === "online")}${escapeHtml(s.llama_state)}</dd>
-      <dt>Indexed notes</dt><dd>${escapeHtml(s.chroma_indexed_notes ?? "—")}</dd>
-      <dt>Engine mode</dt><dd>${escapeHtml(s.engine_mode)}</dd>
-      <dt>Synthesis</dt><dd>${s.synthesis_enabled ? "on" : "off"}</dd>
-    `;
+    el.innerHTML = [
+      stat("Vault", `${dot(s.vault_ok)}${s.vault_ok ? "ok" : "missing"}`),
+      stat("Binary", `${dot(s.binary_ok)}${s.binary_ok ? "ok" : "missing"}`),
+      stat("Model", `${dot(s.model_ok)}${s.model_ok ? "ok" : "missing"}`),
+      stat("llama.cpp", `${dot(s.llama_state === "online")}${escapeHtml(s.llama_state)}`),
+      stat("Indexed notes", escapeHtml(s.chroma_indexed_notes ?? "—")),
+      stat("Engine mode", escapeHtml(s.engine_mode)),
+      stat("Synthesis", s.synthesis_enabled ? "on" : "off"),
+    ].join("");
   } catch (e) {
-    el.innerHTML = `<dt class="muted">status unavailable</dt>`;
+    el.innerHTML = `<span class="muted">status unavailable</span>`;
   }
 }
 
@@ -71,20 +75,20 @@ async function refreshClients() {
   try {
     const { clients } = await apiGet("/api/clients");
     if (!clients.length) {
-      el.innerHTML = `<li class="muted">no clients connected</li>`;
+      el.innerHTML = `<span class="muted">no clients connected</span>`;
       return;
     }
     el.innerHTML = clients
       .map(
         (c) => `
-      <li>
-        <div class="client-name">${escapeHtml(c.client_name ?? "unknown")}</div>
-        <div class="client-meta">v${escapeHtml(c.client_version ?? "?")} · ${c.tool_calls} calls · ${timeAgo(c.seconds_since_active)}</div>
-      </li>`
+      <span class="client-chip">
+        <span class="client-name">${escapeHtml(c.client_name ?? "unknown")}</span>
+        <span class="client-meta">v${escapeHtml(c.client_version ?? "?")} · ${c.tool_calls} calls · ${timeAgo(c.seconds_since_active)}</span>
+      </span>`
       )
       .join("");
   } catch (e) {
-    el.innerHTML = `<li class="muted">unavailable</li>`;
+    el.innerHTML = `<span class="muted">unavailable</span>`;
   }
 }
 
@@ -217,12 +221,21 @@ class ForceGraph {
     const SPRING = 0.02;
     const SPRING_LEN = 70;
     const DAMPING = 0.85;
+    // Two close nodes (common with 100+ nodes randomly seeded into a modest
+    // canvas) used to produce a near-zero distSq, and REPEL/distSq spiked
+    // into the thousands with nothing capping the resulting velocity — that
+    // one huge kick could fling a node into a *different* cluster and repeat,
+    // never settling. MIN_DIST_SQ floors the repulsion at a sane distance
+    // instead of letting it blow up near zero; MAX_SPEED caps how far any
+    // single tick can move a node regardless of how large the force was.
+    const MIN_DIST_SQ = 400;
+    const MAX_SPEED = 8;
 
     for (let i = 0; i < nodes.length; i++) {
       for (let j = i + 1; j < nodes.length; j++) {
         const a = nodes[i], b = nodes[j];
         const dx = a.x - b.x, dy = a.y - b.y;
-        const distSq = Math.max(dx * dx + dy * dy, 1);
+        const distSq = Math.max(dx * dx + dy * dy, MIN_DIST_SQ);
         const force = REPEL / distSq;
         const dist = Math.sqrt(distSq);
         const fx = (dx / dist) * force, fy = (dy / dist) * force;
@@ -244,6 +257,11 @@ class ForceGraph {
       n.vx += (cx - n.x) * 0.0008;
       n.vy += (cy - n.y) * 0.0008;
       n.vx *= DAMPING; n.vy *= DAMPING;
+      const speed = Math.hypot(n.vx, n.vy);
+      if (speed > MAX_SPEED) {
+        n.vx = (n.vx / speed) * MAX_SPEED;
+        n.vy = (n.vy / speed) * MAX_SPEED;
+      }
       n.x += n.vx; n.y += n.vy;
     }
   }

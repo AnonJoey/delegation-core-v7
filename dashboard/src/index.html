@@ -9,68 +9,68 @@
   </head>
 
   <body>
-    <div class="layout">
-      <section class="graph-pane" id="graph-pane">
-        <h1 class="graph-pane-title">Vault Graph</h1>
-        <canvas id="graph-canvas"></canvas>
-        <div class="graph-hint muted">Drag nodes to rearrange. Scroll to zoom.</div>
-      </section>
+    <div class="app">
+      <header class="topbar">
+        <h1 class="topbar-title">delegation-core</h1>
 
-      <main class="main">
-        <nav class="tabs">
-          <button class="tab-btn active" data-tab="notes">Notes</button>
-          <button class="tab-btn" data-tab="tasks">Tasks</button>
-        </nav>
-
-        <section class="tab-content active" id="tab-notes">
-          <div class="notes-browser">
-            <div class="folder-list" id="folder-list"></div>
-            <div class="note-list" id="note-list"></div>
-            <div class="note-view">
-              <pre id="note-content" class="note-content muted">Select a note to view it.</pre>
-            </div>
-          </div>
+        <section class="topbar-section" id="status-panel">
+          <h2>Status</h2>
+          <div id="status-fields" class="status-fields">loading…</div>
         </section>
 
-        <section class="tab-content" id="tab-tasks">
-          <div class="tasks-browser">
-            <div class="task-list-pane">
-              <div class="tasks-toolbar">
-                <select id="tasks-status-filter">
-                  <option value="active" selected>Active</option>
-                  <option value="all">All</option>
-                  <option value="paused">Paused</option>
-                  <option value="done">Done</option>
-                  <option value="cancelled">Cancelled</option>
-                </select>
-                <button id="tasks-new-btn" type="button">+ New</button>
+        <section class="topbar-section topbar-section-clients" id="clients-panel">
+          <h2>Clients</h2>
+          <div id="clients-list" class="clients-list">
+            <span class="muted">loading…</span>
+          </div>
+        </section>
+      </header>
+
+      <div class="layout">
+        <section class="graph-pane" id="graph-pane">
+          <h1 class="graph-pane-title">Vault Graph</h1>
+          <canvas id="graph-canvas"></canvas>
+          <div class="graph-hint muted">Drag nodes to rearrange. Scroll to zoom.</div>
+        </section>
+
+        <main class="main">
+          <nav class="tabs">
+            <button class="tab-btn active" data-tab="notes">Notes</button>
+            <button class="tab-btn" data-tab="tasks">Tasks</button>
+          </nav>
+
+          <section class="tab-content active" id="tab-notes">
+            <div class="notes-browser">
+              <div class="folder-list" id="folder-list"></div>
+              <div class="note-list" id="note-list"></div>
+              <div class="note-view">
+                <pre id="note-content" class="note-content muted">Select a note to view it.</pre>
               </div>
-              <div class="task-list" id="task-list"></div>
             </div>
-            <div class="task-detail" id="task-detail">
-              <div class="muted">Select a process, or create a new one.</div>
+          </section>
+
+          <section class="tab-content" id="tab-tasks">
+            <div class="tasks-browser">
+              <div class="task-list-pane">
+                <div class="tasks-toolbar">
+                  <select id="tasks-status-filter">
+                    <option value="active" selected>Active</option>
+                    <option value="all">All</option>
+                    <option value="paused">Paused</option>
+                    <option value="done">Done</option>
+                    <option value="cancelled">Cancelled</option>
+                  </select>
+                  <button id="tasks-new-btn" type="button">+ New</button>
+                </div>
+                <div class="task-list" id="task-list"></div>
+              </div>
+              <div class="task-detail" id="task-detail">
+                <div class="muted">Select a process, or create a new one.</div>
+              </div>
             </div>
-          </div>
-        </section>
-      </main>
-
-      <aside class="sidebar">
-        <h1>delegation-core</h1>
-
-        <section class="panel" id="status-panel">
-          <h2>Server Status</h2>
-          <dl id="status-fields" class="fields">
-            <dt>loading…</dt>
-          </dl>
-        </section>
-
-        <section class="panel" id="clients-panel">
-          <h2>Connected Clients</h2>
-          <ul id="clients-list" class="clients-list">
-            <li class="muted">loading…</li>
-          </ul>
-        </section>
-      </aside>
+          </section>
+        </main>
+      </div>
     </div>
   </body>
 </html>

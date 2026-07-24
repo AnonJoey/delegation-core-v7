@@ -38,56 +38,67 @@ body {
   overflow: hidden;
 }
 
-.layout {
+.app {
   display: flex;
+  flex-direction: column;
   height: 100vh;
 }
 
-.sidebar {
-  width: 280px;
+.topbar {
   flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px 28px;
+  padding: 10px 16px;
   background: var(--bg-panel);
-  border-left: 1px solid var(--border);
-  padding: 16px;
-  overflow-y: auto;
+  border-bottom: 1px solid var(--border);
 }
 
-.sidebar h1 {
+.topbar-title {
   font-size: 15px;
   font-weight: 600;
-  margin: 0 0 16px;
+  margin: 0;
+  flex-shrink: 0;
 }
 
-.panel {
-  margin-bottom: 24px;
+.topbar-section {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  min-width: 0;
 }
 
-.panel h2 {
+.topbar-section-clients {
+  flex: 1;
+  min-width: 0;
+}
+
+.topbar-section h2 {
   font-size: 11px;
   text-transform: uppercase;
   letter-spacing: 0.05em;
   color: var(--fg-muted);
-  margin: 0 0 8px;
+  margin: 0;
+  flex-shrink: 0;
 }
 
-.fields {
-  margin: 0;
-  display: grid;
-  grid-template-columns: auto 1fr;
-  gap: 4px 8px;
+.status-fields {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 16px;
   font-size: 12px;
 }
 
-.fields dt {
-  color: var(--fg-muted);
+.stat {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  white-space: nowrap;
 }
 
-.fields dd {
-  margin: 0;
-  text-align: right;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+.stat-label {
+  color: var(--fg-muted);
 }
 
 .dot {
@@ -95,7 +106,7 @@ body {
   width: 8px;
   height: 8px;
   border-radius: 50%;
-  margin-right: 5px;
+  margin-right: 2px;
 }
 
 .dot.ok {
@@ -107,19 +118,23 @@ body {
 }
 
 .clients-list {
-  list-style: none;
-  margin: 0;
-  padding: 0;
+  display: flex;
+  gap: 8px;
+  overflow-x: auto;
   font-size: 12px;
+  min-width: 0;
 }
 
-.clients-list li {
-  padding: 6px 0;
-  border-bottom: 1px solid var(--border);
-}
-
-.clients-list li:last-child {
-  border-bottom: none;
+.client-chip {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  white-space: nowrap;
+  padding: 3px 10px;
+  border-radius: 12px;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  flex-shrink: 0;
 }
 
 .client-name {
@@ -133,6 +148,12 @@ body {
 
 .muted {
   color: var(--fg-muted);
+}
+
+.layout {
+  flex: 1;
+  display: flex;
+  min-height: 0;
 }
 
 .main {
