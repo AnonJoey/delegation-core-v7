@@ -303,7 +303,21 @@ class DelegationEngine:
         logger.info("Starting llama.cpp: %s", " ".join(cmd))
 
         try:
-            self._log_fh = open(self.cfg.llama_log_path, "a")
+            # llama.cpp's stdout/stderr are redirected straight into this file
+            # for the process's whole lifetime — a plain "a" open with no
+            # rotation grows unbounded across restarts (observed at ~490KB
+            # after normal use on one dev machine, and this runs as a
+            # long-lived autostart service). subprocess needs a real fd, not
+            # a logging.Handler, so rotate by size at each startup instead:
+            # good enough since growth only matters over the many restarts a
+            # persistent service accumulates, not within a single run.
+            _MAX_LLAMA_LOG_BYTES = 10 * 1024 * 1024
+            log_path = self.cfg.llama_log_path
+            if log_path.exists() and log_path.stat().st_size > _MAX_LLAMA_LOG_BYTES:
+                rotated = log_path.with_suffix(log_path.suffix + ".1")
+                rotated.unlink(missing_ok=True)
+                log_path.rename(rotated)
+            self._log_fh = open(log_path, "a")
             self._proc = subprocess.Popen(
                 cmd,
                 stdout=self._log_fh,
