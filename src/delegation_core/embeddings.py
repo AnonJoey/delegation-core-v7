@@ -37,11 +37,27 @@ def make_bge_embedding_function(model_name: str):
 
     device = detect_device()
     logger.info("Loading BGE model: %s (device=%s)", model_name, device)
-    return SentenceTransformerEmbeddingFunction(
-        model_name=model_name,
-        device=device,
-        normalize_embeddings=True,
-    )
+    try:
+        return SentenceTransformerEmbeddingFunction(
+            model_name=model_name,
+            device=device,
+            normalize_embeddings=True,
+        )
+    except Exception as e:
+        # detect_device() only checks whether CUDA/MPS *exists*, not whether
+        # there's free memory for it right now — a concurrently-running
+        # llama.cpp server (this project's own local-LLM mode) can leave next
+        # to nothing free, and every retry would hit the exact same OOM
+        # forever since _ensure_ready() just calls this again unchanged. Fall
+        # back to CPU once rather than leaving search permanently broken.
+        if device == "cpu":
+            raise
+        logger.warning("BGE load failed on %s (%s) — falling back to cpu", device, e)
+        return SentenceTransformerEmbeddingFunction(
+            model_name=model_name,
+            device="cpu",
+            normalize_embeddings=True,
+        )
 
 
 def chunk_text(text: str, max_chars: int = 4000, overlap: int = 200) -> list[str]:
