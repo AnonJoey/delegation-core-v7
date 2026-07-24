@@ -26,10 +26,10 @@ struct SidecarState {
     child: Mutex<Option<Child>>,
 }
 
-fn venv_python() -> PathBuf {
+fn venv_python() -> Result<PathBuf, SidecarError> {
     let home = std::env::var("HOME")
         .or_else(|_| std::env::var("USERPROFILE"))
-        .expect("could not determine home directory");
+        .map_err(|_| SidecarError::NoHomeDir)?;
     let mut path = PathBuf::from(home);
     path.push(".delegation_core");
     path.push("venv");
@@ -40,13 +40,14 @@ fn venv_python() -> PathBuf {
         path.push("bin");
         path.push("python3");
     }
-    path
+    Ok(path)
 }
 
 /// Everything that can go wrong starting the sidecar, as data rather than a
 /// panic — a packaged app launched by double-clicking an icon has no attached
 /// terminal, so a panic is just a silent crash with nothing to show the user.
 enum SidecarError {
+    NoHomeDir,
     VenvMissing(PathBuf),
     SpawnFailed(std::io::Error),
     NoStdout,
@@ -62,6 +63,11 @@ impl SidecarError {
     /// terminal (npm run tauri dev).
     fn user_message(&self) -> String {
         match self {
+            SidecarError::NoHomeDir => "delegation-core could not determine your home \
+                 directory (neither HOME nor USERPROFILE is set), so it doesn't know \
+                 where to find its Python environment.\n\n\
+                 Try relaunching this app from a normal desktop session or terminal."
+                .to_string(),
             SidecarError::VenvMissing(path) => format!(
                 "delegation-core isn't set up yet.\n\n\
                  Expected a Python environment at:\n{}\n\n\
@@ -93,7 +99,7 @@ impl SidecarError {
             SidecarError::PortUnparseable(line) => {
                 eprintln!("sidecar error: could not parse port from sidecar output: {line:?}")
             }
-            SidecarError::VenvMissing(_) | SidecarError::SpawnFailed(_) => {} // already in user_message()
+            SidecarError::NoHomeDir | SidecarError::VenvMissing(_) | SidecarError::SpawnFailed(_) => {} // already in user_message()
         }
     }
 }
@@ -105,7 +111,7 @@ fn spawn_dashboard_api() -> Result<(u16, Child), SidecarError> {
     // Acceptable for now (startup has consistently been ~1-2s in testing); a
     // real fix needs a timeout thread, which is more machinery than this pass
     // covers.
-    let python = venv_python();
+    let python = venv_python()?;
     if !python.exists() {
         return Err(SidecarError::VenvMissing(python));
     }

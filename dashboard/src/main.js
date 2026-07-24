@@ -209,6 +209,17 @@ class ForceGraph {
       const factor = e.deltaY < 0 ? 1.1 : 0.9;
       this.scale = Math.min(4, Math.max(0.2, this.scale * factor));
     });
+    // canvas.width/height are a drawing-buffer resolution, not CSS size — the
+    // flexbox layout resizes the element on window resize but never touches
+    // that resolution on its own. Left alone, mouse coords (e.offsetX/Y, in
+    // CSS-pixel space) drift out of sync with node coords (in the stale
+    // buffer's pixel space), so drag/hit-testing target the wrong spot after
+    // any resize, and the existing render just stretches to fill the new size.
+    window.addEventListener("resize", () => {
+      const rect = c.parentElement.getBoundingClientRect();
+      c.width = rect.width;
+      c.height = rect.height;
+    });
   }
 
   _toWorld(sx, sy) {
@@ -309,8 +320,16 @@ class ForceGraph {
   }
 
   _tick() {
-    this._step();
-    this._draw();
+    // Skip the O(n^2) repulsion pass and redraw while the window is minimized
+    // or occluded on another virtual desktop — rAF alone doesn't guarantee
+    // that (behavior varies by webview/platform), and this graph runs forever
+    // for the life of the app, so an unconditional loop would burn CPU/battery
+    // indefinitely for a window nobody can see. Still reschedule so it picks
+    // back up immediately once visible again.
+    if (!document.hidden) {
+      this._step();
+      this._draw();
+    }
     requestAnimationFrame(() => this._tick());
   }
 }
