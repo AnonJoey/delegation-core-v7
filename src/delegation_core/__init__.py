@@ -8,4 +8,4 @@
 # v0.7.0: this drifted again (docstring/__version__ said 0.6.3 while
 # pyproject.toml said 0.6.4, then 0.7.0) — the exact regression the 2026-07-22
 # upgrade session on the other machine caught and patched. Re-synced here.
-__version__ = "0.8.1"
+__version__ = "0.9.0"

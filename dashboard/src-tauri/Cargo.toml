@@ -1,6 +1,6 @@
 [package]
 name = "dashboard"
-version = "0.1.0"
+version = "0.2.0"
 # The bundler falls back to these for package metadata (.deb Description /
 # Maintainer come from here when tauri.conf.json doesn't override) — keep them
 # real, not scaffold placeholders.
