@@ -195,10 +195,11 @@ class ForceGraph {
   constructor(canvas, data) {
     this.canvas = canvas;
     this.ctx = canvas.getContext("2d");
+    this._resizeCanvas(); // sets this.width/height (logical) + this.dpr before anything below uses them
     this.nodes = data.nodes.map((n) => ({
       ...n,
-      x: Math.random() * canvas.width,
-      y: Math.random() * canvas.height,
+      x: Math.random() * this.width,
+      y: Math.random() * this.height,
       vx: 0,
       vy: 0,
     }));
@@ -210,8 +211,59 @@ class ForceGraph {
     this.offsetX = 0;
     this.offsetY = 0;
     this.dragNode = null;
+    this._watchResize();
     this._bindEvents();
     this._tick();
+  }
+
+  // canvas.width/height (attributes) are the backing-buffer resolution; the
+  // canvas's on-screen CSS size is separately controlled by the flexbox
+  // layout (100% of its parent). Leaving the buffer at a flat 1:1 mapping to
+  // CSS pixels renders blurrier than the surrounding UI on any HiDPI display
+  // — Retina on macOS, and Windows' near-universal fractional display
+  // scaling — since the browser then upscales the low-res buffer to fill the
+  // physically-higher-res screen. this.width/this.height (logical/CSS
+  // pixels) are what every physics and hit-testing calculation in this class
+  // uses, matching what mouse events (e.offsetX/offsetY) always report
+  // regardless of screen density; the buffer itself is sized at
+  // width*dpr/height*dpr, with the mismatch corrected by one ctx.scale(dpr,
+  // dpr) in _draw() rather than by touching any of that logical-space math.
+  _resizeCanvas() {
+    const rect = this.canvas.parentElement.getBoundingClientRect();
+    this.dpr = window.devicePixelRatio || 1;
+    this.width = rect.width;
+    this.height = rect.height;
+    this.canvas.width = Math.round(rect.width * this.dpr);
+    this.canvas.height = Math.round(rect.height * this.dpr);
+  }
+
+  _watchResize() {
+    // ResizeObserver, not a raw window "resize" listener: it also reacts to
+    // layout-driven size changes of the graph pane itself (not just
+    // top-level OS window resizes), and the browser naturally coalesces it
+    // to at most once per frame instead of firing on every intermediate
+    // pixel during a drag-resize the way "resize" can. Supported across all
+    // three of Tauri's webview engines (WebView2/Windows, WebKitGTK/Linux,
+    // WKWebView/macOS) — this is a standard web platform API, not a
+    // Linux-only or Windows-only assumption.
+    new ResizeObserver(() => this._resizeCanvas()).observe(this.canvas.parentElement);
+
+    // devicePixelRatio has no native "it changed" event — the standard
+    // workaround is a matchMedia query pinned to the *current* ratio, which
+    // fires once that stops matching (i.e. the ratio changed), and must be
+    // re-armed at the new ratio to keep watching. This is what catches
+    // dragging the window between differently-scaled displays (per-monitor
+    // DPI on Windows; moving between a Retina and an external non-Retina
+    // display on macOS) even when the window's CSS size hasn't changed at
+    // all, which ResizeObserver alone would miss.
+    const watchDpr = () => {
+      matchMedia(`(resolution: ${this.dpr}dppx)`).addEventListener(
+        "change",
+        () => { this._resizeCanvas(); watchDpr(); },
+        { once: true }
+      );
+    };
+    watchDpr();
   }
 
   _bindEvents() {
@@ -247,17 +299,6 @@ class ForceGraph {
       e.preventDefault();
       const factor = e.deltaY < 0 ? 1.1 : 0.9;
       this.scale = Math.min(4, Math.max(0.2, this.scale * factor));
-    });
-    // canvas.width/height are a drawing-buffer resolution, not CSS size — the
-    // flexbox layout resizes the element on window resize but never touches
-    // that resolution on its own. Left alone, mouse coords (e.offsetX/Y, in
-    // CSS-pixel space) drift out of sync with node coords (in the stale
-    // buffer's pixel space), so drag/hit-testing target the wrong spot after
-    // any resize, and the existing render just stretches to fill the new size.
-    window.addEventListener("resize", () => {
-      const rect = c.parentElement.getBoundingClientRect();
-      c.width = rect.width;
-      c.height = rect.height;
     });
   }
 
@@ -301,7 +342,7 @@ class ForceGraph {
       e.source.vx += fx; e.source.vy += fy;
       e.target.vx -= fx; e.target.vy -= fy;
     }
-    const cx = this.canvas.width / 2, cy = this.canvas.height / 2;
+    const cx = this.width / 2, cy = this.height / 2; // logical center, not the dpr-scaled backing buffer
     for (const n of nodes) {
       if (n === this.dragNode) continue;
       n.vx += (cx - n.x) * 0.0008;
@@ -325,6 +366,7 @@ class ForceGraph {
 
     ctx.clearRect(0, 0, this.canvas.width, this.canvas.height);
     ctx.save();
+    ctx.scale(this.dpr, this.dpr); // logical (CSS-pixel) space -> the dpr-scaled backing buffer
     ctx.translate(this.offsetX, this.offsetY);
     ctx.scale(this.scale, this.scale);
 
@@ -376,12 +418,9 @@ class ForceGraph {
 async function loadVaultGraph() {
   const canvas = document.getElementById("graph-canvas");
   const hint = document.querySelector("#graph-pane .graph-hint");
-  const rect = canvas.parentElement.getBoundingClientRect();
-  canvas.width = rect.width;
-  canvas.height = rect.height;
   try {
     const data = await apiGet("/api/vault/graph");
-    new ForceGraph(canvas, data);
+    new ForceGraph(canvas, data); // sizes the canvas itself — see _resizeCanvas()
   } catch (e) {
     if (hint) hint.textContent = "Could not load the vault graph.";
     throw e; // still surfaces to the caller — see main()'s Promise.allSettled

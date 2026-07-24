@@ -12,7 +12,9 @@
       {
         "title": "delegation-core Dashboard",
         "width": 1100,
-        "height": 750
+        "height": 750,
+        "minWidth": 900,
+        "minHeight": 600
       }
     ],
     "security": {
