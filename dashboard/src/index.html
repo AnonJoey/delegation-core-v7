@@ -32,6 +32,7 @@
         <nav class="tabs">
           <button class="tab-btn active" data-tab="notes">Notes</button>
           <button class="tab-btn" data-tab="graph">Vault Graph</button>
+          <button class="tab-btn" data-tab="tasks">Tasks</button>
         </nav>
 
         <section class="tab-content active" id="tab-notes">
@@ -47,6 +48,27 @@
         <section class="tab-content" id="tab-graph">
           <canvas id="graph-canvas"></canvas>
           <div class="graph-hint muted">Drag nodes to rearrange. Scroll to zoom.</div>
+        </section>
+
+        <section class="tab-content" id="tab-tasks">
+          <div class="tasks-browser">
+            <div class="task-list-pane">
+              <div class="tasks-toolbar">
+                <select id="tasks-status-filter">
+                  <option value="active" selected>Active</option>
+                  <option value="all">All</option>
+                  <option value="paused">Paused</option>
+                  <option value="done">Done</option>
+                  <option value="cancelled">Cancelled</option>
+                </select>
+                <button id="tasks-new-btn" type="button">+ New</button>
+              </div>
+              <div class="task-list" id="task-list"></div>
+            </div>
+            <div class="task-detail" id="task-detail">
+              <div class="muted">Select a process, or create a new one.</div>
+            </div>
+          </div>
         </section>
       </main>
     </div>

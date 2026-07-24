@@ -1,26 +1,52 @@
 """
-dashboard_api.py — local, read-only JSON HTTP API for the Tauri dashboard.
+dashboard_api.py — local JSON HTTP API for the Tauri dashboard.
 
 Deliberately NOT part of the MCP server: FastMCP's mcp.run() serves one transport
 at a time (stdio here), so it can't also serve HTTP for a UI in the same process.
 This is a separate, small process — stdlib http.server only, no new dependency —
 that the Tauri app's Rust backend spawns as a sidecar and talks to over
-127.0.0.1. It reuses Config/VaultManager/graphbridge/client_tracking directly;
-none of this goes through the MCP protocol.
+127.0.0.1. It reuses Config/VaultManager/graphbridge/client_tracking/ProcessTracker
+directly; none of this goes through the MCP protocol.
 
 Bound to 127.0.0.1 only (never a public interface) since it has no auth — it's
 meant to be reached exclusively by the local Tauri webview.
 
 Endpoints:
-  GET /api/status                  vault/binary/model/llama.cpp health
-  GET /api/clients                 currently-connected MCP client surfaces
-  GET /api/vault/tree               folder -> notes listing
-  GET /api/vault/note?path=...      one note's raw content
-  GET /api/vault/search?q=...       BGE similarity search
-  GET /api/vault/graph              {nodes, edges} from [[wikilinks]] across the vault
-  GET /api/graphs                   previously built code graphs (graphbridge registry)
+  GET  /api/status                  vault/binary/model/llama.cpp health
+  GET  /api/clients                 currently-connected MCP client surfaces
+  GET  /api/vault/tree               folder -> notes listing
+  GET  /api/vault/note?path=...      one note's raw content
+  GET  /api/vault/search?q=...       BGE similarity search
+  GET  /api/vault/graph              {nodes, edges} from [[wikilinks]] across the vault
+  GET  /api/graphs                   previously built code graphs (graphbridge registry)
+  GET  /api/processes?status=&query= tracked processes (ProcessTracker.list_processes)
+  GET  /api/processes/get?id=...     full detail of one process
+  POST /api/processes/create         {name, description, steps: [str]}
+  POST /api/processes/update         {process_id, note, step_done, status}
 
-New in v0.8.0. Also runnable standalone (without Tauri) via:
+Process endpoints read/write the SAME ~/.delegation_core/processes.json the MCP
+tools (process_create/list/update/get) and CLI (`delegation-core process ...`)
+already use — ProcessTracker's own write-then-rename is what keeps that safe
+across processes, same as it always has been; nothing new added here for it.
+
+New in v0.8.0 (GET endpoints only). v0.8.1 added the process write endpoints
+(POST /api/processes/create, /update) for the dashboard's Task Tracker panel,
+plus two fixes found during that pass's code review rather than from running
+anything:
+  - CORS was `Access-Control-Allow-Origin: *` unconditionally — this server
+    has no auth, so that let ANY website open in the user's regular browser
+    read/write vault and process data via a guessed local port, not just the
+    Tauri webview. Now allowlists only http(s)://127.0.0.1|localhost:<port>
+    and the tauri://localhost / http://tauri.localhost schemes — confirmed by
+    directly inspecting the real Origin header the Tauri dev webview sends
+    (http://127.0.0.1:1430 on this build) rather than guessing.
+  - /api/vault/note's path-containment check was a plain string prefix
+    (str(target).startswith(str(vault_root))) — bypassable via a sibling
+    directory whose name happens to start with the vault root's own name.
+    Fixed with Path.relative_to(); the identical bug existed in server.py's
+    relink_folder tool too (fixed there in the same pass).
+
+Also runnable standalone (without Tauri) via:
   delegation-core dashboard-api [--port N]
 """
 
@@ -28,6 +54,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import socket
 import sys
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -36,14 +63,15 @@ from urllib.parse import parse_qs, urlparse
 
 logger = logging.getLogger("dashboard_api")
 
-_cfg = None    # set once in run() — Config
-_vault = None  # set once in run() — VaultManager, shared across every request.
-               # A fresh VaultManager per request (the original version of this
-               # file did this) reloads the BGE model and re-opens ChromaDB on
-               # every single API call — slow, and observed directly to fail
-               # ("Vault not initialized") under repeated init. One shared
-               # instance, initialized once at startup, matches server.py's
-               # own _vault global pattern.
+_cfg = None     # set once in run() — Config
+_vault = None   # set once in run() — VaultManager, shared across every request.
+                # A fresh VaultManager per request (the original version of this
+                # file did this) reloads the BGE model and re-opens ChromaDB on
+                # every single API call — slow, and observed directly to fail
+                # ("Vault not initialized") under repeated init. One shared
+                # instance, initialized once at startup, matches server.py's
+                # own _vault global pattern.
+_tracker = None  # set once in run() — ProcessTracker, same shared-instance reasoning
 
 
 def _pick_port(preferred: int = 0) -> int:
@@ -154,19 +182,52 @@ class _Handler(BaseHTTPRequestHandler):
     def log_message(self, format, *args):
         pass
 
+    def _cors_origin(self) -> str | None:
+        """Origin to echo back in Access-Control-Allow-Origin, or None to omit
+        the header entirely (browser then blocks the caller from reading the
+        response).
+
+        This server has no auth and binds only to 127.0.0.1, but that alone
+        doesn't stop a page loaded from a completely different site in the
+        user's regular browser from fetch()-ing a guessed local port — CORS is
+        what actually stops that page's JS from reading the response (and,
+        via the preflight this unlocks, from a state-changing POST executing
+        at all). Sending `Access-Control-Allow-Origin: *` — this server's
+        original behavior — grants that to literally any website. The only
+        legitimate caller is this app's own Tauri webview, whose Origin is
+        either an http://127.0.0.1:<port>/http://localhost:<port> dev asset
+        server (confirmed directly: `tauri dev` serves the frontend from
+        http://127.0.0.1:1430 on this build) or a tauri://localhost /
+        http://tauri.localhost production scheme, depending on platform and
+        build mode. Allow exactly that shape; nothing else.
+        """
+        origin = self.headers.get("Origin")
+        if not origin:
+            return None
+        if origin in ("tauri://localhost", "http://tauri.localhost"):
+            return origin
+        if re.fullmatch(r"http://(127\.0\.0\.1|localhost):\d+", origin):
+            return origin
+        return None
+
     def _send_json(self, payload: dict, status: int = 200) -> None:
         body = json.dumps(payload).encode("utf-8")
         self.send_response(status)
         self.send_header("Content-Type", "application/json")
         self.send_header("Content-Length", str(len(body)))
-        self.send_header("Access-Control-Allow-Origin", "*")
+        origin = self._cors_origin()
+        if origin:
+            self.send_header("Access-Control-Allow-Origin", origin)
         self.end_headers()
         self.wfile.write(body)
 
     def do_OPTIONS(self):
         self.send_response(204)
-        self.send_header("Access-Control-Allow-Origin", "*")
-        self.send_header("Access-Control-Allow-Methods", "GET, OPTIONS")
+        origin = self._cors_origin()
+        if origin:
+            self.send_header("Access-Control-Allow-Origin", origin)
+            self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+            self.send_header("Access-Control-Allow-Headers", "Content-Type")
         self.end_headers()
 
     def do_GET(self):
@@ -190,11 +251,121 @@ class _Handler(BaseHTTPRequestHandler):
             elif parsed.path == "/api/graphs":
                 from . import graphbridge
                 self._send_json(graphbridge.list_graphs(_cfg))
+            elif parsed.path == "/api/processes":
+                self._handle_processes_list(query)
+            elif parsed.path == "/api/processes/get":
+                self._handle_processes_get(query)
             else:
                 self._send_json({"error": f"not found: {parsed.path}"}, status=404)
         except Exception as e:
             logger.exception("Request failed: %s", parsed.path)
             self._send_json({"error": str(e)}, status=500)
+
+    _MAX_BODY_BYTES = 1_000_000  # 1 MB — generous for a process create/update payload
+
+    def _read_json_body(self) -> dict | None:
+        """Parse the request body as JSON. Returns None (and has already sent an
+        error response) if the body is missing, oversized, or not valid JSON —
+        callers should return immediately when this returns None."""
+        length = int(self.headers.get("Content-Length", 0))
+        if length <= 0:
+            self._send_json({"error": "missing request body"}, status=400)
+            return None
+        if length > self._MAX_BODY_BYTES:
+            self._send_json({"error": "request body too large"}, status=413)
+            return None
+        raw = self.rfile.read(length)
+        try:
+            data = json.loads(raw)
+        except json.JSONDecodeError as e:
+            self._send_json({"error": f"invalid JSON body: {e}"}, status=400)
+            return None
+        if not isinstance(data, dict):
+            self._send_json({"error": "request body must be a JSON object"}, status=400)
+            return None
+        return data
+
+    def do_POST(self):
+        parsed = urlparse(self.path)
+        try:
+            if parsed.path == "/api/processes/create":
+                self._handle_processes_create()
+            elif parsed.path == "/api/processes/update":
+                self._handle_processes_update()
+            else:
+                self._send_json({"error": f"not found: {parsed.path}"}, status=404)
+        except Exception as e:
+            logger.exception("Request failed: %s", parsed.path)
+            self._send_json({"error": str(e)}, status=500)
+
+    def _handle_processes_list(self, query) -> None:
+        status = (query.get("status") or ["active"])[0]
+        proc_query = (query.get("query") or [""])[0]
+        processes = _tracker.list_processes(status=status, query=proc_query)
+        self._send_json({"count": len(processes), "processes": processes})
+
+    def _handle_processes_get(self, query) -> None:
+        process_id = (query.get("id") or [""])[0]
+        if not process_id:
+            self._send_json({"error": "missing id parameter"}, status=400)
+            return
+        proc = _tracker.get(process_id)
+        if proc is None:
+            self._send_json({"error": f"not found: {process_id}"}, status=404)
+            return
+        self._send_json(proc)
+
+    def _handle_processes_create(self) -> None:
+        data = self._read_json_body()
+        if data is None:
+            return
+        name = str(data.get("name", "")).strip()
+        if not name:
+            self._send_json({"error": "name is required"}, status=400)
+            return
+        description = str(data.get("description", ""))
+        steps = data.get("steps") or []
+        if not isinstance(steps, list) or not all(isinstance(s, str) for s in steps):
+            self._send_json({"error": "steps must be a list of strings"}, status=400)
+            return
+        proc = _tracker.create(name=name, description=description, steps=steps)
+        self._send_json(proc, status=201)
+
+    def _handle_processes_update(self) -> None:
+        data = self._read_json_body()
+        if data is None:
+            return
+        process_id = str(data.get("process_id", "")).strip()
+        if not process_id:
+            self._send_json({"error": "process_id is required"}, status=400)
+            return
+        from .tracker import VALID_STATUSES
+        status = data.get("status", "")
+        # isinstance guard before the `in` check: VALID_STATUSES is a set, and
+        # `x not in a_set` raises TypeError for an unhashable x (e.g. a JSON
+        # array/object sent as "status") rather than just failing validation.
+        if status and (not isinstance(status, str) or status not in VALID_STATUSES):
+            self._send_json(
+                {"error": f"invalid status '{status}'. Valid: {sorted(VALID_STATUSES)}"},
+                status=400,
+            )
+            return
+        step_done = data.get("step_done", -1)
+        # bool is a subclass of int in Python, so isinstance(True, int) is True —
+        # explicitly exclude it so a JSON `true`/`false` (easy client-side typo
+        # for "mark this done") doesn't silently become step_done=1/0 instead of
+        # a clear validation error.
+        if isinstance(step_done, bool) or not isinstance(step_done, int):
+            self._send_json({"error": "step_done must be an integer"}, status=400)
+            return
+        proc = _tracker.update(
+            process_id=process_id, note=str(data.get("note", "")),
+            step_done=step_done, status=status,
+        )
+        if proc is None:
+            self._send_json({"error": f"not found: {process_id}"}, status=404)
+            return
+        self._send_json(proc)
 
     def _handle_vault_tree(self) -> None:
         tree = {folder: _vault.list_notes(folder, limit=1000) for folder in _cfg.vault_folders}
@@ -207,7 +378,15 @@ class _Handler(BaseHTTPRequestHandler):
             return
         vault_root = _cfg.vault.resolve()
         target = (vault_root / rel_path).resolve()
-        if not str(target).startswith(str(vault_root)):
+        # NOT str(target).startswith(str(vault_root)) — a plain string prefix
+        # check is bypassable whenever a sibling directory's name happens to
+        # start with the vault root's own name (vault at .../vault, and e.g.
+        # .../vault-secrets exists: "../vault-secrets/x" resolves outside the
+        # vault but the string still starts with ".../vault"). relative_to()
+        # only succeeds for a genuine path-component match.
+        try:
+            target.relative_to(vault_root)
+        except ValueError:
             self._send_json({"error": "path escapes vault root"}, status=400)
             return
         if not target.exists():
@@ -235,7 +414,7 @@ def run(port: int = 0, host: str = "127.0.0.1") -> None:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s",
                         stream=sys.stderr)
 
-    global _cfg, _vault
+    global _cfg, _vault, _tracker
     _cfg = Config.load()
     if not _cfg.is_configured():
         sys.stderr.write("delegation-core is not configured.\nRun: delegation-core setup\n")
@@ -244,6 +423,9 @@ def run(port: int = 0, host: str = "127.0.0.1") -> None:
     from .vault import VaultManager
     _vault = VaultManager(_cfg)
     _vault._init()  # blocking — BGE + ChromaDB ready before serving, once, not per-request
+
+    from .tracker import ProcessTracker
+    _tracker = ProcessTracker(_cfg.processes_path)
 
     actual_port = _pick_port(port)
     server = ThreadingHTTPServer((host, actual_port), _Handler)

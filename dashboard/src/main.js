@@ -1,14 +1,37 @@
 // delegation-core dashboard frontend. Plain JS, no framework/bundler — fetches
 // from the local dashboard_api.py sidecar (see src-tauri/src/lib.rs for how its
-// port is picked up) and renders four things: server status, connected MCP
-// clients, a notes browser, and the vault as a force-directed wikilink graph.
+// port is picked up) and renders five things: server status, connected MCP
+// clients, a notes browser, the vault as a force-directed wikilink graph, and
+// a tracked-process (task) browser.
 
 let apiBase = null;
 
 async function apiGet(path) {
   const res = await fetch(`${apiBase}${path}`);
-  if (!res.ok) throw new Error(`${path}: HTTP ${res.status}`);
-  return res.json();
+  const body = await res.json();
+  if (!res.ok) throw new Error(body.error || `${path}: HTTP ${res.status}`);
+  return body;
+}
+
+async function apiPost(path, payload) {
+  const res = await fetch(`${apiBase}${path}`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+  const body = await res.json();
+  if (!res.ok) throw new Error(body.error || `${path}: HTTP ${res.status}`);
+  return body;
+}
+
+// All rendered text ultimately comes from local files (note content/titles,
+// process names/notes) or the far end of an MCP client's initialize handshake
+// (client name/version) — none of it is something this app authored, so it's
+// escaped before going into innerHTML rather than trusted as safe markup.
+function escapeHtml(value) {
+  return String(value ?? "").replace(/[&<>"']/g, (c) => ({
+    "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;",
+  })[c]);
 }
 
 // ── status panel ─────────────────────────────────────────────────────────────
@@ -25,9 +48,9 @@ async function refreshStatus() {
       <dt>Vault</dt><dd>${dot(s.vault_ok)}${s.vault_ok ? "ok" : "missing"}</dd>
       <dt>Binary</dt><dd>${dot(s.binary_ok)}${s.binary_ok ? "ok" : "missing"}</dd>
       <dt>Model</dt><dd>${dot(s.model_ok)}${s.model_ok ? "ok" : "missing"}</dd>
-      <dt>llama.cpp</dt><dd>${dot(s.llama_state === "online")}${s.llama_state}</dd>
-      <dt>Indexed notes</dt><dd>${s.chroma_indexed_notes ?? "—"}</dd>
-      <dt>Engine mode</dt><dd>${s.engine_mode}</dd>
+      <dt>llama.cpp</dt><dd>${dot(s.llama_state === "online")}${escapeHtml(s.llama_state)}</dd>
+      <dt>Indexed notes</dt><dd>${escapeHtml(s.chroma_indexed_notes ?? "—")}</dd>
+      <dt>Engine mode</dt><dd>${escapeHtml(s.engine_mode)}</dd>
       <dt>Synthesis</dt><dd>${s.synthesis_enabled ? "on" : "off"}</dd>
     `;
   } catch (e) {
@@ -55,8 +78,8 @@ async function refreshClients() {
       .map(
         (c) => `
       <li>
-        <div class="client-name">${c.client_name ?? "unknown"}</div>
-        <div class="client-meta">v${c.client_version ?? "?"} · ${c.tool_calls} calls · ${timeAgo(c.seconds_since_active)}</div>
+        <div class="client-name">${escapeHtml(c.client_name ?? "unknown")}</div>
+        <div class="client-meta">v${escapeHtml(c.client_version ?? "?")} · ${c.tool_calls} calls · ${timeAgo(c.seconds_since_active)}</div>
       </li>`
       )
       .join("");
@@ -70,13 +93,18 @@ async function refreshClients() {
 let vaultTree = null;
 
 async function loadNotesBrowser() {
-  vaultTree = await apiGet("/api/vault/tree");
   const folderList = document.getElementById("folder-list");
+  try {
+    vaultTree = await apiGet("/api/vault/tree");
+  } catch (e) {
+    folderList.innerHTML = `<div class="muted list-item">unavailable</div>`;
+    throw e; // still surfaces to the caller — see main()'s Promise.allSettled
+  }
   const folders = Object.keys(vaultTree.folders);
   folderList.innerHTML = folders
     .map(
       (f) =>
-        `<div class="list-item" data-folder="${f}">${f} <span class="count">${vaultTree.folders[f].length}</span></div>`
+        `<div class="list-item" data-folder="${escapeHtml(f)}">${escapeHtml(f)} <span class="count">${vaultTree.folders[f].length}</span></div>`
     )
     .join("");
   folderList.querySelectorAll(".list-item").forEach((el) => {
@@ -96,7 +124,7 @@ function selectFolder(folder) {
     return;
   }
   noteList.innerHTML = notes
-    .map((n) => `<div class="list-item" data-path="${n.path}">${n.title}</div>`)
+    .map((n) => `<div class="list-item" data-path="${escapeHtml(n.path)}">${escapeHtml(n.title)}</div>`)
     .join("");
   noteList.querySelectorAll(".list-item").forEach((el) => {
     el.addEventListener("click", () => selectNote(el.dataset.path, el));
@@ -111,7 +139,7 @@ async function selectNote(path, el) {
   content.classList.add("muted");
   try {
     const { content: text } = await apiGet(`/api/vault/note?path=${encodeURIComponent(path)}`);
-    content.textContent = text;
+    content.textContent = text; // textContent, not innerHTML — raw note body, never parsed as markup
     content.classList.remove("muted");
   } catch (e) {
     content.textContent = "could not load note";
@@ -254,6 +282,8 @@ class ForceGraph {
       ctx.fillStyle = fg;
       ctx.font = `${11 / this.scale}px sans-serif`;
       for (const n of this.nodes) {
+        // fillText, not innerHTML — canvas text draws characters directly,
+        // never interpreted as markup, so n.title needs no escaping here.
         ctx.fillText(n.title, n.x + 10, n.y + 4);
       }
     }
@@ -269,16 +299,201 @@ class ForceGraph {
 
 async function loadVaultGraph() {
   const canvas = document.getElementById("graph-canvas");
+  const hint = document.querySelector("#tab-graph .graph-hint");
   const rect = canvas.parentElement.getBoundingClientRect();
   canvas.width = rect.width;
   canvas.height = rect.height;
-  const data = await apiGet("/api/vault/graph");
-  new ForceGraph(canvas, data);
+  try {
+    const data = await apiGet("/api/vault/graph");
+    new ForceGraph(canvas, data);
+  } catch (e) {
+    if (hint) hint.textContent = "Could not load the vault graph.";
+    throw e; // caller resets graphLoaded so revisiting the tab retries
+  }
+}
+
+// ── task tracker ─────────────────────────────────────────────────────────────
+
+let selectedTaskId = null;
+
+async function loadTaskList() {
+  const status = document.getElementById("tasks-status-filter").value;
+  const el = document.getElementById("task-list");
+  try {
+    const { processes } = await apiGet(`/api/processes?status=${encodeURIComponent(status)}`);
+    if (!processes.length) {
+      el.innerHTML = `<div class="muted list-item">no processes</div>`;
+      return;
+    }
+    el.innerHTML = processes
+      .map((p) => {
+        const done = p.steps.filter((s) => s.done).length;
+        const stepsLabel = p.steps.length ? `${done}/${p.steps.length} steps` : p.status;
+        return `<div class="task-list-item ${p.id === selectedTaskId ? "active" : ""}" data-id="${escapeHtml(p.id)}">
+          <div class="task-name">${escapeHtml(p.name)}</div>
+          <div class="task-meta">${escapeHtml(stepsLabel)}</div>
+        </div>`;
+      })
+      .join("");
+    el.querySelectorAll(".task-list-item").forEach((item) => {
+      item.addEventListener("click", () => selectTask(item.dataset.id));
+    });
+  } catch (e) {
+    el.innerHTML = `<div class="muted list-item">unavailable</div>`;
+  }
+}
+
+async function selectTask(id) {
+  selectedTaskId = id;
+  document.querySelectorAll(".task-list-item").forEach((el) => {
+    el.classList.toggle("active", el.dataset.id === id);
+  });
+  await renderTaskDetail(id);
+}
+
+async function renderTaskDetail(id) {
+  const el = document.getElementById("task-detail");
+  el.innerHTML = `<div class="muted">loading…</div>`;
+  let proc;
+  try {
+    proc = await apiGet(`/api/processes/get?id=${encodeURIComponent(id)}`);
+  } catch (e) {
+    el.innerHTML = `<div class="muted">could not load process</div>`;
+    return;
+  }
+
+  const stepsHtml = proc.steps
+    .map(
+      (s, i) => `<li class="${s.done ? "done" : ""}" data-index="${i}">
+        <input type="checkbox" ${s.done ? "checked" : ""} ${s.done ? "disabled" : ""} data-index="${i}" />
+        ${escapeHtml(s.description)}
+      </li>`
+    )
+    .join("");
+
+  const notesHtml = proc.notes.length
+    ? proc.notes
+        .map(
+          (n) => `<li>
+            <div class="note-timestamp">${escapeHtml(n.timestamp)}</div>
+            <div>${escapeHtml(n.text)}</div>
+          </li>`
+        )
+        .join("")
+    : `<li class="muted">no notes yet</li>`;
+
+  el.innerHTML = `
+    <h2>${escapeHtml(proc.name)}</h2>
+    <div class="task-status-badge">${escapeHtml(proc.status)}</div>
+    ${proc.description ? `<div class="task-description">${escapeHtml(proc.description)}</div>` : ""}
+
+    <div class="task-status-actions">
+      <button data-status="active">Active</button>
+      <button data-status="paused">Pause</button>
+      <button data-status="done">Done</button>
+      <button data-status="cancelled">Cancel</button>
+    </div>
+
+    ${proc.steps.length ? `<ul class="task-steps">${stepsHtml}</ul>` : ""}
+
+    <ul class="task-notes">${notesHtml}</ul>
+
+    <div class="note-input-row">
+      <input type="text" id="new-note-input" placeholder="Add a note…" />
+      <button id="add-note-btn" type="button">Add</button>
+    </div>
+  `;
+
+  // If apiPost() fails here, without this the checkbox is left showing
+  // "checked" by the browser's own default behavior even though nothing was
+  // actually saved (the re-render that would reveal the mismatch never runs)
+  // — silently misleading. Reset the visual state and say so instead.
+  el.querySelectorAll('.task-steps input[type="checkbox"]').forEach((cb) => {
+    cb.addEventListener("change", async () => {
+      try {
+        await apiPost("/api/processes/update", {
+          process_id: proc.id,
+          step_done: Number(cb.dataset.index),
+        });
+        await renderTaskDetail(proc.id);
+        await loadTaskList();
+      } catch (e) {
+        cb.checked = false;
+        alert(`Could not update step: ${e.message}`);
+      }
+    });
+  });
+
+  el.querySelectorAll(".task-status-actions button").forEach((btn) => {
+    btn.addEventListener("click", async () => {
+      try {
+        await apiPost("/api/processes/update", { process_id: proc.id, status: btn.dataset.status });
+        await renderTaskDetail(proc.id);
+        await loadTaskList();
+      } catch (e) {
+        alert(`Could not update status: ${e.message}`);
+      }
+    });
+  });
+
+  const noteInput = document.getElementById("new-note-input");
+  const addNote = async () => {
+    const text = noteInput.value.trim();
+    if (!text) return;
+    try {
+      await apiPost("/api/processes/update", { process_id: proc.id, note: text });
+      await renderTaskDetail(proc.id);
+    } catch (e) {
+      alert(`Could not add note: ${e.message}`);
+    }
+  };
+  document.getElementById("add-note-btn").addEventListener("click", addNote);
+  noteInput.addEventListener("keydown", (e) => {
+    if (e.key === "Enter") addNote();
+  });
+}
+
+function showNewTaskForm() {
+  selectedTaskId = null;
+  document.querySelectorAll(".task-list-item").forEach((el) => el.classList.remove("active"));
+  const el = document.getElementById("task-detail");
+  el.innerHTML = `
+    <h2>New process</h2>
+    <div class="task-form">
+      <label>Name<br /><input type="text" id="new-task-name" /></label>
+      <label>Description<br /><textarea id="new-task-description" rows="3"></textarea></label>
+      <label>Steps (comma-separated)<br /><input type="text" id="new-task-steps" placeholder="plan, implement, test" /></label>
+      <button id="create-task-btn" type="button">Create</button>
+    </div>
+  `;
+  document.getElementById("create-task-btn").addEventListener("click", async () => {
+    const name = document.getElementById("new-task-name").value.trim();
+    if (!name) return;
+    const description = document.getElementById("new-task-description").value.trim();
+    const steps = document
+      .getElementById("new-task-steps")
+      .value.split(",")
+      .map((s) => s.trim())
+      .filter(Boolean);
+    try {
+      const proc = await apiPost("/api/processes/create", { name, description, steps });
+      await loadTaskList();
+      await selectTask(proc.id);
+    } catch (e) {
+      alert(`Could not create process: ${e.message}`);
+    }
+  });
+}
+
+function setupTasksPanel() {
+  document.getElementById("tasks-status-filter").addEventListener("change", loadTaskList);
+  document.getElementById("tasks-new-btn").addEventListener("click", showNewTaskForm);
 }
 
 // ── tabs ─────────────────────────────────────────────────────────────────────
 
 let graphLoaded = false;
+let tasksLoaded = false;
 
 function setupTabs() {
   document.querySelectorAll(".tab-btn").forEach((btn) => {
@@ -288,9 +503,21 @@ function setupTabs() {
       btn.classList.add("active");
       const tab = btn.dataset.tab;
       document.getElementById(`tab-${tab}`).classList.add("active");
+      // graphLoaded/tasksLoaded are only set on success — a failed first load
+      // (e.g. the sidecar wasn't fully warmed up yet) stays retriable by just
+      // switching tabs away and back, rather than being stuck forever.
       if (tab === "graph" && !graphLoaded) {
-        graphLoaded = true;
-        await loadVaultGraph();
+        try {
+          await loadVaultGraph();
+          graphLoaded = true;
+        } catch (e) {
+          /* error already shown in the graph hint by loadVaultGraph() */
+        }
+      }
+      if (tab === "tasks" && !tasksLoaded) {
+        setupTasksPanel();
+        await loadTaskList(); // already catches its own errors internally
+        tasksLoaded = true;
       }
     });
   });
@@ -303,9 +530,12 @@ async function main() {
   apiBase = `http://127.0.0.1:${port}`;
 
   setupTabs();
-  await refreshStatus();
-  await refreshClients();
-  await loadNotesBrowser();
+  // refreshStatus/refreshClients already catch their own errors, but
+  // loadNotesBrowser() re-throws on failure (so its own caller can tell) —
+  // Promise.allSettled (not awaiting each in sequence) means one of these
+  // failing can't stop the other two, or skip registering the setInterval
+  // calls below, the way a plain sequential `await` chain would.
+  await Promise.allSettled([refreshStatus(), refreshClients(), loadNotesBrowser()]);
 
   setInterval(refreshStatus, 5000);
   setInterval(refreshClients, 5000);

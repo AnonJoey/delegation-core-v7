@@ -43,11 +43,19 @@ fn venv_python() -> PathBuf {
 }
 
 fn spawn_dashboard_api() -> (u16, Child) {
+    // NOTE (found during review, not yet fixed): every failure path here is a
+    // hard panic — a missing venv, a spawn failure, or dashboard_api.py hanging
+    // during its own startup (BGE/ChromaDB init) all currently either crash the
+    // app before any window appears, or (for a hang) block .setup() forever with
+    // no feedback and no timeout on the read_line() below. Acceptable for a dev
+    // tool run from a terminal (the panic message is at least visible there),
+    // but worth a real error dialog + startup timeout before this is ever
+    // bundled/distributed to someone who'd launch it by double-clicking an icon.
     let python = venv_python();
     if !python.exists() {
         panic!(
             "delegation-core venv python not found at {:?}. \
-             Run `pip install -e \".[graph]\"` in ~/.delegation_core/venv first.",
+             Run `delegation-core setup` first.",
             python
         );
     }

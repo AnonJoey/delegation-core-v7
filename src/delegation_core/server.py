@@ -70,6 +70,14 @@ v0.8.0 changes:
     Clients panel — each running instance is one MCP client surface (Claude
     Code, Claude Desktop, Codex, etc.), since delegation-core runs over stdio
     and there's no single shared connection to introspect otherwise.
+
+v0.8.1: relink_folder's path-containment check was `str(target).startswith(
+str(vault_root))` — a plain string-prefix comparison, bypassable whenever a
+sibling directory's name happens to start with the vault root's own name
+(vault at .../vault, and .../vault-old exists: "../vault-old/x" resolves
+outside the vault but the string still starts with ".../vault"). Found during
+a review of dashboard_api.py's identical check (same bug, same fix: Path.
+relative_to() instead of a string comparison).
 """
 
 import asyncio
@@ -450,7 +458,15 @@ async def relink_folder(
     """
     vault_root = _vault.cfg.vault.resolve()
     target = (vault_root / folder).resolve()
-    if not str(target).startswith(str(vault_root)):
+    # relative_to(), not a string prefix check — str(target).startswith(str(vault_root))
+    # is bypassable whenever a sibling directory's name happens to start with
+    # the vault root's own name (vault at .../vault, and e.g. .../vault-old
+    # exists: "../vault-old/x" resolves outside the vault but the string still
+    # starts with ".../vault"). Found + fixed in dashboard_api.py's identical
+    # check first (2026-07-23 dashboard code review); this is the same bug.
+    try:
+        target.relative_to(vault_root)
+    except ValueError:
         return json.dumps({"error": f"Invalid folder path: {folder}"})
     loop = asyncio.get_running_loop()
     try:
