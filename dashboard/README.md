@@ -1,8 +1,11 @@
 # delegation-core Dashboard
 
-A native Tauri desktop app that accompanies the `delegation-core` MCP server: server
-status, connected MCP clients (Claude Code, Claude Desktop, etc.), a notes browser, and
-the vault rendered as an Obsidian-style force-directed wikilink graph.
+A native Tauri desktop app that accompanies the `delegation-core` MCP server: a top bar
+with server status and connected MCP clients (Claude Code, Claude Desktop, etc.), a
+persistent left-hand pane rendering the vault as an Obsidian-style force-directed
+wikilink graph, and a main area tabbed between a notes browser and a cross-session task
+tracker (create/filter/update tracked processes — the same `processes.json` the MCP
+tools and CLI use).
 
 ## Architecture
 
@@ -26,17 +29,32 @@ own heartbeat file (`~/.delegation_core/sessions/<pid>.json`, via
 `client_tracking.py`'s FastMCP middleware), and `/api/clients` aggregates whichever
 ones are still fresh.
 
-## Prerequisites
+## Install
+
+Most users don't build this directly — the repo-root `install.sh` / `install.bat` /
+`install.command` installs a native package for this app (`.deb`/`.rpm`/`.AppImage` on
+Linux, `.msi`/NSIS `.exe` on Windows, `.dmg` on macOS) alongside the Python/MCP side,
+preferring a local build if one exists and otherwise fetching the latest GitHub release.
+The matching `uninstall.sh` / `uninstall.bat` / `uninstall.command` removes it again. See
+the repo-root `README.md`'s Install section.
+
+## Prerequisites (building from source)
 
 - delegation-core installed and configured (`delegation-core setup`) — this app spawns
   `~/.delegation_core/venv/bin/python3` directly, no separate Python install needed.
 - Rust + Cargo, Node + npm (for the Tauri toolchain itself).
 
-## Running
+## Running (development)
 
 ```bash
 npm install
 npm run tauri dev
+```
+
+To produce the same installable bundles the top-level installer looks for:
+
+```bash
+npm run tauri build
 ```
 
 **Linux/NVIDIA/Wayland note**: `lib.rs` sets `WEBKIT_DISABLE_DMABUF_RENDERER=1` before
@@ -44,6 +62,7 @@ the webview is created — works around a WebKitGTK crash ("Error 71: Protocol e
 dispatching to Wayland display") seen directly on an NVIDIA + KWin/Wayland dev machine.
 Confirmed via A/B testing that the more commonly-suggested
 `WEBKIT_DISABLE_COMPOSITING_MODE=1` also avoids the crash but breaks this app's flexbox
-sidebar layout (forces a software-rendering fallback with different CSS behavior) — the
-DMABUF-only fix avoids the crash without that regression. Harmless on setups that don't
-need it.
+layout (forces a software-rendering fallback with different CSS behavior — at the time
+this was found, the status/clients region was a sidebar; it's since moved to the top
+bar, but the same rendering regression applies to today's layout) — the DMABUF-only fix
+avoids the crash without that regression. Harmless on setups that don't need it.

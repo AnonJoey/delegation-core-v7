@@ -21,10 +21,31 @@ protocol an AI agent should follow when this MCP server is connected.
   into the vault. Vendored and adapted from
   [Graphify](https://github.com/Graphify-Labs/graphify) — see `THIRD_PARTY_LICENSES/`.
 - **Process tracking**: lightweight cross-session task tracking that survives restarts.
-- **Dashboard** (`dashboard/`): a native Tauri desktop app — server status, connected MCP
-  clients, a notes browser, and the vault as an Obsidian-style graph. See `dashboard/README.md`.
+- **Dashboard** (`dashboard/`): a native Tauri desktop app — a top status/clients bar, a
+  persistent vault-graph pane, a notes browser, and a cross-session task tracker. See
+  `dashboard/README.md`.
 
 ## Install
+
+The platform installer is the easiest path: it detects Python, creates a venv, installs
+delegation-core, installs the native Tauri dashboard app (from a local build if present,
+otherwise the latest GitHub release, falling back to manual build instructions if neither
+is available), then launches the setup wizard automatically. Re-running it on an existing
+install upgrades in place — `config.json` is preserved and the prior install is backed up,
+the wizard is not re-run.
+
+```bash
+./install.sh              # Linux / macOS
+install.bat                # Windows (or double-click)
+```
+
+(macOS: `install.command` is a double-clickable Finder shim to `install.sh`.)
+
+To remove everything the installer created — venv, config, logs, hooks — run the matching
+uninstaller (`uninstall.sh` / `uninstall.bat` / `uninstall.command`). It never touches your
+vault or downloaded model weights.
+
+For a manual/dev install instead (no OS packages, no dashboard app):
 
 ```bash
 pip install -e .                    # core (vault + MCP server)

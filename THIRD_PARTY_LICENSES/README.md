@@ -3,15 +3,27 @@
 ## Graphify (`src/delegation_core/graph/`)
 
 `src/delegation_core/graph/` is vendored from [Graphify](https://github.com/Graphify-Labs/graphify),
-Copyright 2026 Safi Shamsi and the Graphify contributors, dual-licensed under your choice of the
-Apache License 2.0 (`Graphify-LICENSE-Apache-2.0`) or the MIT License (`Graphify-LICENSE-MIT`) —
-both included in this directory verbatim from the upstream repository.
+Copyright 2026 Safi Shamsi and the Graphify contributors.
 
-**What was taken:** the core pipeline (`detect`/`extract`/`build`/`cluster`/`analyze`/`report`/`export`),
-all language extractors (`extractors/`, `exporters/`), plus (added 2026-07-23) `callflow_html.py`
-(Mermaid architecture diagrams), `affected.py` (blast-radius query), and `wiki.py` (per-community/
-god-node articles) — roughly 43 of Graphify's 90 files. Explicitly not included: Graphify's own
-CLI, installer, LLM client, MCP server (`serve.py`), watch daemon, benchmark suite, "reflect"
+**Licensing is not a simple "your choice" dual license.** Upstream Graphify relicensed from MIT
+to Apache License 2.0 on 2026-07-22 (its `0.9.25` release, one day before this project vendored
+it): contributions made *before* the relicensing remain available under the original MIT terms,
+per upstream's own `NOTICE` file, while the project as a whole is now Apache-2.0. All three
+upstream files are reproduced verbatim here: `Graphify-LICENSE-Apache-2.0` (current primary
+license), `Graphify-LICENSE-MIT` (retained terms for pre-relicense contributions), and
+`Graphify-NOTICE` (upstream's own attribution notice, reproduced as required by the Apache
+License's NOTICE-passthrough clause).
+
+**What was taken:** the core pipeline (`detect`/`extract`/`build`/`cluster`/`analyze`/`report`/
+`export`), all language extractors (`extractors/`, `exporters/`), the shared infrastructure
+modules (`cache.py`, `dedup.py`, `ids.py`, `paths.py`, `resolver_registry.py`,
+`pascal_resolution.py`, `ruby_resolution.py`, `security.py`, `validate.py`, `_minhash.py`), the
+alternate-source ingesters (`google_workspace.py`, `manifest_ingest.py`, `mcp_ingest.py`), plus
+(added 2026-07-23) `callflow_html.py` (Mermaid architecture diagrams), `affected.py`
+(blast-radius query), and `wiki.py` (per-community/god-node articles) — 55 of Graphify's Python
+files as vendored on 2026-07-23 (upstream's own tree has grown since; this list is not
+recomputed against later upstream commits). Explicitly not included: Graphify's own CLI,
+installer, LLM client, MCP server (`serve.py`), watch daemon, benchmark suite, "reflect"
 memory-overlay system, and alternate ingestion sources (PR/query-log/SCIP/URL/video ingestion).
 See `src/delegation_core/graph/__init__.py`'s module docstring for the authoritative list.
 
