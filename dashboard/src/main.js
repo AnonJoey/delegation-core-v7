@@ -299,7 +299,7 @@ class ForceGraph {
 
 async function loadVaultGraph() {
   const canvas = document.getElementById("graph-canvas");
-  const hint = document.querySelector("#tab-graph .graph-hint");
+  const hint = document.querySelector("#graph-pane .graph-hint");
   const rect = canvas.parentElement.getBoundingClientRect();
   canvas.width = rect.width;
   canvas.height = rect.height;
@@ -308,7 +308,7 @@ async function loadVaultGraph() {
     new ForceGraph(canvas, data);
   } catch (e) {
     if (hint) hint.textContent = "Could not load the vault graph.";
-    throw e; // caller resets graphLoaded so revisiting the tab retries
+    throw e; // still surfaces to the caller — see main()'s Promise.allSettled
   }
 }
 
@@ -491,8 +491,10 @@ function setupTasksPanel() {
 }
 
 // ── tabs ─────────────────────────────────────────────────────────────────────
+// The vault graph is no longer one of these — it's always visible in its own
+// pane (see #graph-pane in index.html) rather than a tab someone has to click
+// into, so only Notes/Tasks toggle here.
 
-let graphLoaded = false;
 let tasksLoaded = false;
 
 function setupTabs() {
@@ -503,17 +505,9 @@ function setupTabs() {
       btn.classList.add("active");
       const tab = btn.dataset.tab;
       document.getElementById(`tab-${tab}`).classList.add("active");
-      // graphLoaded/tasksLoaded are only set on success — a failed first load
-      // (e.g. the sidecar wasn't fully warmed up yet) stays retriable by just
-      // switching tabs away and back, rather than being stuck forever.
-      if (tab === "graph" && !graphLoaded) {
-        try {
-          await loadVaultGraph();
-          graphLoaded = true;
-        } catch (e) {
-          /* error already shown in the graph hint by loadVaultGraph() */
-        }
-      }
+      // tasksLoaded is only set on success — a failed first load (e.g. the
+      // sidecar wasn't fully warmed up yet) stays retriable by just switching
+      // tabs away and back, rather than being stuck forever.
       if (tab === "tasks" && !tasksLoaded) {
         setupTasksPanel();
         await loadTaskList(); // already catches its own errors internally
@@ -530,12 +524,17 @@ async function main() {
   apiBase = `http://127.0.0.1:${port}`;
 
   setupTabs();
-  // refreshStatus/refreshClients already catch their own errors, but
-  // loadNotesBrowser() re-throws on failure (so its own caller can tell) —
+  // refreshStatus/refreshClients/loadVaultGraph already catch their own
+  // errors (or, for loadNotesBrowser, re-throw so its own caller can tell) —
   // Promise.allSettled (not awaiting each in sequence) means one of these
-  // failing can't stop the other two, or skip registering the setInterval
-  // calls below, the way a plain sequential `await` chain would.
-  await Promise.allSettled([refreshStatus(), refreshClients(), loadNotesBrowser()]);
+  // failing can't stop the others, or skip registering the setInterval calls
+  // below, the way a plain sequential `await` chain would.
+  await Promise.allSettled([
+    refreshStatus(),
+    refreshClients(),
+    loadNotesBrowser(),
+    loadVaultGraph(),
+  ]);
 
   setInterval(refreshStatus, 5000);
   setInterval(refreshClients, 5000);

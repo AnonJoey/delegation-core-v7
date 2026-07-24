@@ -47,7 +47,7 @@ body {
   width: 280px;
   flex-shrink: 0;
   background: var(--bg-panel);
-  border-right: 1px solid var(--border);
+  border-left: 1px solid var(--border);
   padding: 16px;
   overflow-y: auto;
 }
@@ -229,8 +229,21 @@ body {
   font-size: 11px;
 }
 
-#tab-graph {
+.graph-pane {
+  flex: 1 1 45%;
+  min-width: 280px;
+  display: flex;
+  flex-direction: column;
   position: relative;
+  border-right: 1px solid var(--border);
+  background: var(--bg-panel);
+}
+
+.graph-pane-title {
+  font-size: 15px;
+  font-weight: 600;
+  margin: 0;
+  padding: 16px 16px 0;
 }
 
 #graph-canvas {

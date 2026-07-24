@@ -10,28 +10,15 @@
 
   <body>
     <div class="layout">
-      <aside class="sidebar">
-        <h1>delegation-core</h1>
-
-        <section class="panel" id="status-panel">
-          <h2>Server Status</h2>
-          <dl id="status-fields" class="fields">
-            <dt>loading…</dt>
-          </dl>
-        </section>
-
-        <section class="panel" id="clients-panel">
-          <h2>Connected Clients</h2>
-          <ul id="clients-list" class="clients-list">
-            <li class="muted">loading…</li>
-          </ul>
-        </section>
-      </aside>
+      <section class="graph-pane" id="graph-pane">
+        <h1 class="graph-pane-title">Vault Graph</h1>
+        <canvas id="graph-canvas"></canvas>
+        <div class="graph-hint muted">Drag nodes to rearrange. Scroll to zoom.</div>
+      </section>
 
       <main class="main">
         <nav class="tabs">
           <button class="tab-btn active" data-tab="notes">Notes</button>
-          <button class="tab-btn" data-tab="graph">Vault Graph</button>
           <button class="tab-btn" data-tab="tasks">Tasks</button>
         </nav>
 
@@ -43,11 +30,6 @@
               <pre id="note-content" class="note-content muted">Select a note to view it.</pre>
             </div>
           </div>
-        </section>
-
-        <section class="tab-content" id="tab-graph">
-          <canvas id="graph-canvas"></canvas>
-          <div class="graph-hint muted">Drag nodes to rearrange. Scroll to zoom.</div>
         </section>
 
         <section class="tab-content" id="tab-tasks">
@@ -71,6 +53,24 @@
           </div>
         </section>
       </main>
+
+      <aside class="sidebar">
+        <h1>delegation-core</h1>
+
+        <section class="panel" id="status-panel">
+          <h2>Server Status</h2>
+          <dl id="status-fields" class="fields">
+            <dt>loading…</dt>
+          </dl>
+        </section>
+
+        <section class="panel" id="clients-panel">
+          <h2>Connected Clients</h2>
+          <ul id="clients-list" class="clients-list">
+            <li class="muted">loading…</li>
+          </ul>
+        </section>
+      </aside>
     </div>
   </body>
 </html>
