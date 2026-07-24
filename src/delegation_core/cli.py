@@ -122,7 +122,7 @@ def cmd_status(_args):
 
     if not cfg.is_configured():
         console.print("[yellow]Not configured.[/yellow] Run: delegation-core setup")
-        return
+        sys.exit(1)
 
     ok   = "[green]✓[/green]"
     fail = "[red]✗[/red]"
@@ -179,7 +179,7 @@ def cmd_reindex(_args):
     cfg = Config.load()
     if not cfg.is_configured():
         console.print("[yellow]Not configured.[/yellow] Run: delegation-core setup")
-        return
+        sys.exit(1)
 
     console.print(f"Reindexing [bold]{cfg.vault_path}[/bold] ...")
     vault = VaultManager(cfg)
@@ -226,7 +226,7 @@ def cmd_ingest(args):
     cfg = Config.load()
     if not cfg.is_configured():
         console.print("[yellow]Not configured.[/yellow] Run: delegation-core setup")
-        return
+        sys.exit(1)
 
     recursive = not getattr(args, "no_recursive", False)
     console.print(f"Ingesting [bold]{args.path}[/bold] (recursive={recursive}) ...")
@@ -237,7 +237,7 @@ def cmd_ingest(args):
 
     if "error" in result:
         console.print(f"[red]Error:[/red] {result['error']}")
-        return
+        sys.exit(1)
 
     console.print(
         f"[green]✓[/green]  {result['indexed']} files indexed, "
@@ -259,7 +259,7 @@ def cmd_relink(args):
     cfg = Config.load()
     if not cfg.is_configured():
         console.print("[yellow]Not configured.[/yellow] Run: delegation-core setup")
-        return
+        sys.exit(1)
 
     days = getattr(args, "days", None)
     min_sim = getattr(args, "min_similarity", None)
@@ -285,13 +285,13 @@ def cmd_search(args):
     cfg = Config.load()
     if not cfg.is_configured():
         console.print("[yellow]Not configured.[/yellow] Run: delegation-core setup")
-        return
+        sys.exit(1)
 
     vault = VaultManager(cfg)
     hits = vault.search(args.query, limit=args.limit)
     if hits and "error" in hits[0]:
         console.print(f"[red]Error:[/red] {hits[0]['error']}")
-        return
+        sys.exit(1)
     if not hits:
         console.print("[dim]No results above similarity threshold.[/dim]")
         return
@@ -312,7 +312,7 @@ def cmd_compress(args):
     cfg = Config.load()
     if not cfg.is_configured():
         console.print("[yellow]Not configured.[/yellow] Run: delegation-core setup")
-        return
+        sys.exit(1)
 
     raw = _read_content(args.file, "content to compress")
     limit = 1500 if cfg.is_cpu_budget else 6000
@@ -365,10 +365,10 @@ def cmd_note_write(args):
     cfg = Config.load()
     if not cfg.is_configured():
         console.print("[yellow]Not configured.[/yellow] Run: delegation-core setup")
-        return
+        sys.exit(1)
     if args.folder not in cfg.vault_folders:
         console.print(f"[red]Invalid folder[/red] '{args.folder}'. Valid: {cfg.vault_folders}")
-        return
+        sys.exit(1)
 
     content = _read_content(args.file, "note content")
     vault = VaultManager(cfg)
@@ -395,12 +395,12 @@ def cmd_note_read(args):
     cfg = Config.load()
     if not cfg.is_configured():
         console.print("[yellow]Not configured.[/yellow] Run: delegation-core setup")
-        return
+        sys.exit(1)
     vault = VaultManager(cfg)
     matches = vault.find_notes_by_stem(args.name)
     if not matches:
         console.print(f"[red]Not found:[/red] {args.name}")
-        return
+        sys.exit(1)
     console.print(matches[0].read_text(encoding="utf-8"))
 
 
@@ -413,14 +413,14 @@ def cmd_note_update(args):
     cfg = Config.load()
     if not cfg.is_configured():
         console.print("[yellow]Not configured.[/yellow] Run: delegation-core setup")
-        return
+        sys.exit(1)
 
     content = _read_content(args.file, "content to append")
     vault = VaultManager(cfg)
     result = vault.update_note(args.name, content)
     if "error" in result:
         console.print(f"[red]Error:[/red] {result['error']}")
-        return
+        sys.exit(1)
     matches = vault.find_notes_by_stem(args.name)
     if matches:
         f = matches[0]
@@ -437,10 +437,10 @@ def cmd_note_list(args):
     cfg = Config.load()
     if not cfg.is_configured():
         console.print("[yellow]Not configured.[/yellow] Run: delegation-core setup")
-        return
+        sys.exit(1)
     if args.folder not in cfg.vault_folders:
         console.print(f"[red]Invalid folder[/red] '{args.folder}'. Valid: {cfg.vault_folders}")
-        return
+        sys.exit(1)
     vault = VaultManager(cfg)
     notes = vault.list_notes(args.folder, limit=args.limit)
     if not notes:
@@ -459,9 +459,12 @@ def cmd_note_find_similar(args):
     cfg = Config.load()
     if not cfg.is_configured():
         console.print("[yellow]Not configured.[/yellow] Run: delegation-core setup")
-        return
+        sys.exit(1)
     vault = VaultManager(cfg)
     results = vault.find_similar(args.name, threshold=args.threshold, limit=args.limit)
+    if results and "error" in results[0]:
+        console.print(f"[red]Error:[/red] {results[0]['error']}")
+        sys.exit(1)
     if not results:
         console.print("[dim]No similar notes found.[/dim]")
         return
@@ -489,7 +492,7 @@ def cmd_graph_build(args):
     cfg = _graph_config()
     if cfg is None:
         console.print("[yellow]Not configured.[/yellow] Run: delegation-core setup")
-        return
+        sys.exit(1)
 
     try:
         vault = VaultManager(cfg)
@@ -499,11 +502,11 @@ def cmd_graph_build(args):
     except ModuleNotFoundError as e:
         console.print(f"[red]Code-graph pipeline not installed:[/red] {e}\n"
                       'Run: pip install "delegation-core[graph]"')
-        return
+        sys.exit(1)
 
     if "error" in result:
         console.print(f"[red]Error:[/red] {result['error']}")
-        return
+        sys.exit(1)
     console.print(f"[green]✓[/green]  '{result['name']}': {result.get('node_count', 0)} nodes, "
                   f"{result.get('edge_count', 0)} edges, {result.get('community_count', 0)} communities")
     if result.get("graph_html"):
@@ -522,7 +525,7 @@ def cmd_graph_list(_args):
     cfg = _graph_config()
     if cfg is None:
         console.print("[yellow]Not configured.[/yellow] Run: delegation-core setup")
-        return
+        sys.exit(1)
     result = graphbridge.list_graphs(cfg)
     if not result["graphs"]:
         console.print("[dim]No graphs built yet. Run: delegation-core graph build <path>[/dim]")
@@ -541,11 +544,11 @@ def cmd_graph_report(args):
     cfg = _graph_config()
     if cfg is None:
         console.print("[yellow]Not configured.[/yellow] Run: delegation-core setup")
-        return
+        sys.exit(1)
     result = graphbridge.get_report(cfg, args.name)
     if "error" in result:
         console.print(f"[red]Error:[/red] {result['error']}")
-        return
+        sys.exit(1)
     console.print(result["report"])
 
 
@@ -557,15 +560,15 @@ def cmd_graph_affected(args):
     cfg = _graph_config()
     if cfg is None:
         console.print("[yellow]Not configured.[/yellow] Run: delegation-core setup")
-        return
+        sys.exit(1)
     try:
         result = graphbridge.get_affected(cfg, args.name, args.query, depth=args.depth)
     except ModuleNotFoundError as e:
         console.print(f"[red]Code-graph pipeline not installed:[/red] {e}")
-        return
+        sys.exit(1)
     if "error" in result:
         console.print(f"[red]Error:[/red] {result['error']}")
-        return
+        sys.exit(1)
     console.print(result["report"])
 
 
@@ -577,7 +580,7 @@ def cmd_graph_hook_install(args):
     result = graph_hook.install(args.path, name=args.name or None)
     if "error" in result:
         console.print(f"[red]Error:[/red] {result['error']}")
-        return
+        sys.exit(1)
     console.print(f"[green]✓[/green]  {result['status']}  {result.get('path', '')}")
 
 
@@ -589,7 +592,7 @@ def cmd_graph_hook_uninstall(args):
     result = graph_hook.uninstall(args.path)
     if "error" in result:
         console.print(f"[red]Error:[/red] {result['error']}")
-        return
+        sys.exit(1)
     console.print(f"[green]✓[/green]  {result['status']}")
 
 
@@ -601,7 +604,7 @@ def cmd_graph_hook_status(args):
     result = graph_hook.status(args.path)
     if "error" in result:
         console.print(f"[red]Error:[/red] {result['error']}")
-        return
+        sys.exit(1)
     state = "[green]installed[/green]" if result.get("installed") else "[dim]not installed[/dim]"
     console.print(state)
 
@@ -623,7 +626,7 @@ def cmd_process_create(args):
     tracker = _process_tracker()
     if tracker is None:
         console.print("[yellow]Not configured.[/yellow] Run: delegation-core setup")
-        return
+        sys.exit(1)
     steps = [s.strip() for s in args.steps.split(",") if s.strip()] if args.steps else []
     proc = tracker.create(name=args.name, description=args.description or "", steps=steps)
     console.print(f"[green]✓[/green]  {proc['id']}  {proc['name']}")
@@ -635,7 +638,7 @@ def cmd_process_list(args):
     tracker = _process_tracker()
     if tracker is None:
         console.print("[yellow]Not configured.[/yellow] Run: delegation-core setup")
-        return
+        sys.exit(1)
     processes = tracker.list_processes(status=args.status, query=args.query or "")
     if not processes:
         console.print("[dim]No processes.[/dim]")
@@ -652,7 +655,7 @@ def cmd_process_update(args):
     tracker = _process_tracker()
     if tracker is None:
         console.print("[yellow]Not configured.[/yellow] Run: delegation-core setup")
-        return
+        sys.exit(1)
     proc = tracker.update(
         process_id=args.process_id, note=args.note or "",
         step_done=args.step_done if args.step_done is not None else -1,
@@ -660,7 +663,7 @@ def cmd_process_update(args):
     )
     if proc is None:
         console.print(f"[red]Not found:[/red] {args.process_id}")
-        return
+        sys.exit(1)
     console.print(f"[green]✓[/green]  {proc['id']} updated")
 
 
@@ -670,11 +673,11 @@ def cmd_process_get(args):
     tracker = _process_tracker()
     if tracker is None:
         console.print("[yellow]Not configured.[/yellow] Run: delegation-core setup")
-        return
+        sys.exit(1)
     proc = tracker.get(args.process_id)
     if proc is None:
         console.print(f"[red]Not found:[/red] {args.process_id}")
-        return
+        sys.exit(1)
     console.print(json.dumps(proc, indent=2))
 
 
