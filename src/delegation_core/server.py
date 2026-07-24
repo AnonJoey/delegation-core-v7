@@ -402,7 +402,17 @@ async def run_maintenance() -> str:
     add wikilinks, write weekly summary, then heal low-quality notes.
     Use run_maintenance_bg for large inboxes.
     """
-    results = await _full_maintenance_cycle(_engine, _vault)
+    # Routed through the same worker-thread path as run_maintenance_bg (fresh
+    # DelegationEngine + its own event loop) rather than awaited directly on the
+    # main loop. The pipeline underneath (extractor.extract, vault.search/
+    # index_note per file) is synchronous, and FastMCP dispatches every incoming
+    # request as its own concurrent task on this one event loop (mcp.server.
+    # lowlevel.server.Server.run: tg.start_soon per message) — a client can
+    # pipeline a heartbeat()/task_status() call alongside this one, and a
+    # multi-file inbox pass would otherwise stall it until the whole cycle
+    # finished. This keeps run_maintenance()'s own contract (blocks until the
+    # full result is ready) while freeing the loop for everything else.
+    results = await asyncio.to_thread(asyncio.run, _bg_maintenance_wrapper())
     return json.dumps(results)
 
 
@@ -643,8 +653,18 @@ async def graph_build(path: str, name: str = "", force: bool = False) -> str:
     Requires the [graph] extra: pip install "delegation-core[graph]".
     """
     try:
-        result = await graphbridge.build_graph(
-            _vault.cfg, _vault, path, name=name or None, force=force,
+        # graphbridge.build_graph is `async def` in name only — detect/extract/
+        # build/cluster/analyze/report/export/wiki all run synchronously inside
+        # it (see its own docstring: "nothing inside actually awaits"), so a
+        # plain `await` here would run the entire tree-sitter + clustering +
+        # report pipeline directly on the event loop — for a real codebase that
+        # can be seconds to minutes, stalling any other tool call this same
+        # client fires concurrently (FastMCP runs each incoming request as its
+        # own task on one loop). asyncio.run() in a worker thread keeps this
+        # tool's own "block until built" contract while freeing the loop.
+        result = await asyncio.to_thread(
+            asyncio.run,
+            graphbridge.build_graph(_vault.cfg, _vault, path, name=name or None, force=force),
         )
     except ModuleNotFoundError as e:
         return json.dumps({"error": f"code-graph pipeline not installed: {e}. "
@@ -673,7 +693,12 @@ async def graph_affected(name: str, query: str, depth: int = 2) -> str:
     Requires graph_build(name=...) to have run first.
     """
     try:
-        result = graphbridge.get_affected(_vault.cfg, name, query, depth=depth)
+        # get_affected is a plain sync function (graph.json load + networkx
+        # rebuild + BFS) called with no offload — smaller than graph_build's
+        # full pipeline but the same shape of problem for a large graph. Offload
+        # for consistency with every other sync-heavy call site in this file
+        # (relink_folder, ingest_folder, search_web already do this).
+        result = await asyncio.to_thread(graphbridge.get_affected, _vault.cfg, name, query, depth=depth)
     except ModuleNotFoundError as e:
         return json.dumps({"error": f"code-graph pipeline not installed: {e}. "
                                     'Run: pip install "delegation-core[graph]"'})
