@@ -1,8 +1,11 @@
 [package]
 name = "dashboard"
 version = "0.1.0"
-description = "A Tauri App"
-authors = ["you"]
+# The bundler falls back to these for package metadata (.deb Description /
+# Maintainer come from here when tauri.conf.json doesn't override) — keep them
+# real, not scaffold placeholders.
+description = "Desktop dashboard for delegation-core: vault browser, semantic search, knowledge graph, and process tracker"
+authors = ["joey bernardes <followthepillow@gmail.com>"]
 edition = "2021"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html

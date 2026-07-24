@@ -24,6 +24,12 @@
   "bundle": {
     "active": true,
     "targets": "all",
+    "publisher": "delegation-core",
+    "homepage": "https://github.com/AnonJoey/delegation-core-v7",
+    "category": "DeveloperTool",
+    "copyright": "Copyright © 2026 delegation-core contributors",
+    "shortDescription": "Dashboard for the delegation-core local AI vault",
+    "longDescription": "Desktop dashboard for delegation-core, a local MCP delegation server (llama.cpp + BGE embeddings + ChromaDB over an Obsidian vault). Browse and search vault notes, explore the knowledge graph, monitor engine status, and track long-running processes.",
     "icon": [
       "icons/32x32.png",
       "icons/128x128.png",

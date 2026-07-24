@@ -48,6 +48,11 @@ anything:
 
 Also runnable standalone (without Tauri) via:
   delegation-core dashboard-api [--port N]
+
+When spawned by the Tauri app, --parent-pid <tauri pid> is passed and a watchdog
+thread exits this process when that PID dies — without it, a hard kill of the
+Tauri app (SIGKILL, crash) orphans this sidecar forever, and each orphan holds
+the BGE model's ~600MB of GPU memory. No flag (manual/CLI launches) = no watchdog.
 """
 
 from __future__ import annotations
@@ -470,7 +475,48 @@ class _Handler(BaseHTTPRequestHandler):
         self._send_json({"query": q, "results": _vault.search(q, limit=limit)})
 
 
-def run(port: int = 0, host: str = "127.0.0.1") -> None:
+def _start_parent_watchdog(parent_pid: int, server: ThreadingHTTPServer) -> None:
+    """Exit this process when the parent (Tauri) process dies.
+
+    The Tauri backend kills this sidecar on clean window close, but nothing
+    fires that path on a hard kill of the app — the orphaned sidecar then holds
+    the BGE model's GPU memory until someone notices. psutil.Process pins
+    create_time at construction, so a recycled PID is correctly seen as "not my
+    parent anymore" (a bare pid_exists() poll would be fooled by PID reuse).
+    """
+    import os
+    import time
+    import psutil
+
+    try:
+        parent = psutil.Process(parent_pid)
+    except (psutil.NoSuchProcess, ValueError):
+        parent = None  # already gone (or nonsense pid) — shut down immediately
+
+    def _watch():
+        while parent is not None:
+            try:
+                # is_running() is True for zombies (parent killed but not yet
+                # reaped by *its* parent), which is just as dead for our purposes.
+                if not parent.is_running() or parent.status() == psutil.STATUS_ZOMBIE:
+                    break
+            except psutil.Error:
+                break
+            time.sleep(2.0)
+        logger.info("parent process %s is gone — shutting down", parent_pid)
+        # Graceful where cheap: unblock serve_forever() so the main thread runs
+        # server_close() and exits normally. Called from a throwaway thread
+        # because shutdown() blocks until the serve loop notices, and the
+        # os._exit() backstop below must not depend on it ever returning.
+        threading.Thread(target=server.shutdown, daemon=True).start()
+        time.sleep(5.0)
+        sys.stderr.flush()
+        os._exit(0)  # backstop: main thread didn't exit (wedged handler etc.)
+
+    threading.Thread(target=_watch, daemon=True, name="parent-watchdog").start()
+
+
+def run(port: int = 0, host: str = "127.0.0.1", parent_pid: int | None = None) -> None:
     import os
     from .config import Config
 
@@ -500,6 +546,8 @@ def run(port: int = 0, host: str = "127.0.0.1") -> None:
     # startup. ThreadingHTTPServer's own bind is the only bind that matters.
     server = ThreadingHTTPServer((host, port), _Handler)
     actual_port = server.server_address[1]
+    if parent_pid is not None:
+        _start_parent_watchdog(parent_pid, server)
     # Printed as the first line so a spawning parent (the Tauri sidecar) can
     # read it off stdout to learn which port got assigned when port=0.
     print(f"dashboard_api listening on http://{host}:{actual_port}", flush=True)
@@ -517,5 +565,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="delegation-core dashboard API (local sidecar)")
     parser.add_argument("--port", type=int, default=0, help="Port to bind (0 = pick a free one)")
     parser.add_argument("--host", default="127.0.0.1")
+    parser.add_argument("--parent-pid", type=int, default=None,
+                        help="Exit automatically when this PID dies (passed by the Tauri app)")
     args = parser.parse_args()
-    run(port=args.port, host=args.host)
+    run(port=args.port, host=args.host, parent_pid=args.parent_pid)

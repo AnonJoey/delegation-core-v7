@@ -16,7 +16,8 @@
 use std::io::{BufRead, BufReader};
 use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
-use std::sync::Mutex;
+use std::sync::{mpsc, Mutex};
+use std::time::Duration;
 
 use tauri::{Manager, State};
 use tauri_plugin_dialog::{DialogExt, MessageDialogKind};
@@ -53,6 +54,7 @@ enum SidecarError {
     NoStdout,
     ReadFailed(std::io::Error),
     PortUnparseable(String),
+    StartupTimeout,
 }
 
 impl SidecarError {
@@ -87,6 +89,13 @@ impl SidecarError {
                  Try re-running the installer, then relaunch this app."
                     .to_string()
             }
+            SidecarError::StartupTimeout => format!(
+                "delegation-core's local API process didn't finish starting up \
+                 within {} seconds — it normally takes a few seconds.\n\n\
+                 Try relaunching this app; if it keeps happening, re-run the \
+                 delegation-core installer.",
+                SIDECAR_STARTUP_TIMEOUT.as_secs()
+            ),
         }
     }
 
@@ -99,46 +108,77 @@ impl SidecarError {
             SidecarError::PortUnparseable(line) => {
                 eprintln!("sidecar error: could not parse port from sidecar output: {line:?}")
             }
+            SidecarError::StartupTimeout => eprintln!(
+                "sidecar error: no port line on stdout within {}s (BGE/ChromaDB init wedged?)",
+                SIDECAR_STARTUP_TIMEOUT.as_secs()
+            ),
             SidecarError::NoHomeDir | SidecarError::VenvMissing(_) | SidecarError::SpawnFailed(_) => {} // already in user_message()
         }
     }
 }
 
+/// Generous vs. the observed ~2-4s BGE/ChromaDB init, so it only ever fires on
+/// a genuinely wedged sidecar, never as a false positive on a slow disk.
+const SIDECAR_STARTUP_TIMEOUT: Duration = Duration::from_secs(120);
+
 fn spawn_dashboard_api() -> Result<(u16, Child), SidecarError> {
-    // NOTE: dashboard_api.py hanging during its own startup (BGE/ChromaDB init)
-    // would still block this function forever on read_line() below, with no
-    // timeout — the error dialog here only covers "fails fast", not "hangs".
-    // Acceptable for now (startup has consistently been ~1-2s in testing); a
-    // real fix needs a timeout thread, which is more machinery than this pass
-    // covers.
     let python = venv_python()?;
     if !python.exists() {
         return Err(SidecarError::VenvMissing(python));
     }
 
+    // --parent-pid arms a watchdog in dashboard_api.py that exits when this
+    // process dies — the on_window_event(Destroyed) kill below never fires on
+    // a hard kill (SIGKILL/crash), and each orphaned sidecar holds ~600MB of
+    // GPU memory. Chosen over Linux-only prctl(PR_SET_PDEATHSIG) because it's
+    // one portable mechanism for all three shipped platforms and needs no new
+    // crate dependency (prctl would require libc + unsafe pre_exec).
     let mut child = Command::new(&python)
-        .args(["-m", "delegation_core.dashboard_api", "--port", "0"])
+        .args(["-m", "delegation_core.dashboard_api", "--port", "0", "--parent-pid"])
+        .arg(std::process::id().to_string())
         .stdout(Stdio::piped())
         .stderr(Stdio::inherit())
         .spawn()
         .map_err(SidecarError::SpawnFailed)?;
 
-    let stdout = child.stdout.take().ok_or(SidecarError::NoStdout)?;
-    let mut reader = BufReader::new(stdout);
-    let mut first_line = String::new();
-    reader
-        .read_line(&mut first_line)
-        .map_err(SidecarError::ReadFailed)?;
+    match read_sidecar_port(&mut child) {
+        Ok(port) => Ok((port, child)),
+        Err(e) => {
+            // Every post-spawn failure exits via the error dialog — reap the
+            // child here or it outlives the app as an orphan holding the GPU.
+            let _ = child.kill();
+            let _ = child.wait();
+            Err(e)
+        }
+    }
+}
 
-    // "dashboard_api listening on http://127.0.0.1:<port>"
-    let port: u16 = first_line
+/// Reads the "dashboard_api listening on http://127.0.0.1:<port>" line, but
+/// bounded: read_line() has no timeout of its own, so a sidecar that wedges
+/// during BGE/ChromaDB init would otherwise hang this (pre-window) startup
+/// forever with nothing on screen. The reader thread is left parked on a
+/// timeout; the caller's kill() closes the pipe, which unblocks and ends it.
+fn read_sidecar_port(child: &mut Child) -> Result<u16, SidecarError> {
+    let stdout = child.stdout.take().ok_or(SidecarError::NoStdout)?;
+    let (tx, rx) = mpsc::channel();
+    std::thread::spawn(move || {
+        let mut reader = BufReader::new(stdout);
+        let mut first_line = String::new();
+        let _ = tx.send(reader.read_line(&mut first_line).map(|_| first_line));
+    });
+
+    let first_line = match rx.recv_timeout(SIDECAR_STARTUP_TIMEOUT) {
+        Ok(Ok(line)) => line,
+        Ok(Err(e)) => return Err(SidecarError::ReadFailed(e)),
+        Err(_) => return Err(SidecarError::StartupTimeout),
+    };
+
+    first_line
         .trim()
         .rsplit(':')
         .next()
         .and_then(|p| p.parse().ok())
-        .ok_or_else(|| SidecarError::PortUnparseable(first_line.clone()))?;
-
-    Ok((port, child))
+        .ok_or(SidecarError::PortUnparseable(first_line))
 }
 
 #[tauri::command]
@@ -199,6 +239,11 @@ pub fn run() {
                 let taken = state.child.lock().unwrap().take();
                 if let Some(mut child) = taken {
                     let _ = child.kill();
+                    // Reap, don't just signal — an unreaped child is a zombie
+                    // for as long as this process lives, which matters in dev
+                    // (webview reloads / multi-window churn), and wait() after
+                    // SIGKILL returns promptly.
+                    let _ = child.wait();
                 }
             }
         })
