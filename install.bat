@@ -148,6 +148,54 @@ if exist "%SCRIPT_DIR%\skills" (
     echo.
 )
 
+:: ── 4d. Install the Tauri dashboard app ──────────────────────────────────────
+:: Prefer a bundle already built locally (dev/CI convenience); otherwise fall
+:: back to the latest GitHub release via `gh` if it's installed. Never fail the
+:: whole install over this — a missing dashboard just prints manual build
+:: instructions, since the Python/MCP side above is what matters most.
+echo  Installing delegation-core Dashboard app...
+set "DASH_BUNDLE_DIR=%SCRIPT_DIR%\dashboard\src-tauri\target\release\bundle"
+set "MSI_FILE="
+set "NSIS_FILE="
+
+if exist "%DASH_BUNDLE_DIR%\msi\*.msi" (
+    for %%F in ("%DASH_BUNDLE_DIR%\msi\*.msi") do if not defined MSI_FILE set "MSI_FILE=%%F"
+)
+if exist "%DASH_BUNDLE_DIR%\nsis\*.exe" (
+    for %%F in ("%DASH_BUNDLE_DIR%\nsis\*.exe") do if not defined NSIS_FILE set "NSIS_FILE=%%F"
+)
+
+if not defined MSI_FILE if not defined NSIS_FILE (
+    where gh >nul 2>&1
+    if not errorlevel 1 (
+        echo    No local dashboard build found - checking the latest GitHub release...
+        set "DASH_TMP=%TEMP%\delegation_core_dashboard_dl"
+        rmdir /S /Q "!DASH_TMP!" >nul 2>&1
+        mkdir "!DASH_TMP!" >nul 2>&1
+        gh release download --repo AnonJoey/delegation-core-v6.4 --pattern "*.msi" --dir "!DASH_TMP!" >nul 2>&1
+        if exist "!DASH_TMP!\*.msi" (
+            for %%F in ("!DASH_TMP!\*.msi") do if not defined MSI_FILE set "MSI_FILE=%%F"
+        ) else (
+            gh release download --repo AnonJoey/delegation-core-v6.4 --pattern "*.exe" --dir "!DASH_TMP!" >nul 2>&1
+            for %%F in ("!DASH_TMP!\*.exe") do if not defined NSIS_FILE set "NSIS_FILE=%%F"
+        )
+    )
+)
+
+if defined MSI_FILE (
+    echo    Installing !MSI_FILE! ...
+    msiexec /i "!MSI_FILE!" /qb
+    echo    OK - find "delegation-core Dashboard" in your Start Menu.
+) else if defined NSIS_FILE (
+    echo    Installing !NSIS_FILE! ...
+    "!NSIS_FILE!" /S
+    echo    OK - find "delegation-core Dashboard" in your Start Menu.
+) else (
+    echo    No dashboard build found locally or on GitHub releases.
+    echo    Build it manually:  cd dashboard ^&^& npm install ^&^& npm run tauri build
+)
+echo.
+
 :: Invalidate cached health so the corrected recursive metric recomputes.
 del /Q "%USERPROFILE%\.delegation_core\vault_health.json" >nul 2>&1
 

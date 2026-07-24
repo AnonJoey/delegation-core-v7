@@ -184,6 +184,107 @@ if [ -d "$SCRIPT_DIR/skills" ]; then
     echo ""
 fi
 
+# ── Install the Tauri dashboard app ──────────────────────────────────────────
+# Prefer a bundle already built locally (dev/CI convenience); otherwise fall
+# back to the latest GitHub Release via `gh` if it's installed. Never fail the
+# whole install over this — the Python/MCP side above is the part that matters
+# most, so a missing dashboard just prints manual build instructions.
+DASH_BUNDLE_DIR="$SCRIPT_DIR/dashboard/src-tauri/target/release/bundle"
+
+_repo_slug() {
+    local url
+    url=$(git -C "$SCRIPT_DIR" remote get-url origin 2>/dev/null || true)
+    if [[ "$url" =~ github\.com[:/]([^/]+/[^/.]+)(\.git)?$ ]]; then
+        echo "${BASH_REMATCH[1]}"
+    else
+        echo "AnonJoey/delegation-core-v6.4"
+    fi
+}
+
+_no_dashboard_found() {
+    echo "  ⚠  No dashboard build found locally or on GitHub releases."
+    echo "     Build it manually:  cd dashboard && npm install && npm run tauri build"
+}
+
+_install_dashboard_linux() {
+    local deb rpm appimage tmp
+    deb=$(compgen -G "$DASH_BUNDLE_DIR/deb/*.deb" 2>/dev/null | head -1 || true)
+    rpm=$(compgen -G "$DASH_BUNDLE_DIR/rpm/*.rpm" 2>/dev/null | head -1 || true)
+    appimage=$(compgen -G "$DASH_BUNDLE_DIR/appimage/*.AppImage" 2>/dev/null | head -1 || true)
+
+    if [ -z "$deb" ] && [ -z "$rpm" ] && [ -z "$appimage" ] && command -v gh &>/dev/null; then
+        echo "  No local dashboard build found — checking the latest GitHub release..."
+        tmp=$(mktemp -d)
+        if command -v dpkg &>/dev/null; then
+            gh release download --repo "$(_repo_slug)" --pattern '*.deb' --dir "$tmp" 2>/dev/null || true
+            deb=$(compgen -G "$tmp/*.deb" 2>/dev/null | head -1 || true)
+        elif command -v rpm &>/dev/null; then
+            gh release download --repo "$(_repo_slug)" --pattern '*.rpm' --dir "$tmp" 2>/dev/null || true
+            rpm=$(compgen -G "$tmp/*.rpm" 2>/dev/null | head -1 || true)
+        else
+            gh release download --repo "$(_repo_slug)" --pattern '*.AppImage' --dir "$tmp" 2>/dev/null || true
+            appimage=$(compgen -G "$tmp/*.AppImage" 2>/dev/null | head -1 || true)
+        fi
+    fi
+
+    if [ -n "$deb" ] && command -v dpkg &>/dev/null; then
+        echo "  Installing $(basename "$deb") via dpkg (requires sudo)..."
+        sudo dpkg -i "$deb" || sudo apt-get install -f -y
+        echo "  ✓ Dashboard installed — find \"delegation-core Dashboard\" in your applications menu."
+    elif [ -n "$rpm" ] && command -v rpm &>/dev/null; then
+        echo "  Installing $(basename "$rpm") (requires sudo)..."
+        sudo rpm -i "$rpm" 2>/dev/null || sudo dnf install -y "$rpm"
+        echo "  ✓ Dashboard installed — find \"delegation-core Dashboard\" in your applications menu."
+    elif [ -n "$appimage" ]; then
+        mkdir -p "$HOME/.local/share/applications" "$HOME/.delegation_core/app"
+        local dest="$HOME/.delegation_core/app/delegation-core-dashboard.AppImage"
+        cp -f "$appimage" "$dest"
+        chmod +x "$dest"
+        cat > "$HOME/.local/share/applications/delegation-core-dashboard.desktop" <<EOF
+[Desktop Entry]
+Type=Application
+Name=delegation-core Dashboard
+Exec=$dest
+Icon=utilities-terminal
+Categories=Utility;
+EOF
+        echo "  ✓ AppImage installed to $dest — find \"delegation-core Dashboard\" in your applications menu."
+    else
+        _no_dashboard_found
+    fi
+}
+
+_install_dashboard_macos() {
+    local dmg tmp mnt app
+    dmg=$(compgen -G "$DASH_BUNDLE_DIR/dmg/*.dmg" 2>/dev/null | head -1 || true)
+    if [ -z "$dmg" ] && command -v gh &>/dev/null; then
+        echo "  No local dashboard build found — checking the latest GitHub release..."
+        tmp=$(mktemp -d)
+        gh release download --repo "$(_repo_slug)" --pattern '*.dmg' --dir "$tmp" 2>/dev/null || true
+        dmg=$(compgen -G "$tmp/*.dmg" 2>/dev/null | head -1 || true)
+    fi
+    if [ -n "$dmg" ]; then
+        echo "  Mounting $(basename "$dmg")..."
+        mnt=$(hdiutil attach "$dmg" -nobrowse -readonly | tail -1 | awk '{print $NF}')
+        app=$(compgen -G "$mnt/*.app" 2>/dev/null | head -1 || true)
+        if [ -n "$app" ]; then
+            cp -R "$app" /Applications/
+            echo "  ✓ Installed to /Applications/$(basename "$app")"
+        fi
+        hdiutil detach "$mnt" -quiet 2>/dev/null || true
+    else
+        _no_dashboard_found
+    fi
+}
+
+echo "Installing delegation-core Dashboard app..."
+if [ "$OS" = "Linux" ]; then
+    _install_dashboard_linux
+elif [ "$OS" = "Darwin" ]; then
+    _install_dashboard_macos
+fi
+echo ""
+
 # Invalidate cached health so the corrected (recursive) broken-link metric
 # recomputes on next start instead of serving a stale cached count.
 rm -f "$HOME/.delegation_core/vault_health.json" 2>/dev/null || true
