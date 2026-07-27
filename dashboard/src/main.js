@@ -491,30 +491,23 @@ class ForceGraph {
       ctx.fill();
     }
     ctx.globalAlpha = 1;
+    // Ring + title for the hovered node. Labels are hover-only: drawing every
+    // title past a zoom threshold turned the graph into a wall of overlapping
+    // text — note filenames here are long (safe_filename caps at 50 chars, so
+    // they arrive pre-truncated mid-word), and at any useful zoom the labels
+    // collided into an unreadable mass that obscured the structure the graph
+    // exists to show. One title at a time keeps the shape legible and still
+    // answers "what is this node?" on demand.
     if (hover) {
       ctx.strokeStyle = accent;
       ctx.lineWidth = 2 / this.scale;
       ctx.beginPath();
       ctx.arc(hover.x, hover.y, hover.r + 3 / this.scale, 0, Math.PI * 2);
       ctx.stroke();
-    }
 
-    if (this.scale > 0.6) {
-      ctx.fillStyle = fg;
-      ctx.font = `${11 / this.scale}px sans-serif`;
-      for (const n of this.nodes) {
-        if (n === hover) continue; // its label is drawn below, at any zoom
-        // fillText, not innerHTML — canvas text draws characters directly,
-        // never interpreted as markup, so n.title needs no escaping here.
-        ctx.globalAlpha = dimmed(n) ? 0.3 : 1;
-        ctx.fillText(n.title, n.x + n.r + 4, n.y + 4);
-      }
-      ctx.globalAlpha = 1;
-    }
-
-    if (hover) {
-      // Full title regardless of zoom threshold, with a panel-colored halo so
-      // it stays readable over edges and neighboring labels.
+      // Panel-colored halo so the title stays readable over edges and nodes.
+      // fillText, not innerHTML — canvas text draws characters directly, never
+      // interpreted as markup, so hover.title needs no escaping here.
       ctx.font = `600 ${12 / this.scale}px sans-serif`;
       ctx.strokeStyle = halo;
       ctx.lineWidth = 3 / this.scale;
