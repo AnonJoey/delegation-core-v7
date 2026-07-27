@@ -62,11 +62,14 @@ Returns raw markdown. Use when you need the full content of one known note.
 Write a markdown note to the vault and index it immediately with BGE embeddings.
 The note is searchable in the same session as soon as it is written.
 
-Valid folders are returned by `heartbeat()` → `vault.folder_counts` keys.
-Common folders: `decisions`, `research`, `tools`, `fixes`, `reference`, `sessions`.
+Valid folders are the `heartbeat()` → `vault.folder_counts` keys, and are matched
+**case-sensitively** — `write_note(folder="decisions")` is rejected as an invalid
+folder, only `Decisions` works. On this vault they are: `Projects`, `Decisions`,
+`Fixes`, `Sessions`, `Procedures`, `Reference`, `Tools`, `Scratch`,
+`Infrastructure`. There is no `research` folder — research notes go to `Reference`.
 
 ```json
-→ { "status": "ok", "path": "2026-06-03-Q3-budget-decision.md", "folder": "decisions" }
+→ { "status": "ok", "path": "2026-06-03-Q3-budget-decision.md", "folder": "Decisions" }
 ```
 
 **Write notes liberally.** Every significant decision, insight, meeting outcome, or research
@@ -92,13 +95,35 @@ Returns note counts per folder and ChromaDB index size. Use to orient the user o
 confirm that a write was persisted.
 
 ```json
-→ { "indexed_notes": 247, "folder_counts": { "decisions": 34, "research": 89, ... } }
+→ { "indexed_notes": 247, "folder_counts": { "Decisions": 34, "Reference": 89, ... } }
 ```
 
 ---
 
+### `list_mcp_clients()`
+List which MCP client surfaces are currently connected to this delegation-core process —
+Claude Code, Claude Desktop, Codex, Antigravity, or anything else that speaks MCP and has
+delegation-core configured. Each running `delegation-core run` instance writes its own
+heartbeat file; this reads all of them and drops any that have gone stale (no activity in
+the last 2 minutes). Note this only covers connections **to delegation-core itself** — it
+has no visibility into other MCP servers (e.g. ClickUp, Gmail) a client also has configured.
+For that, the client's own MCP list (e.g. `claude mcp list`) is authoritative.
+
+```json
+→ { "clients": [
+      { "pid": 48213, "client_name": "claude-code", "client_version": "1.4.2",
+        "first_seen": "2026-07-27T14:02:11+00:00", "last_seen": "2026-07-27T14:19:03+00:00",
+        "tool_calls": 12, "seconds_since_active": 4 }
+  ]}
+```
+
+Use when the user asks "what's connected right now" or "is Desktop still open" — this reads
+live process state, not the vault, so `search_vault` won't help here.
+
+---
+
 ### `export_session(title, summary, key_decisions="")`
-Write a curated session summary to the vault's `sessions/` folder and index it immediately.  
+Write a curated session summary to the vault's `Sessions/` folder and index it immediately.  
 **Call this when the user signals the session is ending** — any variation of goodbye, thanks,
 we're done, wrapping up, see you tomorrow, etc. Do not wait to be asked.
 
@@ -109,7 +134,7 @@ key_decisions: comma-separated list of decisions, artifacts created, or next ste
 ```
 
 ```json
-→ { "status": "ok", "path": "2026-06-03-CRM-evaluation-kickoff.md", "folder": "sessions" }
+→ { "status": "ok", "path": "2026-06-03-CRM-evaluation-kickoff.md", "folder": "Sessions" }
 ```
 
 The note is indexed immediately and will surface in future `search_vault()` calls.
@@ -133,7 +158,7 @@ write weekly summary. Blocks until complete. Use for small inboxes (< ~20 files)
 For large inboxes use `run_maintenance_bg()` instead.
 
 ```json
-→ { "classified": ["notes.md → research/"], "merged": [], "errors": [], "junk": [] }
+→ { "classified": ["notes.md → Reference/"], "merged": [], "errors": [], "junk": [] }
 ```
 
 `junk` lists boilerplate files (licenses, READMEs, `requirements*.txt`, etc.) that were
@@ -163,8 +188,8 @@ List notes in a folder sorted newest-first. Returns title, date, path, and file 
 Use to orient yourself before reading or updating specific notes.
 
 ```json
-→ { "folder": "decisions", "count": 3, "notes": [
-      { "title": "Q3 vendor decision", "date": "2026-06-03", "path": "decisions/...", "size_bytes": 1240 }
+→ { "folder": "Decisions", "count": 3, "notes": [
+      { "title": "Q3 vendor decision", "date": "2026-06-03", "path": "Decisions/...", "size_bytes": 1240 }
   ]}
 ```
 
@@ -198,7 +223,7 @@ Use to add follow-up decisions, corrections, or new findings to an existing reco
 creating a duplicate note.
 
 ```json
-→ { "status": "ok", "path": "decisions/2026-06-01-vendor.md", "appended_chars": 312 }
+→ { "status": "ok", "path": "Decisions/2026-06-01-vendor.md", "appended_chars": 312 }
 ```
 
 ---
@@ -210,7 +235,7 @@ did not exist at ingestion time. Strictly additive — never removes existing li
 Supports sub-paths (`meetings/Client/2026`).
 
 ```json
-→ { "folder": "reference", "relinked": 12, "links_added": 34 }
+→ { "folder": "Reference", "relinked": 12, "links_added": 34 }
 ```
 
 **Run after a large maintenance pass** to densify the knowledge graph. Also called implicitly
@@ -313,15 +338,16 @@ Apply these without exception when delegation-core is online.
 | User signals the session is ending | `export_session` immediately |
 | User asks a question that might have prior context | `search_vault` first, always |
 | User shares a long document, email, or paste | `compress` before reading |
-| Any decision is made or confirmed | `write_note` to `decisions/` |
-| A meeting happens or is summarized | `write_note` to `sessions/` |
-| Research is completed | `write_note` to `research/` |
-| A fix, workaround, or solution is found | `write_note` to `fixes/` |
-| A reusable script or prompt is created | `write_note` to `tools/` |
+| Any decision is made or confirmed | `write_note` to `Decisions/` |
+| A meeting happens or is summarized | `write_note` to `Sessions/` |
+| Research is completed | `write_note` to `Reference/` |
+| A fix, workaround, or solution is found | `write_note` to `Fixes/` |
+| A reusable script or prompt is created | `write_note` to `Tools/` |
 | User asks "what did we decide about X" | `search_vault` |
 | User asks "do we have notes on X" | `search_vault` |
 | User wants to add context to an existing note | `vault_update_note` (not a new note) |
 | User asks what notes exist on a topic/folder | `vault_list_notes` |
+| User asks what's connected to delegation-core right now | `list_mcp_clients` |
 | User drops files and wants them organized (small) | `run_maintenance` |
 | User drops files and wants them organized (large) | `vault_inbox_status` → `run_maintenance_bg` → poll `task_status` |
 | Vault needs rebuilding after bulk import | `vault_reindex_bg` → poll `task_status` |
@@ -373,7 +399,7 @@ export_session(
 )
 ```
 
-Confirm briefly with "Session saved to sessions/" — nothing else.  
+Confirm briefly with "Session saved to Sessions/" — nothing else.  
 The raw transcript is saved automatically by the Claude Code hook (if configured).
 
 ---
@@ -388,7 +414,7 @@ surfaces read and write the same vault.
 How it works in practice:
 
 - **Desktop/Cowork → vault**: the standing orders above (`export_session()` on goodbye,
-  `write_note()` for decisions/fixes/research as they happen) mean every Desktop or Cowork
+  `write_note()` for Decisions/Fixes/Reference as they happen) mean every Desktop or Cowork
   session leaves a curated digest in the vault — not just a wall of raw chat log.
 - **vault → Code**: a `SessionStart` hook (`hooks/session_start_brief.py`, stdlib-only) prints a
   short "what changed since you were last here" brief at the start of every Claude Code session
@@ -399,7 +425,7 @@ How it works in practice:
   (logs to `~/.delegation_core/maintenance.log`) — files dropped from either surface get
   classified, deduped, and filed without anyone needing to remember to call `run_maintenance`.
 - **Code → vault**: the existing `SessionEnd` hook (`hooks/session_export.py`) backs up the raw
-  Code transcript to `sessions/`, and `export_session()` writes the curated digest — both
+  Code transcript to `Sessions/`, and `export_session()` writes the curated digest — both
   readable from Desktop/Cowork via `search_vault()`/`read_note()`. After writing the
   transcript, the hook also fires a detached `delegation-core reindex` (logs to
   `~/.delegation_core/reindex.log`) so the transcript is searchable immediately, without
@@ -438,7 +464,7 @@ User shares a document or link content and asks you to analyze it.
 ```
 compress(source="<doc name>", raw_content="<paste>")
   → reason over compressed result
-  → write_note(folder="research", title="<topic>", content=<your analysis + compressed facts>)
+  → write_note(folder="Reference", title="<topic>", content=<your analysis + compressed facts>)
   → search_vault("<topic>") to find related prior notes
   → surface connections to the user
 ```
@@ -449,7 +475,7 @@ User makes or confirms a decision during conversation.
 
 ```
 write_note(
-  folder="decisions",
+  folder="Decisions",
   title="<decision topic> — <date>",
   content="## Decision\n<what was decided>\n\n## Rationale\n<why>\n\n## Next steps\n<actions>"
 )
@@ -474,7 +500,7 @@ User wants to log a meeting or conversation.
 
 ```
 compress(source="meeting notes", raw_content="<raw notes>")
-  → write_note(folder="sessions", title="<meeting title> <date>", content=<compressed summary>)
+  → write_note(folder="Sessions", title="<meeting title> <date>", content=<compressed summary>)
   → search_vault("<meeting topic>") to find related decisions or prior context
   → surface any conflicts or continuations to the user
 ```
@@ -667,7 +693,7 @@ User: "We need to evaluate three vendors for the new CRM."
 → process_create("CRM Vendor Evaluation",
                  "Compare three vendors and make a recommendation",
                  "Define criteria, Evaluate Vendor A, Evaluate Vendor B, Evaluate Vendor C, Compare and decide")
-→ write_note(folder="decisions", ...) if criteria are agreed upon
+→ write_note(folder="Decisions", ...) if criteria are agreed upon
 ```
 
 **Resuming across sessions:**
@@ -683,7 +709,7 @@ Session start → heartbeat() surfaces: "1 active process: CRM Vendor Evaluation
 User: "Vendor A sent their proposal — looks promising."
 → process_update("proc_a1b2c3", note="Vendor A proposal received — initial impression positive")
 → compress() the proposal if shared
-→ write_note(folder="research", ...) to persist the analysis
+→ write_note(folder="Reference", ...) to persist the analysis
 ```
 
 ---
@@ -711,7 +737,7 @@ Drop any of these into `<vault>/_inbox/` and run `run_maintenance` or `run_maint
 license files, READMEs, `CHANGELOG`/`NOTICE`/`CONTRIBUTING`, `requirements*.txt`, and similar
 boilerplate before classification — these are moved to `_processed/` and listed under the
 `junk` key in the result, not filed as notes. Session logs/transcripts are routed straight to
-`sessions/` (by filename or content signal) and are never merged into an existing note, to
+`Sessions/` (by filename or content signal) and are never merged into an existing note, to
 avoid several unrelated sessions piling into one shared note.
 
 **Scanned PDFs** return a stub note with the filename and page count. Tell the user: *"This PDF appears to be scanned — I've logged it but cannot extract the text. Export the text from Adobe or Google Docs and drop the .txt file in the inbox."*
@@ -740,10 +766,10 @@ Resume a process         → process_get(<id>) + search_vault(<topic>)
 Finish a process         → process_update(<id>, status="done")
 List what's in progress  → process_list()
 Got a document           → compress() before reading
-Made a decision          → write_note(folder="decisions", ...)
-Did research             → write_note(folder="research", ...)
-Had a meeting            → write_note(folder="sessions", ...)
-Found a fix              → write_note(folder="fixes", ...)
+Made a decision          → write_note(folder="Decisions", ...)
+Did research             → write_note(folder="Reference", ...)
+Had a meeting            → write_note(folder="Sessions", ...)
+Found a fix              → write_note(folder="Fixes", ...)
 Adding to existing note  → vault_update_note(<name>, <new content>)
 User asks recall         → search_vault(<query>)
 Browse a folder          → vault_list_notes(<folder>)
@@ -759,4 +785,5 @@ Cross-link a folder      → relink_folder(<folder>)
 Vault repair backlog     → vault_health.needs_repair > 5 → run_maintenance_bg()
 Check job progress       → task_status(<job_id>)
 Check vault size         → vault_stats()
+Check what's connected   → list_mcp_clients()
 ```

@@ -37,15 +37,21 @@ _INVALID_FILENAME_CHARS = re.compile(r'[<>:"/\\|?*\x00-\x1f]')
 # wikilink — bash `[[ -f "$x" ]]` test syntax, imported Obsidian path-links
 # `[[Folder/File.pdf]]`, prose. Counting those made broken_links ~98% false
 # positives. These strip code spans and keep only note-like link targets.
-_CODE_FENCE_RE  = re.compile(r"```.*?```", re.DOTALL)
-_INLINE_CODE_RE = re.compile(r"`[^`]*`")
+# One pass for fenced blocks AND inline spans: a code span opens with a run of N
+# backticks and closes with a run of exactly N (CommonMark). The old two-regex
+# approach (fences, then inline) desynced on notes that *document* fence syntax —
+# a literal ``` inside inline code (`` ` ``` ` ``) left an unpaired fence, which
+# shifted inline pairing for the rest of the file and exposed the `[[...]]`
+# examples in it as "broken links". Lookarounds pin the run to its exact length so
+# ``` never closes against one backtick of a longer run.
+_CODE_SPAN_RE = re.compile(r"(?<!`)(`+)(?!`)(?:.*?)(?<!`)\1(?!`)", re.DOTALL)
 _WIKILINK_TARGET_RE = re.compile(r"\[\[([^\]\|#]+)")
 
 
 def _countable_wikilinks(content: str) -> list[str]:
     """Return note-like wikilink targets from a note, excluding code spans and
     non-link `[[...]]` artifacts (shell test syntax, path/file references)."""
-    body = _INLINE_CODE_RE.sub("", _CODE_FENCE_RE.sub("", content))
+    body = _CODE_SPAN_RE.sub(" ", content)
     out = []
     for raw in _WIKILINK_TARGET_RE.findall(body):
         t = raw.strip()
@@ -440,6 +446,8 @@ class VaultManager:
                 pass
 
         threshold = getattr(self.cfg, "quality_threshold", 0.50)
+        # Compared case-insensitively below: a vault whose folder is "Sessions"
+        # would otherwise skip nothing and count every session note as an orphan.
         skip_orphan = {"sessions"}
 
         # ── Pass 1: read every note once; collect resolution keys + per-note data ──
@@ -501,7 +509,7 @@ class VaultManager:
 
         # Orphan = note nothing links to (a true graph orphan), sessions excluded.
         for n in notes:
-            if n["folder"] in skip_orphan:
+            if n["folder"].lower() in skip_orphan:
                 continue
             if n["stem"].lower() not in linked_to:
                 orphans += 1

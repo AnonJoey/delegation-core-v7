@@ -9,6 +9,8 @@ on CPU hardware. FOLDER_HINTS (SAAD) injected into the prompt. Fallback goes to
 import logging
 import re
 
+from .config import resolve_folder
+
 logger = logging.getLogger("classifier")
 
 FOLDER_HINTS: dict[str, str] = {
@@ -50,12 +52,16 @@ async def classify(engine, folders: list[str], filename: str, content: str, fmt:
     Uses engine.budget('classify') so CPU budget mode caps tokens to 8.
     Falls back to 'reference' on model error or invalid response.
     """
-    if "sessions" in folders and looks_like_session(filename, content):
-        return "sessions"
+    # resolve_folder, not `in folders`: a vault using Capitalized folder names
+    # ("Sessions", "Reference") would otherwise miss every one of these lookups.
+    sessions_folder = resolve_folder("sessions", folders)
+    if sessions_folder and looks_like_session(filename, content):
+        return sessions_folder
 
-    fallback = "reference" if "reference" in folders else folders[0]
+    fallback = resolve_folder("reference", folders) or folders[0]
 
-    hint_lines = [f"  {f}: {FOLDER_HINTS[f]}" for f in folders if f in FOLDER_HINTS]
+    hint_lines = [f"  {f}: {FOLDER_HINTS[f.lower()]}" for f in folders
+                  if f.lower() in FOLDER_HINTS]
     folder_block = "\n".join(hint_lines) if hint_lines else ", ".join(folders)
 
     prompt = (
@@ -74,7 +80,9 @@ async def classify(engine, folders: list[str], filename: str, content: str, fmt:
             task="classify",
         )
         candidate = re.sub(r"[^a-z0-9_/-]", "", result.strip().lower().split()[0])
-        return candidate if candidate in folders else fallback
+        # The candidate is lowercased above, so it can only ever match a folder
+        # list that is itself lowercase — resolve it back to the real folder name.
+        return resolve_folder(candidate, folders) or fallback
     except Exception as e:
         logger.warning("Classification failed for %s: %s — using %s", filename, e, fallback)
         return fallback
