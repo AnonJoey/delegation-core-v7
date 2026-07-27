@@ -2,9 +2,10 @@
 server.py — FastMCP tool definitions for delegation-core v0.4.
 Called by run_server(); never run directly.
 
-31 tools across seven groups:
-  Core (8):            search_vault, read_note, write_note, compress,
-                       vault_stats, heartbeat, run_maintenance, export_session
+32 tools across seven groups:
+  Core (9):            search_vault, read_note, write_note, compress,
+                       vault_stats, heartbeat, list_mcp_clients,
+                       run_maintenance, export_session
   Maintenance (6):     vault_list_notes, vault_inbox_status,
                        vault_find_similar, vault_update_note, relink_folder,
                        search_web
@@ -71,6 +72,12 @@ v0.8.0 changes:
     Code, Claude Desktop, Codex, etc.), since delegation-core runs over stdio
     and there's no single shared connection to introspect otherwise.
 
+v0.8.2 changes:
+  - list_mcp_clients tool added: exposes client_tracking.list_connected_clients()
+    (previously dashboard-only, via dashboard_api.py's /api/clients) directly as
+    an MCP tool, so "what's connected right now" can be answered from within a
+    session instead of only from the Tauri dashboard.
+
 v0.8.1: relink_folder's path-containment check was `str(target).startswith(
 str(vault_root))` — a plain string-prefix comparison, bypassable whenever a
 sibling directory's name happens to start with the vault root's own name
@@ -95,6 +102,7 @@ from . import graphbridge
 from . import jobs
 from .client_tracking import ClientTrackingMiddleware as _ClientTrackingMiddleware
 from .client_tracking import cleanup_own_session_file as _cleanup_own_session_file
+from .client_tracking import list_connected_clients as _list_connected_clients
 from . import session as _session
 from .config import Config
 from .engine import DelegationEngine
@@ -376,6 +384,21 @@ async def heartbeat() -> str:
             "hybrid_local_min_chars": cfg.hybrid_local_min_chars,
         },
     })
+
+
+@mcp.tool()
+async def list_mcp_clients() -> str:
+    """
+    List MCP client surfaces currently connected to this delegation-core process
+    (Claude Code, Claude Desktop, Codex, etc. — whichever has delegation-core
+    configured and has been active in the last two minutes). Each running
+    `delegation-core run` instance is its own connection with its own client
+    name/version, first/last-active timestamps, and tool-call count — there is
+    no single shared session to introspect since delegation-core runs over
+    stdio per-client. Use this to answer "what's connected right now" instead
+    of guessing from config files.
+    """
+    return json.dumps({"clients": _list_connected_clients()})
 
 
 @mcp.tool()
