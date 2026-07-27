@@ -113,7 +113,7 @@ from .organizer import heal as _heal_notes
 from .organizer import relink_folder as _relink_folder
 from .organizer import run as _run_maintenance
 from .tracker import ProcessTracker
-from .vault import VaultManager, safe_filename, unique_note_path, yaml_quote_scalar
+from .vault import VaultManager, compose_note, safe_filename, unique_note_path
 
 
 def _post_write_links(note_path: Path, rel_path: str, folder: str, stem: str) -> None:
@@ -263,10 +263,10 @@ async def write_note(folder: str, title: str, content: str) -> str:
     dest = cfg.vault / folder / f"{datetime.now().strftime('%Y-%m-%d')}-{safe}.md"
     dest.parent.mkdir(parents=True, exist_ok=True)
     dest = unique_note_path(dest)
-    full = (
-        f"---\ntitle: {yaml_quote_scalar(title)}\ndate: {datetime.now().strftime('%Y-%m-%d')}\n"
-        f"ai_generated: true\n---\n\n{content}"
-    )
+    # compose_note, not string concatenation: callers commonly pass their own
+    # frontmatter block inside content, which used to stack a second block under
+    # the generated one — Obsidian reads only the first, so those keys were lost.
+    full = compose_note(title, content, datetime.now().strftime("%Y-%m-%d"))
     try:
         dest.write_text(full, encoding="utf-8")
     except OSError as e:

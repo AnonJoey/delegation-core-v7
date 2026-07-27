@@ -111,6 +111,49 @@ def yaml_unquote_scalar(value: str) -> str:
     return value
 
 
+_LEADING_FRONTMATTER_RE = re.compile(r"^---\n(.*?)\n---\n", re.DOTALL)
+
+
+def compose_note(title: str, content: str, date_str: str) -> str:
+    """Build note text carrying exactly one YAML frontmatter block.
+
+    Callers routinely include a full frontmatter block at the top of `content` —
+    the AGENT_GUIDE's own "Content guidelines" section shows one — while this
+    function also has generated fields to add. Concatenating both produced two
+    stacked blocks, and since Obsidian parses only the first, every key the
+    author actually wrote (subtitle, tags, aliases) silently became literal body
+    text rendered after a horizontal rule.
+
+    The caller's block is preserved verbatim rather than re-serialized, so block
+    lists (`aliases:` with `- ` items) and any YAML this module doesn't model
+    survive untouched. Generated keys are appended only where the caller did not
+    already supply them — so an explicit `title:` in the content wins, which is
+    what lets a note carry a short display title independent of its filename.
+    """
+    body = content.lstrip("\n")
+    generated = [
+        ("title", yaml_quote_scalar(title)),
+        ("date", date_str),
+        ("ai_generated", "true"),
+    ]
+
+    m = _LEADING_FRONTMATTER_RE.match(body)
+    if not m:
+        block = "\n".join(f"{k}: {v}" for k, v in generated)
+        return f"---\n{block}\n---\n\n{body}"
+
+    supplied = m.group(1)
+    # Top-level keys only: indented lines and `- ` items belong to a block list.
+    have = {
+        line.split(":", 1)[0].strip().lower()
+        for line in supplied.splitlines()
+        if ":" in line and line[:1] not in (" ", "\t", "-")
+    }
+    additions = [f"{k}: {v}" for k, v in generated if k not in have]
+    merged = supplied + ("\n" + "\n".join(additions) if additions else "")
+    return f"---\n{merged}\n---\n\n{body[m.end():].lstrip(chr(10))}"
+
+
 _chroma_write_lock = threading.Lock()
 """Module-level lock guarding all ChromaDB write operations.
 
@@ -537,11 +580,15 @@ class VaultManager:
         records, not synthesis artifacts, and should not be re-synthesized.
         """
         th = threshold if threshold is not None else getattr(self.cfg, "quality_threshold", 0.50)
-        never_merge = set(getattr(self.cfg, "never_merge_folders", ["sessions"]))
+        # Lowercased on both sides: a vault whose folder is "Sessions" would
+        # otherwise match nothing here and re-synthesize chronological records
+        # the docstring above promises to leave alone.
+        never_merge = {f.lower() for f in
+                       getattr(self.cfg, "never_merge_folders", ["sessions"])}
         results = []
 
         for folder in self.cfg.vault_folders:
-            if folder in never_merge:
+            if folder.lower() in never_merge:
                 continue
             fp = self.cfg.vault / folder
             if not fp.exists():

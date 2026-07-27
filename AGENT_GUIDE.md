@@ -561,14 +561,15 @@ search_vault("<topic>")        ← quick check
 Notes written to the vault should be searchable by future queries. Structure them so
 that BGE embeddings can match them semantically.
 
+**Do not write a `title:` / `date:` / `ai_generated:` frontmatter block.**
+`write_note` generates those three from the `title` argument. Repeating them in
+`content` used to produce a note with two stacked frontmatter blocks — Obsidian
+parses only the first, so everything in the second rendered as literal body text
+after a horizontal rule. The blocks are merged now rather than stacked, but the
+duplication is still noise. Start `content` at the first heading.
+
 **Good note structure:**
 ```markdown
----
-title: <specific, descriptive title>
-date: <YYYY-MM-DD>
-ai_generated: true
----
-
 ## Summary
 <2-3 sentence overview>
 
@@ -581,6 +582,26 @@ ai_generated: true
 ## Next steps
 - <actionable items if any>
 ```
+
+**When you do need frontmatter**, include a block with *only* the extra keys.
+It is preserved verbatim — block lists included — and the generated keys are
+added underneath only where you did not supply them:
+
+```markdown
+---
+subtitle: "the long descriptive version, for humans skimming the note"
+aliases:
+  - Alternate Name
+---
+
+## Summary
+...
+```
+
+A `title:` you supply wins over the generated one. That is how a note carries a
+short display title while its filename still comes from the `title` argument —
+useful because the filename is what Obsidian and the dashboard label graph nodes
+with, and `safe_filename` truncates it at 50 characters.
 
 Avoid vague titles like "Meeting notes" or "Research". Use specific titles like
 "Decision: Migrate auth service to OAuth2 — 2026-06-03" or
