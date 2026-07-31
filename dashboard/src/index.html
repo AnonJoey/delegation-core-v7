@@ -2,6 +2,9 @@
 <html lang="en">
   <head>
     <meta charset="UTF-8" />
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500&family=Outfit:wght@500;600;700;800&display=swap" rel="stylesheet" />
     <link rel="stylesheet" href="styles.css" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Delegation Core — Agnostic Orchestrator Hub</title>
@@ -514,5 +517,33 @@
         </div>
       </div>
     </div>
+
+    <!-- Obsidian Telemetry Status Bar -->
+    <footer class="statusbar">
+      <div class="statusbar-item" id="sb-vault">
+        <span class="sb-icon"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"></path></svg></span>
+        <span class="sb-label">Vault:</span>
+        <span class="sb-val" id="sb-vault-val">Claude Vault</span>
+      </div>
+      <div class="statusbar-item" id="sb-notes">
+        <span class="sb-icon"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"></path><polyline points="14 2 14 8 20 8"></polyline></svg></span>
+        <span class="sb-val" id="sb-notes-val">159 notes</span>
+      </div>
+      <div class="statusbar-item" id="sb-model">
+        <span class="sb-icon"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"></circle><line x1="2" y1="12" x2="22" y2="12"></line></svg></span>
+        <span class="sb-label">Model:</span>
+        <span class="sb-val" id="sb-model-val">BAAI/bge-m3</span>
+      </div>
+      <div class="statusbar-item" id="sb-engine">
+        <span class="sb-icon"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="4" y="4" width="16" height="16" rx="2"></rect></svg></span>
+        <span class="sb-label">Engine:</span>
+        <span class="sb-val" id="sb-engine-val">agent</span>
+      </div>
+      <div class="statusbar-spacer"></div>
+      <div class="statusbar-item" id="sb-status">
+        <span class="sb-indicator online"></span>
+        <span class="sb-val" id="sb-status-val">Online</span>
+      </div>
+    </footer>
   </body>
 </html>

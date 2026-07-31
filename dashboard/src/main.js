@@ -168,6 +168,15 @@ async function refreshStatus() {
       stat("Engine mode", escapeHtml(s.engine_mode)),
       stat("Synthesis", s.synthesis_enabled ? "on" : "off"),
     ].join("");
+
+    // Sync Obsidian Statusbar
+    const sbNotes = document.getElementById("sb-notes-val");
+    if (sbNotes && s.chroma_indexed_notes !== undefined) sbNotes.textContent = `${s.chroma_indexed_notes} notes`;
+    const sbModel = document.getElementById("sb-model-val");
+    if (sbModel && s.bge_model) sbModel.textContent = s.bge_model.rsplit ? s.bge_model.rsplit('/', 1).pop() : s.bge_model;
+    const sbEngine = document.getElementById("sb-engine-val");
+    if (sbEngine && s.engine_mode) sbEngine.textContent = s.engine_mode;
+
     updateLlamaButton(s.llama_state);
   } catch (e) {
     el.innerHTML = `<span class="muted">status unavailable — retrying</span>`;

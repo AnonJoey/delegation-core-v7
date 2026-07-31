@@ -1,42 +1,44 @@
 :root {
-  --bg-app: #080c14;
-  --bg-panel: rgba(15, 23, 42, 0.85);
-  --bg-card: rgba(23, 32, 54, 0.65);
-  --bg-card-hover: rgba(30, 41, 69, 0.8);
-  --bg-hover: rgba(255, 255, 255, 0.05);
-  --bg-active: rgba(0, 242, 254, 0.12);
+  --bg-app: #0f111a;
+  --bg-panel: rgba(22, 24, 34, 0.85);
+  --bg-card: rgba(30, 33, 48, 0.65);
+  --bg-card-hover: rgba(42, 46, 68, 0.8);
+  --bg-hover: rgba(255, 255, 255, 0.06);
+  --bg-active: rgba(122, 162, 247, 0.15);
 
-  --border-subtle: rgba(255, 255, 255, 0.08);
-  --border-muted: rgba(255, 255, 255, 0.15);
-  --border-glow: rgba(0, 242, 254, 0.35);
+  --border-subtle: rgba(255, 255, 255, 0.09);
+  --border-muted: rgba(255, 255, 255, 0.16);
+  --border-glow: rgba(122, 162, 247, 0.4);
 
-  --fg-main: #f8fafc;
-  --fg-muted: #94a3b8;
-  --fg-dim: #64748b;
+  --fg-main: #c0caf5;
+  --fg-heading: #ffffff;
+  --fg-muted: #9aa5ce;
+  --fg-dim: #565f89;
 
-  --accent-cyan: #00f2fe;
-  --accent-blue: #3b82f6;
-  --accent-purple: #a855f7;
-  --accent-emerald: #10b981;
-  --accent-amber: #f59e0b;
-  --accent-rose: #f43f5e;
+  --accent-cyan: #7dcfff;
+  --accent-blue: #7aa2f7;
+  --accent-purple: #bb9af7;
+  --accent-emerald: #9ece6a;
+  --accent-amber: #e0af68;
+  --accent-rose: #f7768e;
 
-  --graph-1: #38bdf8;
-  --graph-2: #fb923c;
-  --graph-3: #2dd4bf;
-  --graph-4: #c084fc;
-  --graph-5: #a3e635;
-  --graph-6: #f472b6;
-  --graph-other: #64748b;
+  --graph-1: #7aa2f7;
+  --graph-2: #ff9e64;
+  --graph-3: #7dcfff;
+  --graph-4: #bb9af7;
+  --graph-5: #9ece6a;
+  --graph-6: #f7768e;
+  --graph-other: #565f89;
 
   --radius-sm: 6px;
   --radius-md: 10px;
   --radius-lg: 14px;
 
-  --shadow-sm: 0 2px 8px rgba(0, 0, 0, 0.3);
-  --shadow-glow: 0 0 20px rgba(0, 242, 254, 0.12);
+  --shadow-sm: 0 4px 12px rgba(0, 0, 0, 0.4);
+  --shadow-glow: 0 0 24px rgba(122, 162, 247, 0.18);
+  --shadow-modal: 0 16px 48px rgba(0, 0, 0, 0.65);
 
-  font-family: Inter, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  font-family: 'Inter', -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
   font-size: 13.5px;
   line-height: 1.5;
   color: var(--fg-main);
