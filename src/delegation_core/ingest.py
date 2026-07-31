@@ -10,6 +10,7 @@ New in v0.2.
 
 import json
 import logging
+from collections import Counter
 from datetime import datetime
 from pathlib import Path
 
@@ -19,6 +20,14 @@ from .embeddings import chunk_text
 logger = logging.getLogger("ingest")
 
 _REGISTRY_FILE = CONFIG_DIR / "ingested_sources.json"
+
+#: Extensions that mean "this was a codebase, not a document folder" — used only
+#: to phrase the hint, not to decide what gets indexed.
+_CODE_HINT_EXTS = frozenset({
+    ".py", ".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs", ".go", ".rs", ".java",
+    ".c", ".h", ".cpp", ".hpp", ".cs", ".rb", ".php", ".swift", ".kt", ".scala",
+    ".lua", ".zig", ".ex", ".exs", ".dart", ".vue", ".svelte", ".sh", ".sql",
+})
 
 
 def _load_registry() -> dict:
@@ -61,14 +70,24 @@ class IngestManager:
             return {"error": f"Path not found: {source_path}"}
 
         candidates: list[Path]
+        # Files whose extension is not SUPPORTED never became candidates and were
+        # never counted anywhere, so pointing this at a source tree returned a
+        # confident "indexed: 6, skipped: 0" while silently ignoring hundreds of
+        # code files. Tally them so the caller can see what was left behind — and
+        # be told that code belongs in graph_build, not here.
+        unsupported: Counter[str] = Counter()
+
+        def _keep(f: Path) -> bool:
+            if f.suffix.lower() in SUPPORTED:
+                return True
+            unsupported[f.suffix.lower() or "(sem extensão)"] += 1
+            return False
+
         if source.is_file():
-            candidates = [source] if source.suffix.lower() in SUPPORTED else []
+            candidates = [source] if _keep(source) else []
         else:
             pattern = "**/*" if recursive else "*"
-            candidates = [
-                f for f in source.glob(pattern)
-                if f.is_file() and f.suffix.lower() in SUPPORTED
-            ]
+            candidates = [f for f in source.glob(pattern) if f.is_file() and _keep(f)]
 
         indexed: list[str] = []
         errors: list[str] = []
@@ -115,8 +134,54 @@ class IngestManager:
         }
         _save_registry(registry)
 
-        return {"source": str(source), "indexed": len(indexed),
-                "skipped": len(skipped), "errors": errors}
+        result = {"source": str(source), "indexed": len(indexed),
+                  "skipped": len(skipped), "errors": errors}
+        if unsupported:
+            result["unsupported"] = dict(unsupported.most_common(12))
+            result["unsupported_total"] = sum(unsupported.values())
+            code_like = sum(n for ext, n in unsupported.items() if ext in _CODE_HINT_EXTS)
+            if code_like:
+                result["hint"] = (
+                    f"{code_like} code file(s) were not indexed — ingest_folder handles "
+                    "documents only. Use graph_build() to make a codebase searchable."
+                )
+        return result
+
+    def forget(self, source_path: str) -> dict:
+        """Drop everything previously ingested from source_path.
+
+        ingest is upsert-by-absolute-path, which is safe for re-runs but leaves
+        rows behind forever once the source moves or is deleted — they keep
+        answering searches with paths that no longer resolve. Matches the source
+        itself and anything indexed beneath it.
+        """
+        source = str(Path(source_path).expanduser().resolve())
+        collection = getattr(self._vault, "collection", None)
+        if collection is None:
+            self._vault._ensure_ready()
+            collection = getattr(self._vault, "collection", None)
+        if collection is None:
+            return {"error": "Vault not initialized"}
+
+        removed = 0
+        try:
+            rows = collection.get(where={"is_external": "true"}, include=["metadatas"])
+            ids = [
+                doc_id for doc_id, meta in zip(rows.get("ids") or [], rows.get("metadatas") or [])
+                if (meta.get("source_folder") == source
+                    or str(meta.get("path", "")).startswith(source))
+            ]
+            if ids:
+                collection.delete(ids=ids)
+                removed = len(ids)
+        except Exception as e:
+            logger.warning("Ingest forget failed for %s: %s", source, e)
+            return {"error": str(e)}
+
+        registry = _load_registry()
+        had_entry = registry.pop(source, None) is not None
+        _save_registry(registry)
+        return {"source": source, "removed_chunks": removed, "registry_entry_removed": had_entry}
 
     def status(self) -> dict:
         """Return the ingestion registry: which paths have been indexed and when."""

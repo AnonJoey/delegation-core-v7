@@ -10,7 +10,9 @@ assumed) and the registry read/write roundtrip.
 Also covers _write_vault_note/_write_artifacts_to_vault — the direct-to-vault
 write path added in the v0.7.2 correction (writes + indexes generated
 report/wiki content directly, bypassing the LLM synthesize() pipeline
-entirely). No prior test exercised this path at all. A lightweight
+entirely), including the filing layout corrected after the first real
+multi-hundred-article build: articles land in a per-graph subfolder under their
+original wiki stems, carry no BGE backlinks, and are cleared on rebuild. A lightweight
 FakeVaultManager stands in for the real VaultManager (no BGE/ChromaDB): it
 only needs `.cfg`, `.index_note()`, and `.search()`, matching this project's
 existing convention of hand-written fakes over unittest.mock (see
@@ -56,6 +58,17 @@ class FakeVaultManager:
         if self._search_error is not None:
             raise self._search_error
         return self._search_hits
+
+    def delete_notes(self, rel_paths):
+        self.deleted = getattr(self, "deleted", []) + list(rel_paths)
+        return len(rel_paths)
+
+    def note_metadata(self, rel_path, title, folder):
+        # Delegates to the real classifier so these tests also cover that graph
+        # articles are written with kind='generated' + their graph name, which is
+        # what search(scope=...) filters on.
+        from delegation_core.vault import VaultManager
+        return VaultManager.note_metadata(rel_path, title, folder)
 
 
 def test_slugify_replaces_unsafe_characters():
@@ -202,21 +215,91 @@ def test_write_vault_note_swallows_search_failure_during_wikilink_injection(cfg)
     assert len(vm.indexed) == 1
 
 
-def test_write_artifacts_to_vault_writes_report_and_wiki_articles_skipping_index(cfg, tmp_path):
-    vm = FakeVaultManager(cfg)
+def _wiki_fixture(tmp_path):
     wiki_dir = tmp_path / "wiki"
     wiki_dir.mkdir()
-    (wiki_dir / "community-a.md").write_text("Community A content", encoding="utf-8")
-    (wiki_dir / "index.md").write_text("local nav only", encoding="utf-8")
+    (wiki_dir / "Community_0.md").write_text(
+        "Community A\n\nsee [Community 1](Community_1.md)", encoding="utf-8")
+    (wiki_dir / "Community_1.md").write_text("Community B", encoding="utf-8")
+    (wiki_dir / "index.md").write_text("wiki nav root", encoding="utf-8")
+    return wiki_dir
 
-    result = graphbridge._write_artifacts_to_vault(vm, "my-graph", "# Report body", wiki_dir)
 
-    written = result["written_paths"]
-    assert len(written) == 2  # GRAPH_REPORT + community-a, index.md skipped
-    contents = [(cfg.vault / p).read_text(encoding="utf-8") for p in written]
-    assert any("Report body" in c for c in contents)
-    assert any("Community A content" in c for c in contents)
-    assert not any("local nav only" in c for c in contents)
+def test_write_artifacts_to_vault_puts_wiki_in_a_per_graph_subfolder(cfg, tmp_path):
+    """The report stays in the folder root; articles go under graphs/<name>/ so a
+    598-article build stops burying hand-written notes in the Reference root."""
+    vm = FakeVaultManager(cfg)
+
+    result = graphbridge._write_artifacts_to_vault(vm, "my-graph", "# Report body",
+                                                   _wiki_fixture(tmp_path))
+
+    assert result["wiki_folder"] == "reference/graphs/my-graph"
+    assert result["wiki_count"] == 3          # 2 communities + index.md
+    assert len(result["written_paths"]) == 4  # + the report
+
+    report_rel = result["report_path"]
+    assert "/graphs/" not in report_rel
+    assert "Report body" in (cfg.vault / report_rel).read_text(encoding="utf-8")
+
+    wiki_root = cfg.vault / "reference" / "graphs" / "my-graph"
+    assert {p.name for p in wiki_root.glob("*.md")} == {
+        "Community_0.md", "Community_1.md", "index.md"}
+
+
+def test_write_artifacts_to_vault_preserves_stems_so_wiki_internal_links_resolve(cfg, tmp_path):
+    """wiki.py emits relative links between its own articles. Renaming files to
+    dated safe_filename() stems broke every one of them — the whole reason the
+    articles keep their original names."""
+    vm = FakeVaultManager(cfg)
+
+    graphbridge._write_artifacts_to_vault(vm, "my-graph", "# Report", _wiki_fixture(tmp_path))
+
+    wiki_root = cfg.vault / "reference" / "graphs" / "my-graph"
+    body = (wiki_root / "Community_0.md").read_text(encoding="utf-8")
+    assert "[Community 1](Community_1.md)" in body
+    assert (wiki_root / "Community_1.md").exists()
+
+
+def test_write_artifacts_to_vault_does_not_add_related_links_to_wiki_articles(cfg, tmp_path):
+    """Articles already carry exact graph-derived cross-links; BGE backlinks on top
+    added ~65 near-identical entries each (every community resembles every other)
+    and cost a search + rewrite + backlink pass per article."""
+    hits = [{"path": "reference/other.md", "title": "Other", "similarity": 0.99}]
+    vm = FakeVaultManager(cfg, search_hits=hits)
+
+    result = graphbridge._write_artifacts_to_vault(vm, "my-graph", "# Report",
+                                                   _wiki_fixture(tmp_path))
+
+    wiki_root = cfg.vault / "reference" / "graphs" / "my-graph"
+    for article in wiki_root.glob("*.md"):
+        assert "## Related" not in article.read_text(encoding="utf-8")
+    # the report still gets them — it is the discoverable entry point
+    assert "## Related" in (cfg.vault / result["report_path"]).read_text(encoding="utf-8")
+    # one search for the report, none for the three articles
+    assert len(vm.search_calls) == 1
+
+
+def test_write_artifacts_to_vault_clears_the_previous_filing_on_rebuild(cfg, tmp_path):
+    """Community numbering is not stable across runs and filenames are dated, so
+    without an explicit sweep every rebuild stacked a fresh copy on top of the last."""
+    vm = FakeVaultManager(cfg)
+    first = graphbridge._write_artifacts_to_vault(vm, "my-graph", "# Report", _wiki_fixture(tmp_path))
+
+    second_wiki = tmp_path / "wiki2"
+    second_wiki.mkdir()
+    (second_wiki / "Community_0.md").write_text("only one this time", encoding="utf-8")
+
+    result = graphbridge._write_artifacts_to_vault(
+        vm, "my-graph", "# Report v2", second_wiki, previous_paths=first["written_paths"])
+
+    wiki_root = cfg.vault / "reference" / "graphs" / "my-graph"
+    assert {p.name for p in wiki_root.glob("*.md")} == {"Community_0.md"}
+    assert result["replaced_stale"] == 4          # 3 articles + the old report
+    # a same-day rebuild lands on the identical report filename, so the check is
+    # that it was replaced rather than that it vanished
+    assert "Report v2" in (cfg.vault / result["report_path"]).read_text(encoding="utf-8")
+    # stale ChromaDB rows dropped too, not just the files
+    assert set(first["written_paths"]) <= set(vm.deleted)
 
 
 def test_write_artifacts_to_vault_without_wiki_dir_writes_only_the_report(cfg):
@@ -225,5 +308,6 @@ def test_write_artifacts_to_vault_without_wiki_dir_writes_only_the_report(cfg):
     result = graphbridge._write_artifacts_to_vault(vm, "my-graph", "# Report body", None)
 
     assert len(result["written_paths"]) == 1
+    assert result["wiki_count"] == 0
     content = (cfg.vault / result["written_paths"][0]).read_text(encoding="utf-8")
     assert "Report body" in content

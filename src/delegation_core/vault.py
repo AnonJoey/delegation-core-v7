@@ -187,11 +187,12 @@ class VaultManager:
                     settings=chromadb.Settings(anonymized_telemetry=False),
                 )
                 self.collection = client.get_or_create_collection(
-                    name="vault_bge",
+                    name=self.cfg.collection_name,
                     embedding_function=self.ef,
                     metadata={"hnsw:space": "cosine"},
                 )
-                logger.info("ChromaDB ready — %d notes indexed", self.collection.count())
+                logger.info("ChromaDB ready — %d notes indexed in %s",
+                            self.collection.count(), self.cfg.collection_name)
             except Exception as e:
                 logger.error("ChromaDB/BGE init failed: %s — vault will retry on next call", e)
                 return  # do NOT set _initialized; leave it False so _ensure_ready() retries
@@ -207,12 +208,84 @@ class VaultManager:
 
     # ── search ───────────────────────────────────────────────────────────────
 
-    def search(self, query: str, limit: int = 5) -> list[dict]:
+    #: Vault-relative path segment under which graph_build files its wiki articles.
+    GENERATED_SEGMENT = "graphs"
+
+    @classmethod
+    def classify_path(cls, rel_path: str) -> tuple[str, str]:
+        """Return (kind, graph_name) for a vault-relative note path.
+
+        A generated article lives at ``<folder>/graphs/<graph>/<stem>.md``; the
+        graph name is its own metadata field so a search can be pinned to one
+        codebase. Anything else is a hand-written note.
+        """
+        parts = [p for p in str(rel_path).replace("\\", "/").split("/") if p]
+        if len(parts) >= 3 and parts[1] == cls.GENERATED_SEGMENT:
+            return "generated", parts[2]
+        return "note", ""
+
+    @classmethod
+    def note_metadata(cls, rel_path: str, title: str, folder: str) -> dict:
+        """Build the metadata row for a vault note, including its search scope.
+
+        Classmethod because it derives everything from the path — callers that
+        only stand in for a VaultManager (write paths, tests) can use it without
+        a live ChromaDB collection behind them.
+        """
+        kind, graph = cls.classify_path(rel_path)
+        meta = {"title": title, "path": rel_path, "folder": folder, "kind": kind}
+        if graph:
+            meta["graph"] = graph
+        return meta
+
+    def search(self, query: str, limit: int = 5, scope: str = "all",
+               graph: str = "", snippet_chars: int = 800) -> list[dict]:
+        """Semantic search, optionally narrowed to one kind of indexed content.
+
+        scope:
+          all       — everything (default, previous behaviour)
+          notes     — hand-written vault notes only
+          generated — graph_build wiki articles only
+          external  — ingest_folder'd files only
+        graph: restrict to one built graph by name (implies scope='generated').
+
+        Scoping matters once a vault carries machine-generated corpora: after four
+        code graphs this vault held 978 generated notes against 179 written by
+        hand. Narrowing is pushed into ChromaDB's `where` rather than applied to
+        the result list — a first attempt filtered afterwards and returned nothing
+        for scope='notes', because all of the top hits were generated and none
+        survived. Post-filtering can only ever remove, never reach further down.
+
+        Rows indexed before `kind` existed carry no marker; `reindex(force=True)`
+        backfills them. Until then they behave as unscoped and are matched by a
+        path fallback.
+        """
         self._ensure_ready()
         if not self.collection:
             return [{"error": "Vault not initialized"}]
+
+        scope = (scope or "all").lower()
+        if graph:
+            scope = "generated"
+
+        where: dict | None = None
+        if graph:
+            where = {"graph": graph}
+        elif scope == "external":
+            where = {"is_external": "true"}
+        elif scope in ("notes", "generated"):
+            where = {"kind": scope[:-1] if scope == "notes" else scope}
+
+        want = max(limit, 1)
+        # Over-fetch only to absorb the similarity-threshold cut, which `where`
+        # cannot express.
+        n_results = min(want * 3, 60) if where else want
+
         try:
-            res = self.collection.query(query_texts=[query], n_results=limit)
+            kwargs = {"query_texts": [query], "n_results": n_results}
+            if where:
+                kwargs["where"] = where
+            res = self.collection.query(**kwargs)
             hits = []
             docs  = (res.get("documents") or [[]])[0]
             metas = (res.get("metadatas") or [[]])[0]
@@ -221,13 +294,19 @@ class VaultManager:
                 sim = round(1 - dist, 3)
                 if sim < self.cfg.search_threshold:
                     continue
+                kind = meta.get("kind") or (
+                    "external" if str(meta.get("is_external", "")).lower() == "true"
+                    else self.classify_path(meta.get("path", ""))[0])
                 hits.append({
                     "title":      meta.get("title", "Untitled"),
                     "path":       meta.get("path", ""),
                     "folder":     meta.get("folder", ""),
-                    "snippet":    doc[:800],
+                    "kind":       kind,
+                    "snippet":    doc[:max(snippet_chars, 0)],
                     "similarity": sim,
                 })
+                if len(hits) >= want:
+                    break
             return hits
         except Exception as e:
             return [{"error": str(e)}]
@@ -249,6 +328,29 @@ class VaultManager:
                 self.collection.upsert(ids=[doc_id], documents=[content], metadatas=[metadata])
         except Exception as e:
             logger.warning("Index error: %s", e)
+
+    def delete_notes(self, rel_paths: list[str]) -> int:
+        """Drop notes from ChromaDB and the incremental index state by vault-relative path.
+
+        Counterpart to index_note: doc IDs for vault notes are the relative path,
+        so removing a note's file without this leaves a stale row that keeps
+        surfacing in search until the next full reindex runs its orphan sweep.
+        Returns the number of IDs submitted for deletion.
+        """
+        self._ensure_ready()
+        if not self.collection or not rel_paths:
+            return 0
+        try:
+            with _chroma_write_lock:
+                self.collection.delete(ids=list(rel_paths))
+        except Exception as e:
+            logger.warning("Delete error: %s", e)
+            return 0
+        state = self._load_index_state()
+        for p in rel_paths:
+            state.pop(p, None)
+        self._save_index_state(state)
+        return len(rel_paths)
 
     # ── incremental index state ───────────────────────────────────────────────
 
@@ -313,7 +415,7 @@ class VaultManager:
                     content = f.read_text(encoding="utf-8")
                     fm = self._parse_frontmatter(content)
                     title = fm.get("title") or f.name[:-3]
-                    self.index_note(content, {"title": title, "path": rel, "folder": folder})
+                    self.index_note(content, self.note_metadata(rel, title, folder))
                     state[rel] = mtime
                     count += 1
                 except Exception as e:
@@ -520,6 +622,19 @@ class VaultManager:
                 resolvable.update(a.lower() for a in frontmatter_aliases(content))
                 notes.append({"stem": note_stem, "folder": folder, "content": content})
 
+        # Obsidian resolves a wikilink against every note in the vault, not just
+        # the folders delegation-core manages. Notes do live outside them —
+        # MEMORY.md and Vault_Master_Index.md at the root, anything staged in
+        # _processed/ — and links to those were being reported broken when they
+        # open fine in Obsidian. Widen resolution only; grading above stays scoped
+        # to vault_folders, which is what this vault actually curates.
+        for f in self.cfg.vault.rglob("*.md"):
+            if any(part.startswith(".") for part in f.relative_to(self.cfg.vault).parts):
+                continue
+            stem = f.name[:-3].strip().lower()
+            if stem not in resolvable:
+                resolvable.add(stem)
+
         total = needs_repair = truncated = orphans = broken_links = 0
         linked_to: set[str] = set()       # stems that are the target of a resolvable link
 
@@ -540,6 +655,25 @@ class VaultManager:
                     needs_repair += 1
                 if fm.get("truncated", "").lower() == "true":
                     truncated += 1
+                # Verbatim machine records — graph_build's wiki articles and the
+                # SessionEnd hook's raw transcripts — are a different kind of
+                # object from a curated note, and both distort these metrics.
+                n["generated"] = (fm.get("source") == "graph_build"
+                                  or fm.get("type") == "session-transcript")
+
+                # Orphans: articles cross-link each other with relative markdown
+                # links rather than [[wikilinks]], so the pass below saw every one
+                # as unreferenced — one mid-sized repo took orphans from 63 to 662.
+                #
+                # Broken links: both kinds quote text verbatim, so a `[[...]]`
+                # inside is a sample and not a link anyone meant to follow. The
+                # graphify report contributed a phantom `[[Foo alloc]]`; a
+                # transcript of a conversation about linker code contributed
+                # `[[stem]]`, `[[target]]`, `[[source_stem]]`, `[[new-note-stem]]`.
+                # Neither kind emits real wikilinks, so nothing is lost by
+                # skipping them here.
+                if n["generated"]:
+                    continue
 
                 for link in _countable_wikilinks(content):
                     key = link.lower()
@@ -550,8 +684,13 @@ class VaultManager:
             except Exception:
                 pass
 
-        # Orphan = note nothing links to (a true graph orphan), sessions excluded.
+        # Orphan = hand-written note nothing links to (a true graph orphan);
+        # sessions and generated artifacts excluded.
+        generated = 0
         for n in notes:
+            if n.get("generated"):
+                generated += 1
+                continue
             if n["folder"].lower() in skip_orphan:
                 continue
             if n["stem"].lower() not in linked_to:
@@ -562,6 +701,7 @@ class VaultManager:
             "needs_repair": needs_repair,
             "truncated": truncated,
             "orphans": orphans,
+            "generated_notes": generated,
             "broken_links": broken_links,
             "computed_at": datetime.now().isoformat(),
         }

@@ -164,6 +164,18 @@ class Config:
         return self.vault / ".chroma_bge"
 
     @property
+    def collection_name(self) -> str:
+        """ChromaDB collection for the configured embedding model.
+
+        Derived rather than fixed so two models can be indexed side by side in the
+        same store: their vector dimensions differ (768 vs 1024), so a shared
+        collection would reject the second one outright. With one collection each,
+        switching models is a config edit — the other index is still there.
+        """
+        from .embeddings import collection_name_for
+        return collection_name_for(self.bge_model)
+
+    @property
     def log_path(self) -> Path:
         return CONFIG_DIR / "server.log"
 

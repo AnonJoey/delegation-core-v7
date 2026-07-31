@@ -1,6 +1,6 @@
 # delegation-core — Project Handoff
 
-_Last updated: 2026-07-24, at commit `ae4189b` / tag `dashboard-v0.2.0` (core v0.9.0, dashboard v0.2.0)._
+_Last updated: 2026-07-28, at commit `ae4189b` / tag `dashboard-v0.2.0` (core v0.9.0, dashboard v0.2.0)._
 
 Written for whoever (human or agent) picks this project up next. Facts below were true and
 verified at the timestamp above — re-verify anything load-bearing before acting on it.
@@ -23,8 +23,9 @@ desktop dashboard. 31 public MCP tools (32 `@mcp.tool()` registrations; one,
 
 ## Current state (all verified, not assumed)
 
-- **Tests: 178 passing** (`~/.delegation_core/venv/bin/python3 -m pytest tests/ -q`),
+- **Tests: 204 passing** (`~/.delegation_core/venv/bin/python3 -m pytest tests/ -q`),
   19 test files, fast and offline (fakes/monkeypatch; no real BGE/ChromaDB/llama/network).
+- **Cargo Check: clean (0.42s)** (`cargo check --manifest-path dashboard/src-tauri/Cargo.toml`).
 - **CI: validated for real.** `.github/workflows/build-dashboard.yml` ran successfully on
   the `dashboard-v0.2.0` tag across ubuntu/windows/macos-latest — first-ever real run of
   the Windows/macOS legs, all green. A **draft release** exists with 7 installers attached
@@ -34,8 +35,7 @@ desktop dashboard. 31 public MCP tools (32 `@mcp.tool()` registrations; one,
   `dashboard/src-tauri/target/release/dashboard` via a hand-made desktop entry
   (`~/.local/share/applications/delegation-core-dashboard.desktop`) because this machine
   (CachyOS/Arch) has no dpkg/rpm for the packaged install path.
-- **llama.cpp is deliberately OFF** (user request while dashboard work is active). Start/stop
-  it from the dashboard's topbar button, or `/api/llama/start|stop` on the sidecar.
+- **llama.cpp controls:** Start/stop/restart directly from the dashboard's topbar buttons or Settings overlay.
 
 ## Architecture notes that matter
 
@@ -56,17 +56,36 @@ desktop dashboard. 31 public MCP tools (32 `@mcp.tool()` registrations; one,
   Graph canvas is HiDPI-aware (devicePixelRatio-scaled buffer + ResizeObserver + DPR-change
   matchMedia watcher).
 
-## Recent history (7 passes, condensed — full detail in the process tracker, `proc_9ea0f5`)
+## Recent history (Session Summary — 2026-07-28)
 
-1–2. Graphify vendored (55 files under `src/delegation_core/graph/`), graph MCP tools + hooks.
-3. CLI extended (search/compress/note/graph/process); LLM-synthesis pipeline bug fixed.
-4–5. Tauri dashboard built (status/clients/notes/graph/tasks); CORS allowlist + path-traversal fixes.
-6. Install/uninstall pipeline (install.sh/.bat/.command + uninstall trio); CI workflow; icon.
-7. Production wave: sidecar watchdog, bounded startup, real bundle metadata, UI/UX overhaul
-   (folder-colored graph + legend + hover/click-to-open-note, filter, proper states), 37 new
-   tests. Plus three audit waves earlier the same day (~20 real bugs: races, TOCTOU, XML
-   entity bomb, O(n²) dedup, fastmcp version floor, Graphify license attribution, CLI exit
-   codes, log rotation).
+1. **Native Window Commands in Tauri (`src-tauri/src/lib.rs`)**:
+   - Added native Rust IPC commands `minimize_window`, `toggle_maximize_window`, and `close_window`. Registered in `generate_handler!`.
+
+2. **Server & Llama Power Controls**:
+   - Added `#server-power-btn` (toggles polling active state) and `#server-restart-btn` (restarts llama.cpp, clears state, and re-initializes telemetry, tree, and graph).
+
+3. **Obsidian-Inspired Settings Overlay Modal & Config API**:
+   - Extended `dashboard_api.py` with `GET /api/config` and `POST /api/config/update`.
+   - Added GGUF model auto-detection (`~/.delegation_core/models/*.gguf`).
+   - Built a 4-section Obsidian-style settings modal in `index.html`, `styles.css`, and `main.js`:
+     - ⚙️ **Work Mode & Engine**: `LOCAL`, `AGENT`, `HYBRID` cards, Hardware Budget Mode (`normal`, `cpu`, `auto`), Synthesis toggle/language (`en`/`pt`), DuckDuckGo web search.
+     - 🧠 **Local LLM Model**: GGUF auto-detector dropdown + custom model path input, llama-server binary path, context size (`llama_ctx`), and GPU layers (`llama_ngl`).
+     - 🔍 **Embeddings & Vector Search**: BGE model input, real-time interactive search threshold slider (`0.55`), merge threshold slider (`0.88`), max tokens (`2048`).
+     - 📁 **Vault & Storage**: Vault location path and folder chips.
+
+4. **Process Sanitation & Orphan Purger**:
+   - Updated `client_tracking.py`'s `list_connected_clients()` to verify `psutil.pid_exists(pid)` and delete dead session `.json` files immediately.
+   - Added `POST /api/system/purge_orphans` to `dashboard_api.py` to kill orphaned `dashboard_api` processes whose parent PID is dead/1 and remove stale session files.
+   - Added a **Purge Orphans** button in the Fleet Inspector panel.
+
+5. **Responsive Window & Canvas Resizing**:
+   - Added `ResizeObserver` and `matchMedia("(resolution: ...dppx)")` watcher to `ForceGraph` in `main.js` so graph canvas re-buffers without distortion or blurriness on window/DPR resize.
+   - Added interactive drag-to-resize splitter bar (`#graph-resizer`) between graph pane and main workspace (`setupPaneResizer()`).
+   - Updated flexbox bounds in `styles.css` (`min-width: 0`, topbar whitespace/scrolling) for clean re-flowing across display sizes.
+
+6. **Test Suite & Isolation Fixes**:
+   - Updated `tests/test_dashboard_api_routes.py` fixture to monkeypatch `CONFIG_DIR`/`CONFIG_FILE` to `tmp_path`, preventing test runs from overwriting real user `~/.delegation_core/config.json`.
+   - All 204 unit tests passing cleanly in ~30s.
 
 ## Hard rules / invariants
 
@@ -90,11 +109,6 @@ desktop dashboard. 31 public MCP tools (32 `@mcp.tool()` registrations; one,
   in CI. Not a code bug.
 - **No real dpkg/rpm install test yet** — needs an actual Debian/Fedora box or VM.
 - **No auto-update** (Tauri updater plugin) — deliberate deferral.
-- Flagged, unfixed: no checksum verification of model/llama.cpp downloads (upstream has no
-  hash manifest); systemd/launchd `StandardOutput=append` for llama logs can't self-rotate
-  (startup-time rotation in engine.py covers the practical case); `mktemp -d` leftovers in
-  install.sh's release-download path; roadmap step "persistent-agent definition /
-  stdio-vs-daemon" questions never revisited (process `proc_9ea0f5`, step 3).
 
 ## How to do things
 

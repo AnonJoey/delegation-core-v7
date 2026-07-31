@@ -104,6 +104,7 @@ from .client_tracking import ClientTrackingMiddleware as _ClientTrackingMiddlewa
 from .client_tracking import cleanup_own_session_file as _cleanup_own_session_file
 from .client_tracking import list_connected_clients as _list_connected_clients
 from . import session as _session
+from . import windows as _windows
 from .config import Config
 from .engine import DelegationEngine
 from .ingest import IngestManager
@@ -167,8 +168,20 @@ mcp = FastMCP("delegation-core")
 
 # ── core ─────────────────────────────────────────────────────────────────────
 
+def _confidence(top_sim: float, model_name: str) -> str:
+    """Grade a top similarity against the calibration of the model that produced it.
+
+    Cosine bands are model calibration, not universal constants — see
+    embeddings.MODEL_PROFILES for the measurements behind each one.
+    """
+    from .embeddings import profile_for
+    high, medium = profile_for(model_name)["confidence"]
+    return "high" if top_sim >= high else "medium" if top_sim >= medium else "low"
+
+
 @mcp.tool()
-async def search_vault(query: str, limit: int = 5, use_local: bool = False) -> str:
+async def search_vault(query: str, limit: int = 5, use_local: bool = False,
+                        scope: str = "all", graph: str = "", snippet_chars: int = 0) -> str:
     """
     CALL THIS FIRST before answering any question that could have prior context.
     Semantic search the Obsidian vault using BGE embeddings.
@@ -176,17 +189,29 @@ async def search_vault(query: str, limit: int = 5, use_local: bool = False) -> s
     receive the ranked 'sources' and synthesize yourself. Set use_local=true to
     force the local model to write the summary (hybrid mode).
     Cite 'sources' titles when referencing notes. Flat token cost regardless of vault size.
+
+    scope narrows what is searched — 'notes' (hand-written only), 'generated'
+    (graph_build wiki articles), 'external' (ingest_folder'd files), 'all' (default).
+    graph='<name>' restricts to one built code graph. Each hit carries its 'kind'.
+    snippet_chars caps snippet length (0 = default); lower it when you only need
+    titles and paths, since in agent mode every snippet is spent from your context.
     """
-    hits = _vault.search(query, limit=limit)
+    hits = _vault.search(query, limit=limit, scope=scope, graph=graph,
+                         snippet_chars=snippet_chars or 800)
     if not hits:
-        return json.dumps({"query": query, "summary": "No results above similarity threshold.", "sources": []})
+        empty = {"query": query, "summary": "No results above similarity threshold.", "sources": []}
+        if scope != "all" or graph:
+            empty["note"] = (f"Searched scope={scope!r}"
+                             + (f", graph={graph!r}" if graph else "")
+                             + " — retry with scope='all' to widen.")
+        return json.dumps(empty)
     if "error" in hits[0]:
         return json.dumps(hits[0])
 
     top_sim    = max(h["similarity"] for h in hits)
-    confidence = "high" if top_sim >= 0.80 else "medium" if top_sim >= 0.65 else "low"
+    confidence = _confidence(top_sim, _vault.cfg.bge_model)
 
-    snippet_len = 300 if _engine.cfg.is_cpu_budget else 800
+    snippet_len = snippet_chars or (300 if _engine.cfg.is_cpu_budget else 800)
     combined = "\n\n".join(f"[{h['title']}]\n{h['snippet'][:snippet_len]}" for h in hits[:5])
 
     # Route the summarization. agent/hybrid delegate to the calling Claude
@@ -384,6 +409,75 @@ async def heartbeat() -> str:
             "hybrid_local_min_chars": cfg.hybrid_local_min_chars,
         },
     })
+
+
+@mcp.tool()
+async def window_list() -> str:
+    """
+    List MCP servers registered as windows, which are currently mounted in the
+    client, and the active workspace.
+
+    delegation-core does not connect to these servers or call their tools — it only
+    curates which ones the client has mounted. A registered-but-unmounted server is
+    configured and dormant: its tool schemas cost no context until reopened.
+    Changes take effect when the client reconnects.
+    """
+    return json.dumps(_windows.list_windows())
+
+
+@mcp.tool()
+async def window_open(name: str) -> str:
+    """
+    Mount a registered MCP server into the client configuration.
+
+    Use when the user needs a server's tools available. The server must already be
+    known — servers are catalogued automatically from whatever the client has
+    mounted, so anything used before can be reopened by name.
+    Requires a client reconnect to take effect.
+    """
+    return json.dumps(_windows.open_window(name))
+
+
+@mcp.tool()
+async def window_close(name: str) -> str:
+    """
+    Unmount an MCP server from the client configuration, freeing the context its
+    tool schemas occupy. The server's definition is kept, so window_open restores it
+    exactly. delegation-core itself cannot be closed.
+    Requires a client reconnect to take effect.
+    """
+    return json.dumps(_windows.close_window(name))
+
+
+@mcp.tool()
+async def workspace_list() -> str:
+    """
+    List saved workspaces — named sets of MCP servers — and which one is active.
+    """
+    return json.dumps(_windows.list_workspaces())
+
+
+@mcp.tool()
+async def workspace_save(name: str) -> str:
+    """
+    Save the currently mounted set of servers as a named workspace.
+
+    Use after arranging the servers needed for a kind of work, so the arrangement
+    can be restored later in one step (e.g. "soteria" = clickup; "dev" = github).
+    """
+    return json.dumps(_windows.save_workspace(name))
+
+
+@mcp.tool()
+async def workspace_apply(name: str) -> str:
+    """
+    Make the client's mounted servers match a named workspace.
+
+    Servers outside the workspace are unmounted but keep their definitions and can
+    be reopened. Only the top-level server set is rewritten; per-project definitions
+    are never touched. Requires a client reconnect to take effect.
+    """
+    return json.dumps(_windows.apply_workspace(name))
 
 
 @mcp.tool()
@@ -660,7 +754,70 @@ async def ingest_status() -> str:
     return json.dumps(_ingest.status())
 
 
+@mcp.tool()
+async def ingest_forget(source_path: str) -> str:
+    """
+    Drop everything previously indexed from an external path (the inverse of ingest_folder).
+    Use when an ingested folder was moved, deleted, or should no longer answer searches —
+    otherwise its rows keep surfacing with paths that no longer resolve.
+    Original files are never touched.
+    """
+    loop = asyncio.get_running_loop()
+    result = await loop.run_in_executor(None, lambda: _ingest.forget(source_path))
+    return json.dumps(result)
+
+
 # ── code graph ─────────────────────────────────────────────────────────────────
+
+@mcp.tool()
+async def graph_preview(path: str, name: str = "") -> str:
+    """
+    CALL THIS BEFORE graph_build on an unfamiliar directory.
+    Reports what a build would cover — file counts by type, code files by extension,
+    the vault folder it would write into, and whether a graph of that name already
+    exists — without building or writing anything. Takes seconds.
+    Also flags JS bundles whose .js.map can be reconstructed into real sources
+    (see extract_source_maps); graphing a bundle directly yields one useless module.
+    'scale_reference' lists graphs already built on this machine so article counts
+    can be judged against real measurements.
+    """
+    try:
+        result = await asyncio.to_thread(graphbridge.preview_graph, _vault.cfg, path, name or None)
+    except ModuleNotFoundError as e:
+        return json.dumps({"error": f"code-graph pipeline not installed: {e}. "
+                                    'Run: pip install "delegation-core[graph]"'})
+    return json.dumps(result)
+
+
+@mcp.tool()
+async def extract_source_maps(source_path: str, out_dir: str) -> str:
+    """
+    Reconstruct original sources from .js.map sidecars into out_dir, then graph THAT.
+    npm-installed tools ship a single bundle whose map usually carries every original
+    file verbatim; the reconstructed tree graphs into real package structure while the
+    bundle would collapse into one node. out_dir must be empty or nonexistent.
+    """
+    loop = asyncio.get_running_loop()
+    result = await loop.run_in_executor(
+        None, lambda: graphbridge.extract_source_maps(source_path, out_dir))
+    return json.dumps(result)
+
+
+@mcp.tool()
+async def graph_build_bg(path: str, name: str = "", force: bool = False) -> str:
+    """
+    Build a code knowledge graph in the background. Returns a job_id immediately.
+    Prefer this over graph_build for anything sizeable: a real codebase takes minutes,
+    which exceeds most MCP client timeouts.
+    """
+    def _run():
+        return asyncio.run(
+            graphbridge.build_graph(_vault.cfg, _vault, path, name=name or None, force=force))
+
+    job_id = jobs.submit("graph_build", _run)
+    return json.dumps({"job_id": job_id, "path": path, "status": "running",
+                       "message": "Graph build started. Call task_status(job_id) to check progress."})
+
 
 @mcp.tool()
 async def graph_build(path: str, name: str = "", force: bool = False) -> str:
@@ -673,6 +830,8 @@ async def graph_build(path: str, name: str = "", force: bool = False) -> str:
     searchable through search_vault.
     name defaults to the directory's basename. Re-running the same name is a no-op
     unless force=true (rebuilds and overwrites).
+    Blocks until done — call graph_preview() first to see the scale, and prefer
+    graph_build_bg() for anything that might outlast the client's timeout.
     Requires the [graph] extra: pip install "delegation-core[graph]".
     """
     try:

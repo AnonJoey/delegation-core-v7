@@ -1,0 +1,148 @@
+"""get_health_summary: generated graph artifacts are excluded from orphan counts.
+
+An orphan is meant to flag a hand-written note that fell out of the knowledge
+graph — something worth relinking. graph_build's wiki articles are a different
+kind of object: they cross-reference each other with relative markdown links
+(``[Community 1](Community_1.md)``) rather than ``[[wikilinks]]``, because they
+have to stay valid both inside the vault and as a standalone wiki directory. The
+orphan pass only resolves wikilinks, so every generated article looked
+unreferenced. Filing one mid-sized repo (graphify, 599 articles) took the vault's
+reported orphan count from 63 to 662, drowning the real signal.
+
+They are counted separately under `generated_notes` instead of being silently
+dropped, so the number is still visible on the dashboard.
+"""
+
+import json
+
+import pytest
+
+from delegation_core.config import Config
+from delegation_core.vault import VaultManager
+
+
+def _note(body: str, **fm) -> str:
+    lines = "\n".join(f"{k}: {v}" for k, v in fm.items())
+    return f"---\n{lines}\n---\n\n{body}"
+
+
+@pytest.fixture
+def vault(tmp_path, monkeypatch):
+    """A vault with one linked note, one true orphan, and two generated articles."""
+    monkeypatch.setattr("pathlib.Path.home", lambda: tmp_path / "home")
+    (tmp_path / "home" / ".delegation_core").mkdir(parents=True)
+
+    cfg = Config(vault_path=str(tmp_path / "vault"), vault_folders=["Reference", "Sessions"])
+    ref = cfg.vault / "Reference"
+    ref.mkdir(parents=True)
+
+    (ref / "hub.md").write_text(_note("see [[target]]", title="Hub"), encoding="utf-8")
+    (ref / "target.md").write_text(_note("linked from hub", title="Target"), encoding="utf-8")
+    (ref / "lonely.md").write_text(_note("nobody links here", title="Lonely"), encoding="utf-8")
+
+    gen = ref / "graphs" / "demo"
+    gen.mkdir(parents=True)
+    for n in (0, 1):
+        (gen / f"Community_{n}.md").write_text(
+            _note(f"see [Community {1 - n}](Community_{1 - n}.md)",
+                  title=f"demo: Community_{n}", source="graph_build"),
+            encoding="utf-8")
+
+    manager = VaultManager(cfg)
+    manager._ensure_ready = lambda: None
+    manager.collection = None
+    return manager
+
+
+def test_generated_articles_are_not_counted_as_orphans(vault):
+    health = vault.get_health_summary()
+
+    # hub is linked by nothing, lonely is linked by nothing -> 2 real orphans.
+    # target is linked from hub. The two generated articles are excluded.
+    assert health["orphans"] == 2
+    assert health["generated_notes"] == 2
+    assert health["total_notes"] == 5
+
+
+def test_generated_articles_relative_links_are_not_counted_as_broken(vault):
+    """Only [[wikilinks]] are resolved; the articles' markdown links must not
+    inflate broken_links either."""
+    assert vault.get_health_summary()["broken_links"] == 0
+
+
+def test_wikilinks_embedded_in_generated_content_are_not_counted_as_broken(vault, tmp_path):
+    """A generated report quotes source verbatim, so a `[[...]]` inside one is a
+    code sample rather than authored link intent — graphify's report contributed
+    a phantom `[[Foo alloc]]` this way."""
+    (vault.cfg.vault / "Reference" / "graphs" / "demo" / "report-sample.md").write_text(
+        _note("excerpt: `arr[[Foo alloc]]`", title="demo: sample", source="graph_build"),
+        encoding="utf-8")
+    (tmp_path / "home" / ".delegation_core" / "vault_health.json").unlink(missing_ok=True)
+
+    health = vault.get_health_summary()
+
+    assert health["broken_links"] == 0
+    assert health["generated_notes"] == 3
+
+
+def test_hand_written_notes_still_count_as_orphans_without_the_marker(vault, tmp_path):
+    """Guard against the exclusion widening: only `source: graph_build` opts out."""
+    (vault.cfg.vault / "Reference" / "manual.md").write_text(
+        _note("no marker here", title="Manual"), encoding="utf-8")
+    (tmp_path / "home" / ".delegation_core" / "vault_health.json").unlink(missing_ok=True)
+
+    health = vault.get_health_summary()
+
+    assert health["orphans"] == 3
+    assert health["generated_notes"] == 2
+
+
+def test_raw_session_transcripts_are_treated_as_generated(vault, tmp_path):
+    """The SessionEnd hook dumps a conversation verbatim, so a `[[...]]` inside is
+    quoted text. A real transcript of a conversation about the linker contributed
+    four phantom targets: [[stem]], [[target]], [[source_stem]], [[new-note-stem]]."""
+    sessions = vault.cfg.vault / "Sessions"
+    sessions.mkdir(parents=True, exist_ok=True)
+    (sessions / "2026-06-29-transcript-52a001bb.md").write_text(
+        _note("we rename [[source_stem]] to [[new-note-stem]]",
+              title="Raw transcript", **{"type": "session-transcript"}),
+        encoding="utf-8")
+    (tmp_path / "home" / ".delegation_core" / "vault_health.json").unlink(missing_ok=True)
+
+    health = vault.get_health_summary()
+
+    assert health["broken_links"] == 0
+    assert health["generated_notes"] == 3
+
+
+def test_links_resolve_against_notes_outside_the_configured_folders(vault, tmp_path):
+    """Obsidian resolves a wikilink against every note in the vault. MEMORY.md and
+    Vault_Master_Index.md sit at this vault's root, outside vault_folders, and
+    links to them were reported broken while opening fine in Obsidian."""
+    (vault.cfg.vault / "MEMORY.md").write_text("# root note", encoding="utf-8")
+    (vault.cfg.vault / "Reference" / "cites-root.md").write_text(
+        _note("see [[MEMORY]]", title="Cites Root"), encoding="utf-8")
+    (tmp_path / "home" / ".delegation_core" / "vault_health.json").unlink(missing_ok=True)
+
+    assert vault.get_health_summary()["broken_links"] == 0
+
+
+def test_dot_directories_are_excluded_from_link_resolution(vault, tmp_path):
+    """.obsidian/ and .chroma_bge/ are machinery, not notes — a link must not
+    silently resolve against something Obsidian would never surface."""
+    hidden = vault.cfg.vault / ".obsidian" / "plugins"
+    hidden.mkdir(parents=True)
+    (hidden / "ghost.md").write_text("# not a note", encoding="utf-8")
+    (vault.cfg.vault / "Reference" / "cites-hidden.md").write_text(
+        _note("see [[ghost]]", title="Cites Hidden"), encoding="utf-8")
+    (tmp_path / "home" / ".delegation_core" / "vault_health.json").unlink(missing_ok=True)
+
+    assert vault.get_health_summary()["broken_links"] == 1
+
+
+def test_health_summary_is_cached_between_calls(vault, tmp_path):
+    first = vault.get_health_summary()
+    cache = tmp_path / "home" / ".delegation_core" / "vault_health.json"
+
+    assert cache.exists()
+    assert json.loads(cache.read_text(encoding="utf-8"))["orphans"] == first["orphans"]

@@ -4,93 +4,214 @@
     <meta charset="UTF-8" />
     <link rel="stylesheet" href="styles.css" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>delegation-core Dashboard</title>
+    <title>Delegation Core — Agnostic Orchestrator Hub</title>
     <script type="module" src="/main.js" defer></script>
   </head>
 
   <body>
     <div class="app">
-      <header class="topbar">
-        <h1 class="topbar-title">delegation-core</h1>
-
-        <section class="topbar-section" id="status-panel">
-          <h2>Status</h2>
-          <div id="status-fields" class="status-fields"><span class="muted">loading…</span></div>
-          <button id="llama-toggle-btn" type="button" disabled>…</button>
-        </section>
-
-        <section class="topbar-section topbar-section-clients" id="clients-panel">
-          <h2>Clients</h2>
-          <div id="clients-list" class="clients-list">
-            <span class="muted">loading…</span>
+      <!-- Top Orchestration, Server Controls & Window Header -->
+      <header class="topbar" data-tauri-drag-region>
+        <div class="topbar-brand" data-tauri-drag-region>
+          <div class="brand-icon">
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <polygon points="12 2 2 7 12 12 22 7 12 2"></polygon>
+              <polyline points="2 17 12 22 22 17"></polyline>
+              <polyline points="2 12 12 17 22 12"></polyline>
+            </svg>
           </div>
-        </section>
+          <div class="brand-text" data-tauri-drag-region>
+            <span class="brand-name">Delegation Core</span>
+            <span class="brand-badge">Orchestrator v0.9.0</span>
+          </div>
+        </div>
+
+        <!-- Telemetry Status Ribbon -->
+        <div class="topbar-telemetry" id="status-panel">
+          <div id="status-fields" class="status-fields">
+            <span class="muted">Loading status telemetry…</span>
+          </div>
+        </div>
+
+        <!-- Active MCP Clients Carousel -->
+        <div class="topbar-clients" id="clients-panel">
+          <span class="section-label">Clients</span>
+          <div id="clients-list" class="clients-list">
+            <span class="muted">Scanning…</span>
+          </div>
+        </div>
+
+        <!-- Native Window Control Buttons (Minimize, Maximize/Restore, Close) -->
+        <div class="window-controls">
+          <button class="win-btn win-min" id="win-minimize-btn" title="Minimize Window">
+            <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><line x1="5" y1="12" x2="19" y2="12"></line></svg>
+          </button>
+          <button class="win-btn win-max" id="win-maximize-btn" title="Maximize / Restore">
+            <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><rect x="3" y="3" width="18" height="18" rx="2" ry="2"></rect></svg>
+          </button>
+          <button class="win-btn win-close" id="win-close-btn" title="Close Application">
+            <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><line x1="18" y1="6" x2="6" y2="18"></line><line x1="6" y1="6" x2="18" y2="18"></line></svg>
+          </button>
+        </div>
       </header>
 
+      <!-- Main Application Layout -->
       <div class="layout">
-        <section class="graph-pane" id="graph-pane">
-          <h1 class="graph-pane-title">Vault Graph</h1>
-          <canvas id="graph-canvas"></canvas>
-          <div class="graph-state" id="graph-state">
-            <div class="pane-state loading">
-              <div class="pane-state-title">Loading vault graph…</div>
-            </div>
+        <!-- Left Panel: Graph Visualizer (Vault & Code Graphs) -->
+        <!-- Left ribbon: section switcher, Obsidian-style -->
+        <nav class="ribbon" id="ribbon" aria-label="Sections">
+          <button class="ribbon-btn active" data-tab="notes" title="Knowledge Vault  (Ctrl+1)" aria-label="Knowledge Vault">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"></path><polyline points="14 2 14 8 20 8"></polyline><line x1="16" y1="13" x2="8" y2="13"></line><line x1="16" y1="17" x2="8" y2="17"></line></svg>
+          </button>
+          <button class="ribbon-btn" data-tab="tasks" title="Orchestrator Processes  (Ctrl+2)" aria-label="Orchestrator Processes">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="4" width="18" height="18" rx="2" ry="2"></rect><line x1="16" y1="2" x2="16" y2="6"></line><line x1="8" y1="2" x2="8" y2="6"></line><line x1="3" y1="10" x2="21" y2="10"></line><path d="m9 16 2 2 4-4"></path></svg>
+          </button>
+          <button class="ribbon-btn" data-tab="search" title="Semantic Search  (Ctrl+3)" aria-label="Semantic Search">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"></circle><line x1="21" y1="21" x2="16.65" y2="16.65"></line></svg>
+          </button>
+          <button class="ribbon-btn" data-tab="fleet" title="Fleet Inspector  (Ctrl+4)" aria-label="Fleet Inspector">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="2" y="2" width="20" height="8" rx="2" ry="2"></rect><rect x="2" y="14" width="20" height="8" rx="2" ry="2"></rect><line x1="6" y1="6" x2="6.01" y2="6"></line><line x1="6" y1="18" x2="6.01" y2="18"></line></svg>
+          </button>
+          <span class="ribbon-indicator" id="tab-indicator" aria-hidden="true"></span>
+          <div class="ribbon-spacer"></div>
+          <div class="ribbon-select-wrap" title="Engine mode">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="4" y="4" width="16" height="16" rx="2"></rect><rect x="9" y="9" width="6" height="6"></rect><line x1="9" y1="1" x2="9" y2="4"></line><line x1="15" y1="1" x2="15" y2="4"></line><line x1="9" y1="20" x2="9" y2="23"></line><line x1="15" y1="20" x2="15" y2="23"></line><line x1="20" y1="9" x2="23" y2="9"></line><line x1="20" y1="14" x2="23" y2="14"></line><line x1="1" y1="9" x2="4" y2="9"></line><line x1="1" y1="14" x2="4" y2="14"></line></svg>
+            <select id="engine-mode-select" aria-label="Engine mode">
+              <option value="local">local</option>
+              <option value="hybrid">hybrid</option>
+              <option value="agent">agent</option>
+            </select>
           </div>
-          <div class="graph-legend" id="graph-legend" hidden></div>
-          <div class="graph-hint muted">Hover a node to see its name. Drag nodes to rearrange. Scroll to zoom. Click a node to open its note.</div>
-        </section>
-
-        <main class="main">
-          <nav class="tabs">
-            <button class="tab-btn active" data-tab="notes">Notes</button>
-            <button class="tab-btn" data-tab="tasks">Tasks</button>
-          </nav>
-
-          <section class="tab-content active" id="tab-notes">
-            <div class="notes-toolbar">
-              <input
-                type="search"
-                id="notes-filter"
-                placeholder="Filter notes by title…"
-                aria-label="Filter notes by title"
-                autocomplete="off"
-                spellcheck="false"
-              />
-            </div>
-            <div class="notes-browser">
-              <div class="folder-list" id="folder-list">
-                <div class="pane-state loading">
-                  <div class="pane-state-title">Loading…</div>
+          <button id="server-power-btn" class="ribbon-btn ribbon-action ribbon-power is-on" type="button" title="Server on / off">
+            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M18.36 6.64a9 9 0 1 1-12.73 0"></path><line x1="12" y1="2" x2="12" y2="12"></line></svg>
+            <span class="btn-text">Server ON</span>
+          </button>
+          <button id="llama-toggle-btn" class="ribbon-btn ribbon-action" type="button" title="Start / stop llama.cpp" disabled>
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"></polygon></svg>
+            <span class="btn-text">Initializing…</span>
+          </button>
+          <button id="server-restart-btn" class="ribbon-btn ribbon-action" type="button" title="Restart server and refresh telemetry">
+            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M21.5 2v6h-6M21.34 15.57a10 10 0 1 1-.57-8.38l5.67-5.67"></path></svg>
+            <span class="btn-text">Restart</span>
+          </button>
+          <button id="btn-settings-trigger" class="ribbon-btn ribbon-action" type="button" title="Settings">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"></circle><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"></path></svg>
+            <span class="btn-text">Settings</span>
+          </button>
+          <button class="ribbon-btn ribbon-toggle" id="btn-toggle-graph-pane" title="Toggle graph pane  (Ctrl+\\)" aria-label="Toggle graph pane">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="18" height="18" rx="2"></rect><line x1="9" y1="3" x2="9" y2="21"></line></svg>
+          </button>
+        </nav>
+        <!-- Left dock: the vault directory, always present, as in Obsidian -->
+        <aside class="left-dock" id="left-dock">
+          <div class="dock-header">
+            <span class="dock-title" id="dock-title">Vault</span>
+          </div>
+          <div class="dock-panel active" id="dock-notes">
+              <div class="folder-list-pane dock-body">
+                <div class="pane-section-header">Folders</div>
+                <div class="folder-list" id="folder-list">
+                  <div class="pane-state loading">
+                    <div class="spinner"></div>
+                    <div class="pane-state-title">Loading…</div>
+                  </div>
                 </div>
               </div>
-              <div class="note-list" id="note-list"></div>
-              <div class="note-view">
+
+          </div>
+          <div class="dock-panel" id="dock-tasks">
+                  <div class="task-list-pane">
+                    <div class="tasks-toolbar">
+                      <select id="tasks-status-filter" aria-label="Filter processes by status">
+                        <option value="active" selected>Active</option>
+                        <option value="all">All</option>
+                        <option value="paused">Paused</option>
+                        <option value="done">Done</option>
+                        <option value="cancelled">Cancelled</option>
+                      </select>
+                      <button id="tasks-new-btn" class="btn-primary-sm" type="button">+ New</button>
+                    </div>
+                    <div class="task-list" id="task-list"></div>
+                  </div>
+          </div>
+          <div class="dock-panel" id="dock-search">
+                  <div class="search-studio-hero">
+                    <h2>Semantic Knowledge Search</h2>
+                    <p class="search-subtext">BGE vector search across all Obsidian vault notes.</p>
+                    <div class="search-input-group">
+                      <input type="search" id="vector-search-input" placeholder="Search concepts, topics, or queries..." autocomplete="off" />
+                      <button id="vector-search-btn" class="btn-primary">Search</button>
+                    </div>
+                  </div>
+                  <div class="search-results-pane" id="vector-search-results">
+                    <div class="pane-state">
+                      <div class="pane-state-title">Ready for Queries</div>
+                      <div class="pane-state-hint">Enter a search query above.</div>
+                    </div>
+                  </div>
+          </div>
+          <div class="dock-panel" id="dock-fleet">
+            <div class="mcp-conn-list" id="mcp-conn-list">
+              <div class="pane-state"><div class="pane-state-title">Scanning connections…</div></div>
+            </div>
+          </div>
+        </aside>
+        <div class="resizer" id="left-resizer"></div>
+        <main class="main">
+
+          <!-- Tab 1: Notes Browser & Reader -->
+          <section class="tab-content active" id="tab-notes">
+            <div class="notes-toolbar">
+              <div class="search-box">
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"></circle><line x1="21" y1="21" x2="16.65" y2="16.65"></line></svg>
+                <input
+                  type="search"
+                  id="notes-filter"
+                  placeholder="Filter notes by title…"
+                  aria-label="Filter notes by title"
+                  autocomplete="off"
+                  spellcheck="false"
+                />
+              </div>
+            </div>
+            <div class="notes-browser">
+              <div class="note-list-pane">
+                <div class="pane-section-header">Notes (<span id="note-count-badge">0</span>)</div>
+                <div class="note-list" id="note-list"></div>
+              </div>
+
+              <div class="note-view-pane">
+                <div class="note-view-header" id="note-view-header" hidden>
+                  <div class="note-title-bar">
+                    <span class="note-folder-badge" id="note-folder-badge">Folder</span>
+                    <h2 class="note-view-title" id="note-view-title">Note Title</h2>
+                  </div>
+                  <div class="note-view-actions">
+                    <button class="btn-action-sm" id="btn-toggle-raw" title="Toggle raw Markdown view">Raw</button>
+                    <button class="btn-action-sm" id="btn-copy-path" title="Copy note path">Copy Path</button>
+                  </div>
+                </div>
+
                 <div id="note-state" class="note-state">
                   <div class="pane-state">
                     <div class="pane-state-title">No note selected</div>
                     <div class="pane-state-hint">Choose a note from the list to read it here.</div>
                   </div>
                 </div>
-                <pre id="note-content" class="note-content" hidden></pre>
+
+                <div id="note-body-wrapper" class="note-body-wrapper" hidden>
+                  <div id="note-frontmatter" class="note-frontmatter" hidden></div>
+                  <div id="note-rendered" class="note-rendered"></div>
+                  <pre id="note-content" class="note-content" hidden></pre>
+                </div>
               </div>
             </div>
           </section>
 
+          <!-- Tab 2: Process Orchestrator / Tasks -->
           <section class="tab-content" id="tab-tasks">
             <div class="tasks-browser">
-              <div class="task-list-pane">
-                <div class="tasks-toolbar">
-                  <select id="tasks-status-filter">
-                    <option value="active" selected>Active</option>
-                    <option value="all">All</option>
-                    <option value="paused">Paused</option>
-                    <option value="done">Done</option>
-                    <option value="cancelled">Cancelled</option>
-                  </select>
-                  <button id="tasks-new-btn" type="button">+ New</button>
-                </div>
-                <div class="task-list" id="task-list"></div>
-              </div>
+
               <div class="task-detail" id="task-detail">
                 <div class="pane-state">
                   <div class="pane-state-title">No process selected</div>
@@ -99,7 +220,298 @@
               </div>
             </div>
           </section>
+
+
+          <!-- Tab 4: Fleet Inspector -->
+          <section class="tab-content" id="tab-fleet">
+            <div class="fleet-inspector">
+              <div class="fleet-header">
+                <div>
+                  <h2>Connected Clients</h2>
+                  <p class="muted">Active MCP client connections to delegation-core.</p>
+                </div>
+                <div style="display: flex; gap: 8px;">
+                  <button id="purge-orphans-btn" class="btn-secondary-sm" title="Purge dead sessions & orphaned processes">Purge Orphans</button>
+                  <button id="fleet-refresh-btn" class="btn-secondary-sm">Refresh Fleet</button>
+                </div>
+              </div>
+              <div class="fleet-grid" id="fleet-grid">
+                <div class="pane-state">
+                  <div class="spinner"></div>
+                  <div class="pane-state-title">Scanning connected clients…</div>
+                </div>
+              </div>
+            </div>
+          </section>
         </main>
+        <div class="resizer" id="right-resizer"></div>
+        <aside class="right-dock" id="graph-pane">
+          <div class="pane-header">
+            <div class="pane-title-group">
+              <h2 class="pane-title">Vault Graph</h2>
+              <span class="pane-subtitle" id="graph-type-indicator">Wikilinks Network</span>
+            </div>
+            <div class="graph-tab-toggle">
+              <button class="graph-toggle-btn active" id="btn-toggle-vault-graph" data-mode="vault">Vault</button>
+              <button class="graph-toggle-btn" id="btn-toggle-code-graph" data-mode="code">Code</button>
+            </div>
+          </div>
+
+          <!-- Vault Graph View -->
+          <div class="graph-view-container" id="vault-graph-view">
+            <div class="graph-toolbar">
+              <input type="search" id="graph-search-input" placeholder="Find node in graph…" aria-label="Find node" autocomplete="off" spellcheck="false" />
+              <div class="graph-controls">
+                <button class="ctrl-btn" id="graph-zoom-in" title="Zoom In">+</button>
+                <button class="ctrl-btn" id="graph-zoom-out" title="Zoom Out">−</button>
+                <button class="ctrl-btn" id="graph-reset" title="Reset View"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M3 2v6h6"></path><path d="M3.5 13a9 9 0 1 0 2.6-6.4L3 8"></path></svg></button>
+              </div>
+            </div>
+
+            <div class="canvas-wrapper">
+              <canvas id="graph-canvas"></canvas>
+              <div class="graph-state" id="graph-state">
+                <div class="pane-state loading">
+                  <div class="spinner"></div>
+                  <div class="pane-state-title">Loading vault graph…</div>
+                </div>
+              </div>
+            </div>
+
+            <div class="graph-legend" id="graph-legend" hidden></div>
+            <div class="graph-hint muted">
+              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"></circle><line x1="12" y1="16" x2="12" y2="12"></line><line x1="12" y1="8" x2="12.01" y2="8"></line></svg>
+              Drag empty space to pan. Drag a node to move it. Scroll to zoom at the pointer. Click a node to open its note.
+            </div>
+          </div>
+
+          <!-- Code Knowledge Graph View (Graphify) -->
+          <div class="graph-view-container" id="code-graph-view" hidden>
+            <div class="code-graph-selector-bar">
+              <select id="code-graph-select" aria-label="Select Code Graph">
+                <option value="">Select registered code graph…</option>
+              </select>
+              <button id="code-graph-refresh-btn" class="btn-icon-only" title="Refresh code graphs">↻</button>
+            </div>
+            <div class="code-graph-details" id="code-graph-details">
+              <div class="pane-state">
+                <div class="pane-state-icon"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M5 3v4a7 7 0 0 0 14 0V3"></path><path d="M5 21v-4a7 7 0 0 1 14 0v4"></path><line x1="7" y1="9" x2="17" y2="9"></line><line x1="7" y1="15" x2="17" y2="15"></line></svg></div>
+                <div class="pane-state-title">No Code Graph Selected</div>
+                <div class="pane-state-hint">Select a codebase AST graph built via <code>delegation-core graph build</code>.</div>
+              </div>
+            </div>
+          </div>
+        </aside>
+
+        <!-- Resizable Splitter Handle -->
+
+        <!-- Central Workspace -->
+      </div>
+    </div>
+
+    <!-- Modal: New Task / Process Creation -->
+    <div class="modal-backdrop" id="new-task-modal" hidden>
+      <div class="modal-card">
+        <div class="modal-header">
+          <h3>Create Tracked Process</h3>
+          <button class="modal-close" id="modal-close-btn">&times;</button>
+        </div>
+        <form id="new-task-form" class="modal-form">
+          <div class="form-group">
+            <label for="task-name">Process Name *</label>
+            <input type="text" id="task-name" required placeholder="e.g., Refactor Authentication Module" />
+          </div>
+          <div class="form-group">
+            <label for="task-desc">Description</label>
+            <textarea id="task-desc" rows="3" placeholder="Process objectives and context..."></textarea>
+          </div>
+          <div class="form-group">
+            <label for="task-steps">Execution Steps (one per line)</label>
+            <textarea id="task-steps" rows="4" placeholder="Plan architecture&#10;Implement core changes&#10;Run unit tests"></textarea>
+          </div>
+          <div class="modal-footer">
+            <button type="button" class="btn-secondary" id="modal-cancel-btn">Cancel</button>
+            <button type="submit" class="btn-primary">Create Process</button>
+          </div>
+        </form>
+      </div>
+    </div>
+
+    <!-- Modal: Settings & Orchestration Configuration (Obsidian Style) -->
+    <div class="modal-backdrop" id="settings-modal" hidden>
+      <div class="modal-card settings-modal-card">
+        <div class="modal-header">
+          <div style="display: flex; align-items: center; gap: 8px;">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"></circle><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"></path></svg>
+            <h3>Settings — Delegation Core Configuration</h3>
+          </div>
+          <button class="modal-close" id="settings-close-btn">&times;</button>
+        </div>
+
+        <div class="settings-body">
+          <div class="settings-sidebar">
+            <button class="settings-nav-item active" data-sec="sec-engine"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"></circle><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.6 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.6 1.65 1.65 0 0 0 10 3.09V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"></path></svg> Work Mode & Engine</button>
+            <button class="settings-nav-item" data-sec="sec-model"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 5a3 3 0 0 0-3 3 3 3 0 0 0-2 5.2A3 3 0 0 0 9 19a3 3 0 0 0 3-1.5A3 3 0 0 0 15 19a3 3 0 0 0 2-5.8A3 3 0 0 0 15 8a3 3 0 0 0-3-3z"></path></svg> Local LLM Model</button>
+            <button class="settings-nav-item" data-sec="sec-embeddings"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"></circle><line x1="21" y1="21" x2="16.65" y2="16.65"></line></svg> Embeddings & Search</button>
+            <button class="settings-nav-item" data-sec="sec-vault"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"></path></svg> Vault & Storage</button>
+          </div>
+
+          <div class="settings-content">
+            <!-- Section 1: Engine Work Mode -->
+            <div class="settings-sec active" id="sec-engine">
+              <h4>Engine Work Mode</h4>
+              <p class="settings-desc">Choose where LLM synthesis and compression tasks execute.</p>
+
+              <div class="mode-cards-grid">
+                <div class="mode-card active" id="mode-card-local" data-mode="local">
+                  <div class="mode-card-header">
+                    <span class="mode-title">LOCAL</span>
+                    <span class="count">llama.cpp</span>
+                  </div>
+                  <p class="mode-desc">All synthesis runs on your local llama.cpp model. 100% offline.</p>
+                </div>
+
+                <div class="mode-card" id="mode-card-agent" data-mode="agent">
+                  <div class="mode-card-header">
+                    <span class="mode-title">AGENT</span>
+                    <span class="count">Claude Code</span>
+                  </div>
+                  <p class="mode-desc">No local LLM model. Synthesis/compression is delegated to the calling agent.</p>
+                </div>
+
+                <div class="mode-card" id="mode-card-hybrid" data-mode="hybrid">
+                  <div class="mode-card-header">
+                    <span class="mode-title">HYBRID</span>
+                    <span class="count">Smart Route</span>
+                  </div>
+                  <p class="mode-desc">Light interactive work goes to Claude; heavy/bulk background jobs run on local LLM.</p>
+                </div>
+              </div>
+
+              <div class="setting-item">
+                <div class="setting-info">
+                  <label for="cfg-budget-mode">Hardware Budget Mode</label>
+                  <span>Applies token caps to fit within hardware bounds.</span>
+                </div>
+                <select id="cfg-budget-mode">
+                  <option value="normal">Normal (Default)</option>
+                  <option value="cpu">CPU (Strict Token Caps)</option>
+                  <option value="auto">Auto (Startup Tok/Sec Calibration)</option>
+                </select>
+              </div>
+
+              <div class="setting-item">
+                <div class="setting-info">
+                  <label for="cfg-synthesis-enabled">LLM Synthesis Pipeline</label>
+                  <span>Synthesize raw inbox documents into structured notes.</span>
+                </div>
+                <input type="checkbox" id="cfg-synthesis-enabled" />
+              </div>
+
+              <div class="setting-item">
+                <div class="setting-info">
+                  <label for="cfg-synthesis-lang">Synthesis Language</label>
+                  <span>Language for structured note synthesis prompts.</span>
+                </div>
+                <select id="cfg-synthesis-lang">
+                  <option value="en">English (en)</option>
+                  <option value="pt">Portuguese (pt)</option>
+                </select>
+              </div>
+
+              <div class="setting-item">
+                <div class="setting-info">
+                  <label for="cfg-web-search">DuckDuckGo Web Search</label>
+                  <span>Opt-in web search integration.</span>
+                </div>
+                <input type="checkbox" id="cfg-web-search" />
+              </div>
+            </div>
+
+            <!-- Section 2: Local LLM Model -->
+            <div class="settings-sec" id="sec-model">
+              <h4>Local LLM Model & Server</h4>
+              <p class="settings-desc">Configure the local llama-server binary and GGUF model weights.</p>
+
+              <div class="form-group">
+                <label for="cfg-model-select">Detected GGUF Models (~/.delegation_core/models)</label>
+                <select id="cfg-model-select">
+                  <option value="">Select detected GGUF model…</option>
+                </select>
+              </div>
+
+              <div class="form-group">
+                <label for="cfg-llama-model">Active Model File Path</label>
+                <input type="text" id="cfg-llama-model" placeholder="/path/to/model.gguf" />
+              </div>
+
+              <div class="form-group">
+                <label for="cfg-llama-binary">llama-server Binary Path</label>
+                <input type="text" id="cfg-llama-binary" placeholder="/usr/bin/llama-server" />
+              </div>
+
+              <div class="setting-row-2">
+                <div class="form-group">
+                  <label for="cfg-llama-ctx">Context Window Size (ctx)</label>
+                  <input type="number" id="cfg-llama-ctx" value="4096" />
+                </div>
+
+                <div class="form-group">
+                  <label for="cfg-llama-ngl">GPU Offload Layers (ngl)</label>
+                  <input type="number" id="cfg-llama-ngl" value="999" />
+                </div>
+              </div>
+            </div>
+
+            <!-- Section 3: Embeddings & Vector Search -->
+            <div class="settings-sec" id="sec-embeddings">
+              <h4>Embeddings & Vector Search</h4>
+              <p class="settings-desc">Fine-tune vector search and similarity thresholds.</p>
+
+              <div class="form-group">
+                <label for="cfg-bge-model">BGE Embedding Model</label>
+                <input type="text" id="cfg-bge-model" value="BAAI/bge-base-en-v1.5" />
+              </div>
+
+              <div class="form-group">
+                <label for="cfg-search-threshold">Search Similarity Cutoff: <span id="search-thresh-val">0.55</span></label>
+                <input type="range" id="cfg-search-threshold" min="0.1" max="0.9" step="0.05" value="0.55" />
+              </div>
+
+              <div class="form-group">
+                <label for="cfg-merge-threshold">Wikilink Merge Threshold: <span id="merge-thresh-val">0.88</span></label>
+                <input type="range" id="cfg-merge-threshold" min="0.5" max="0.99" step="0.01" value="0.88" />
+              </div>
+
+              <div class="form-group">
+                <label for="cfg-max-tokens">Max Tokens Output</label>
+                <input type="number" id="cfg-max-tokens" value="2048" />
+              </div>
+            </div>
+
+            <!-- Section 4: Vault & Storage -->
+            <div class="settings-sec" id="sec-vault">
+              <h4>Vault & Storage Settings</h4>
+              <p class="settings-desc">Obsidian vault path and configured note category folders.</p>
+
+              <div class="form-group">
+                <label for="cfg-vault-path">Obsidian Vault Path</label>
+                <input type="text" id="cfg-vault-path" readonly />
+              </div>
+
+              <div class="form-group">
+                <label>Configured Vault Folders</label>
+                <div id="cfg-vault-folders-chips" style="display: flex; flex-wrap: wrap; gap: 6px; margin-top: 6px;"></div>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <div class="modal-footer">
+          <span id="settings-toast" style="font-size: 12px; color: var(--accent-emerald); margin-right: auto;" hidden><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3"><polyline points="20 6 9 17 4 12"></polyline></svg> Settings saved & applied</span>
+          <button type="button" class="btn-secondary" id="settings-cancel-btn">Cancel</button>
+          <button type="button" class="btn-primary" id="settings-save-btn">Save Settings</button>
+        </div>
       </div>
     </div>
   </body>

@@ -42,6 +42,9 @@ class FakeVault:
 
 @pytest.fixture
 def server(monkeypatch, tmp_path):
+    import delegation_core.config as config_mod
+    monkeypatch.setattr(config_mod, "CONFIG_DIR", tmp_path)
+    monkeypatch.setattr(config_mod, "CONFIG_FILE", tmp_path / "config.json")
     vault_path = tmp_path / "vault"
     vault_path.mkdir()
     cfg = Config(vault_path=str(vault_path), vault_folders=["reference", "decisions"])
@@ -156,6 +159,54 @@ def test_unknown_get_route_returns_404(server):
     status, body = _get(port, "/api/nonexistent")
     assert status == 404
     assert "error" in body
+
+
+def test_graphs_get_missing_name_returns_400(server):
+    port, _, _ = server
+    status, body = _get(port, "/api/graphs/get")
+    assert status == 400
+    assert "error" in body
+
+
+def test_graphs_affected_missing_name_or_query_returns_400(server):
+    port, _, _ = server
+    status, body = _get(port, "/api/graphs/affected?name=foo")
+    assert status == 400
+    assert "error" in body
+
+
+def test_config_get_returns_config_dict(server):
+    port, cfg, _ = server
+    status, body = _get(port, "/api/config")
+    assert status == 200
+    assert "config" in body
+    assert body["config"]["engine_mode"] == cfg.engine_mode
+
+
+def test_config_update_saves_new_settings(server):
+    port, cfg, _ = server
+    conn = http.client.HTTPConnection("127.0.0.1", port, timeout=5)
+    payload = json.dumps({"engine_mode": "hybrid", "search_threshold": 0.65})
+    conn.request("POST", "/api/config/update", body=payload, headers={"Content-Type": "application/json"})
+    res = conn.getresponse()
+    body = json.loads(res.read())
+    conn.close()
+    assert res.status == 200
+    assert body["ok"] is True
+    assert cfg.engine_mode == "hybrid"
+    assert cfg.search_threshold == 0.65
+
+
+def test_purge_orphans_endpoint(server):
+    port, _, _ = server
+    conn = http.client.HTTPConnection("127.0.0.1", port, timeout=5)
+    conn.request("POST", "/api/system/purge_orphans", body="{}", headers={"Content-Type": "application/json"})
+    res = conn.getresponse()
+    body = json.loads(res.read())
+    conn.close()
+    assert res.status == 200
+    assert body["ok"] is True
+    assert "purged_sessions" in body
 
 
 def test_vault_search_non_numeric_limit_returns_clean_500_not_a_crash(server):

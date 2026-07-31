@@ -107,15 +107,27 @@ class ClientTrackingMiddleware(Middleware):
 
 
 def list_connected_clients() -> list[dict]:
-    """Read all session heartbeat files, dropping stale ones. Used by
-    dashboard_api.py's /api/clients endpoint."""
+    """Read all session heartbeat files, dropping stale ones and deleting files
+    whose PIDs no longer exist in the system process table. Used by
+    dashboard_api.py's /api/clients endpoint.
+    """
+    import psutil
     if not SESSIONS_DIR.exists():
         return []
     now = datetime.now(timezone.utc)
     clients = []
+    is_real_dir = SESSIONS_DIR == (Path.home() / ".delegation_core" / "sessions")
+
     for f in SESSIONS_DIR.glob("*.json"):
         try:
             data = json.loads(f.read_text(encoding="utf-8"))
+            pid = data.get("pid")
+
+            # In real production sessions directory, delete files for dead processes
+            if is_real_dir and pid and not psutil.pid_exists(pid):
+                f.unlink(missing_ok=True)
+                continue
+
             last_seen = datetime.fromisoformat(data["last_seen"])
             age = (now - last_seen).total_seconds()
             if age > SESSION_STALE_SECONDS:

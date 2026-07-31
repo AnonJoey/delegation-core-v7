@@ -4,7 +4,7 @@ session_export.py — Claude Code SessionEnd hook.
 
 Fires automatically when a Claude Code session closes.
 Reads the session transcript JSONL, formats it as markdown,
-and writes it to the vault's sessions/ folder.
+and writes it to the vault's configured Sessions folder.
 
 This is a raw-transcript backup. It is NOT a replacement for
 export_session() (the MCP tool Claude calls to write a curated summary).
@@ -79,6 +79,23 @@ def _load_config() -> dict:
         return json.loads(CONFIG_PATH.read_text(encoding="utf-8"))
     except Exception:
         return {}
+
+
+def _resolve_sessions_dir(vault: Path, config: dict) -> Path:
+    """Pick the vault's session folder using its configured casing.
+
+    Hardcoding ``vault / "sessions"`` created a second, lowercase folder beside
+    the configured ``Sessions/`` on every vault set up with Capitalized names —
+    and because indexing, health accounting and search all iterate
+    ``vault_folders``, every transcript written there was invisible: not in
+    ChromaDB, not searchable, not counted. Resolved case-insensitively against
+    the configured list, mirroring delegation_core.config.resolve_folder, which
+    this stdlib-only hook cannot import.
+    """
+    for folder in config.get("vault_folders") or []:
+        if isinstance(folder, str) and folder.strip().lower() == "sessions":
+            return vault / folder.strip()
+    return vault / "Sessions"
 
 
 def _trigger_reindex() -> bool:
@@ -223,12 +240,12 @@ def main():
         sys.exit(0)
 
     vault = Path(vault_path).expanduser()
-    sessions_dir = vault / "sessions"
+    sessions_dir = _resolve_sessions_dir(vault, config)
 
     try:
         sessions_dir.mkdir(parents=True, exist_ok=True)
     except Exception as e:
-        sys.stderr.write(f"session_export: could not create sessions/ dir: {e}\n")
+        sys.stderr.write(f"session_export: could not create {sessions_dir.name}/ dir: {e}\n")
         sys.exit(0)
 
     messages = _parse_transcript(transcript_path)

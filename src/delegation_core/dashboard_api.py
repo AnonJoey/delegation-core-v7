@@ -284,6 +284,13 @@ class _Handler(BaseHTTPRequestHandler):
             elif parsed.path == "/api/clients":
                 from .client_tracking import list_connected_clients
                 self._send_json({"clients": list_connected_clients()})
+            elif parsed.path == "/api/mcp/windows":
+                # The MCP servers the *LLM provider's* client has mounted — i.e. what
+                # Claude can reach. Distinct from /api/clients, which lists the client
+                # surfaces attached to this delegation-core process. Both are "MCP
+                # connections"; they point in opposite directions.
+                from .windows import list_windows
+                self._send_json(list_windows())
             elif parsed.path == "/api/vault/tree":
                 self._handle_vault_tree()
             elif parsed.path == "/api/vault/note":
@@ -295,10 +302,16 @@ class _Handler(BaseHTTPRequestHandler):
             elif parsed.path == "/api/graphs":
                 from . import graphbridge
                 self._send_json(graphbridge.list_graphs(_cfg))
+            elif parsed.path == "/api/graphs/get":
+                self._handle_graphs_get(query)
+            elif parsed.path == "/api/graphs/affected":
+                self._handle_graphs_affected(query)
             elif parsed.path == "/api/processes":
                 self._handle_processes_list(query)
             elif parsed.path == "/api/processes/get":
                 self._handle_processes_get(query)
+            elif parsed.path == "/api/config":
+                self._handle_config_get()
             else:
                 self._send_json({"error": f"not found: {parsed.path}"}, status=404)
         except Exception as e:
@@ -340,6 +353,10 @@ class _Handler(BaseHTTPRequestHandler):
                 self._handle_llama_start()
             elif parsed.path == "/api/llama/stop":
                 self._handle_llama_stop()
+            elif parsed.path == "/api/config/update":
+                self._handle_config_update()
+            elif parsed.path == "/api/system/purge_orphans":
+                self._handle_purge_orphans()
             else:
                 self._send_json({"error": f"not found: {parsed.path}"}, status=404)
         except Exception as e:
@@ -362,6 +379,153 @@ class _Handler(BaseHTTPRequestHandler):
             self._send_json({"error": f"not found: {process_id}"}, status=404)
             return
         self._send_json(proc)
+
+    def _handle_graphs_get(self, query) -> None:
+        name = (query.get("name") or [""])[0]
+        if not name:
+            self._send_json({"error": "missing name parameter"}, status=400)
+            return
+        from . import graphbridge
+        res = graphbridge.get_report(_cfg, name)
+        status_code = 404 if "error" in res else 200
+        self._send_json(res, status=status_code)
+
+    def _handle_graphs_affected(self, query) -> None:
+        name = (query.get("name") or [""])[0]
+        q = (query.get("query") or [""])[0]
+        depth_str = (query.get("depth") or ["2"])[0]
+        try:
+            depth = int(depth_str)
+        except ValueError:
+            depth = 2
+        if not name or not q:
+            self._send_json({"error": "missing name or query parameter"}, status=400)
+            return
+        from . import graphbridge
+        res = graphbridge.get_affected(_cfg, name, query=q, depth=depth)
+        status_code = 404 if "error" in res else 200
+        self._send_json(res, status=status_code)
+
+    def _handle_config_get(self) -> None:
+        from dataclasses import asdict
+        config_dict = asdict(_cfg)
+        models_dir = _cfg.models_dir
+        available_models = []
+        if models_dir.exists():
+            for f in sorted(models_dir.glob("*.gguf")):
+                available_models.append(str(f))
+        self._send_json({
+            "config": config_dict,
+            "available_models": available_models
+        })
+
+    def _handle_config_update(self) -> None:
+        data = self._read_json_body()
+        if data is None:
+            return
+
+        if "engine_mode" in data:
+            mode = str(data["engine_mode"]).strip().lower()
+            if mode in ("local", "agent", "hybrid"):
+                _cfg.engine_mode = mode
+
+        if "budget_mode" in data:
+            b_mode = str(data["budget_mode"]).strip().lower()
+            if b_mode in ("normal", "cpu", "auto"):
+                _cfg.budget_mode = b_mode
+
+        if "llama_model" in data:
+            _cfg.llama_model = str(data["llama_model"]).strip()
+
+        if "llama_binary" in data:
+            _cfg.llama_binary = str(data["llama_binary"]).strip()
+
+        if "bge_model" in data:
+            _cfg.bge_model = str(data["bge_model"]).strip()
+
+        if "search_threshold" in data:
+            try:
+                _cfg.search_threshold = float(data["search_threshold"])
+            except (ValueError, TypeError):
+                pass
+
+        if "merge_threshold" in data:
+            try:
+                _cfg.merge_threshold = float(data["merge_threshold"])
+            except (ValueError, TypeError):
+                pass
+
+        if "max_tokens" in data:
+            try:
+                _cfg.max_tokens = int(data["max_tokens"])
+            except (ValueError, TypeError):
+                pass
+
+        if "synthesis_enabled" in data:
+            _cfg.synthesis_enabled = bool(data["synthesis_enabled"])
+
+        if "synthesis_lang" in data:
+            lang = str(data["synthesis_lang"]).strip().lower()
+            if lang in ("en", "pt"):
+                _cfg.synthesis_lang = lang
+
+        if "web_search_enabled" in data:
+            _cfg.web_search_enabled = bool(data["web_search_enabled"])
+
+        if "llama_ctx" in data:
+            try:
+                _cfg.llama_ctx = int(data["llama_ctx"])
+            except (ValueError, TypeError):
+                pass
+
+        if "llama_ngl" in data:
+            try:
+                _cfg.llama_ngl = int(data["llama_ngl"])
+            except (ValueError, TypeError):
+                pass
+
+        _cfg.save()
+        from dataclasses import asdict
+        self._send_json({"ok": True, "config": asdict(_cfg)})
+
+    def _handle_purge_orphans(self) -> None:
+        import os
+        import psutil
+        from .client_tracking import SESSIONS_DIR
+
+        purged_sessions = 0
+        if SESSIONS_DIR.exists():
+            for f in SESSIONS_DIR.glob("*.json"):
+                try:
+                    data = json.loads(f.read_text(encoding="utf-8"))
+                    pid = data.get("pid")
+                    if pid and not psutil.pid_exists(pid):
+                        f.unlink(missing_ok=True)
+                        purged_sessions += 1
+                except Exception:
+                    pass
+
+        killed_orphans = 0
+        my_pid = os.getpid()
+        for proc in psutil.process_iter(["pid", "ppid", "cmdline"]):
+            try:
+                if proc.info["pid"] == my_pid:
+                    continue
+                cmdline = proc.info["cmdline"] or []
+                if any("dashboard_api" in arg for arg in cmdline):
+                    ppid = proc.info["ppid"]
+                    if ppid == 1 or not psutil.pid_exists(ppid):
+                        proc.kill()
+                        killed_orphans += 1
+            except (psutil.NoSuchProcess, psutil.AccessDenied):
+                pass
+
+        self._send_json({
+            "ok": True,
+            "purged_sessions": purged_sessions,
+            "killed_orphans": killed_orphans,
+            "message": f"Purged {purged_sessions} dead session files and killed {killed_orphans} orphaned sidecar processes."
+        })
 
     def _handle_processes_create(self) -> None:
         data = self._read_json_body()
@@ -520,15 +684,18 @@ def run(port: int = 0, host: str = "127.0.0.1", parent_pid: int | None = None) -
     import os
     from .config import Config
 
-    # Matches cli.py's cmd_run(): use cached model weights only, no live HF Hub
-    # version-check chatter on every startup (the model is already on disk).
-    os.environ.setdefault("HF_HUB_OFFLINE", "1")
-
     logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s",
                         stream=sys.stderr)
 
     global _cfg, _vault, _tracker
     _cfg = Config.load()
+
+    # Matches cli.py's cmd_run(): skip the HF Hub round-trip once the weights are
+    # cached. Deliberately after Config.load(), because the decision depends on
+    # which model is configured — and it must stay conditional, or a machine that
+    # never downloaded the model can never start.
+    from .embeddings import prefer_offline
+    prefer_offline(getattr(_cfg, "bge_model", ""))
     if not _cfg.is_configured():
         sys.stderr.write("delegation-core is not configured.\nRun: delegation-core setup\n")
         sys.exit(1)
