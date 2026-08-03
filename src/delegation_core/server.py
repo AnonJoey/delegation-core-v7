@@ -2,18 +2,12 @@
 server.py — FastMCP tool definitions for delegation-core v0.4.
 Called by run_server(); never run directly.
 
-32 tools across seven groups:
-  Core (9):            search_vault, read_note, write_note, compress,
-                       vault_stats, heartbeat, list_mcp_clients,
-                       run_maintenance, export_session
-  Maintenance (6):     vault_list_notes, vault_inbox_status,
-                       vault_find_similar, vault_update_note, relink_folder,
-                       search_web
-  Fire-and-forget (3): run_maintenance_bg, vault_reindex_bg, task_status
-  External ingestion (3): ingest_folder, ingest_folder_bg, ingest_status
-  Code graph (7):      graph_build, graph_list, graph_report, graph_affected,
-                       graph_hook_install, graph_hook_uninstall, graph_hook_status
-  Process tracking (4):   process_create, process_list, process_update, process_get
+The tool surface is deliberately NOT listed here. This header used to carry a
+hand-maintained inventory ("32 tools across seven groups") that read 32 while
+the server served 47 — the same drift that made a comparable project's guide
+wrong on four of four constants. Ask the running server instead: the
+`capabilities()` tool reports the live list from `mcp.list_tools()`, plus which
+graph exporters are wired and which are deliberately not.
 
 v0.4 changes:
   - engine.invoke() is now async (httpx.AsyncClient); all run_in_executor
@@ -110,13 +104,11 @@ from . import windows as _windows
 from .config import Config
 from .engine import DelegationEngine
 from .ingest import IngestManager
-from .linker import inject_backlinks as _inject_backlinks
-from .linker import wikilinks as _wikilinks
 from .organizer import heal as _heal_notes
 from .organizer import relink_folder as _relink_folder
 from .organizer import run as _run_maintenance
 from .tracker import ProcessTracker
-from .vault import VaultManager, compose_note, safe_filename, unique_note_path
+from .vault import VaultManager
 
 
 def _post_write_links(note_path: Path, rel_path: str, folder: str, stem: str) -> None:

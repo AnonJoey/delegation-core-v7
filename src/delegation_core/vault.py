@@ -502,21 +502,7 @@ class VaultManager:
         if not folder_path.exists():
             return []
         files = sorted(folder_path.rglob("*.md"), key=lambda f: f.stat().st_mtime, reverse=True)
-        results = []
-        for f in files[:limit]:
-            title, date = f.name[:-3], ""
-            size = f.stat().st_size
-            try:
-                for line in f.read_text(encoding="utf-8").splitlines()[:8]:
-                    if line.startswith("title:"):
-                        title = yaml_unquote_scalar(line.split(":", 1)[1])
-                    elif line.startswith("date:"):
-                        date = line.split(":", 1)[1].strip()
-            except Exception as e:
-                logger.warning("Could not read frontmatter from %s: %s", f.name, e)
-            results.append({"title": title, "date": date,
-                             "path": str(f.relative_to(self.cfg.vault)), "size_bytes": size})
-        return results
+        return [self._note_row(f) for f in files[:limit]]
 
     def _note_row(self, f: Path) -> dict:
         """Title/date/path/size for one note, reading only its frontmatter head."""
