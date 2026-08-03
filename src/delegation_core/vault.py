@@ -621,6 +621,41 @@ class VaultManager:
         return [dict(self._note_row(f), match_rank=rank)
                 for rank, _, _, f in scored[:limit]]
 
+    def resolvable_link_targets(self) -> dict[str, Path]:
+        """Every name a `[[wikilink]]` in this vault can legitimately resolve to.
+
+        Wider than "stems of notes in vault_folders", in two ways that both
+        produce false "broken link" reports when missed:
+
+        - **Frontmatter aliases.** A note declaring `aliases: [Command Center]`
+          is reachable by that name.
+        - **Notes outside the managed folders.** MEMORY.md at the vault root and
+          anything staged in _processed/ resolve fine for a reader; only grading
+          is scoped to vault_folders.
+
+        vault_health() has always resolved this way. note_links() did not when it
+        was written, and would have labelled 9 live targets in this vault as
+        missing — the exact misreport the backlinks panel exists to avoid. One
+        method now, so the panel and the health count cannot disagree.
+        """
+        targets: dict[str, Path] = {}
+        for f in self.cfg.vault.rglob("*.md"):
+            if any(part.startswith(".") for part in f.relative_to(self.cfg.vault).parts):
+                continue
+            targets.setdefault(f.name[:-3].strip().lower(), f)
+        for folder in self.cfg.vault_folders:
+            root = self.cfg.vault / folder
+            if not root.exists():
+                continue
+            for f in root.rglob("*.md"):
+                try:
+                    content = f.read_text(encoding="utf-8")
+                except OSError:
+                    continue
+                for alias in frontmatter_aliases(content):
+                    targets.setdefault(alias.lower(), f)
+        return targets
+
     def note_links(self, rel_path: str) -> dict:
         """Inbound and outbound wikilinks for one note.
 
@@ -644,31 +679,32 @@ class VaultManager:
         if not target.is_file():
             return {"error": f"Not a note: {rel_path}"}
 
-        by_stem: dict[str, Path] = {}
-        for folder in self.cfg.vault_folders:
-            root = self.cfg.vault / folder
-            if not root.exists():
-                continue
-            for f in root.rglob("*.md"):
-                by_stem.setdefault(f.stem.lower(), f)
-
+        by_stem = self.resolvable_link_targets()
         own_stem = target.stem.lower()
+        own_text = target.read_text(encoding="utf-8", errors="ignore")
         outbound = []
-        for link in _countable_wikilinks(target.read_text(encoding="utf-8", errors="ignore")):
+        for link in _countable_wikilinks(own_text):
             hit = by_stem.get(link.strip().lower())
             outbound.append({"target": link.strip(),
                              "path": str(hit.relative_to(self.cfg.vault)) if hit else None,
                              "broken": hit is None})
 
+        # Iterate distinct files, not by_stem keys: an aliased note appears under
+        # every one of its names, which listed it once per alias.
+        # A link may address this note by stem or by any alias it declares.
+        own_names = {own_stem} | {a.lower() for a in frontmatter_aliases(own_text)}
+
+        # Iterate distinct files, not by_stem keys: an aliased note appears under
+        # every one of its names, which listed it once per alias.
         inbound = []
-        for stem, f in by_stem.items():
-            if stem == own_stem:
+        for f in dict.fromkeys(by_stem.values()):
+            if f == target:
                 continue
             try:
                 content = f.read_text(encoding="utf-8", errors="ignore")
             except OSError:
                 continue
-            if any(t.strip().lower() == own_stem for t in _countable_wikilinks(content)):
+            if any(t.strip().lower() in own_names for t in _countable_wikilinks(content)):
                 inbound.append(self._note_row(f))
 
         inbound.sort(key=lambda n: n["title"].lower())

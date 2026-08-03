@@ -156,3 +156,50 @@ def test_note_links_rejects_a_path_outside_the_vault(linked):
 
 def test_note_links_rejects_a_directory(linked):
     assert "error" in linked.note_links("Reference")
+
+
+def test_note_links_resolves_frontmatter_aliases(tmp_path):
+    """A link addressing a note by its declared alias is not broken.
+
+    note_links originally resolved only against stems of notes inside
+    vault_folders, while vault_health had always also honoured aliases and notes
+    outside those folders. On the real vault that gap labelled 9 live targets as
+    missing — the exact misreport the panel exists to prevent.
+    """
+    cfg = Config(vault_path=str(tmp_path), vault_folders=["Reference"])
+    ref = tmp_path / "Reference"
+    ref.mkdir(parents=True)
+    (ref / "command-center.md").write_text(
+        '---\ntitle: "cc"\naliases:\n  - Command Center\n---\n\nhub\n', encoding="utf-8")
+    (ref / "user.md").write_text(
+        '---\ntitle: "user"\n---\n\nSee [[Command Center]].\n', encoding="utf-8")
+
+    vm = VaultManager(cfg)
+    assert vm.note_links("Reference/user.md")["broken_count"] == 0
+    inbound = vm.note_links("Reference/command-center.md")["inbound"]
+    assert [n["path"] for n in inbound] == ["Reference/user.md"]
+
+
+def test_note_links_resolves_notes_outside_the_managed_folders(tmp_path):
+    """MEMORY.md at the vault root resolves for a reader; only grading is scoped."""
+    cfg = Config(vault_path=str(tmp_path), vault_folders=["Reference"])
+    (tmp_path / "Reference").mkdir(parents=True)
+    (tmp_path / "MEMORY.md").write_text("root note\n", encoding="utf-8")
+    (tmp_path / "Reference" / "a.md").write_text("Points at [[MEMORY]].\n", encoding="utf-8")
+
+    assert VaultManager(cfg).note_links("Reference/a.md")["broken_count"] == 0
+
+
+def test_note_links_lists_an_aliased_referrer_once(tmp_path):
+    """The alias index maps several names to one file; iterating its keys listed
+    that file once per alias."""
+    cfg = Config(vault_path=str(tmp_path), vault_folders=["Reference"])
+    ref = tmp_path / "Reference"
+    ref.mkdir(parents=True)
+    (ref / "target.md").write_text("plain\n", encoding="utf-8")
+    (ref / "many-names.md").write_text(
+        '---\naliases:\n  - First\n  - Second\n  - Third\n---\n\nSee [[target]].\n',
+        encoding="utf-8")
+
+    inbound = VaultManager(cfg).note_links("Reference/target.md")["inbound"]
+    assert [n["path"] for n in inbound] == ["Reference/many-names.md"]
