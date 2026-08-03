@@ -257,7 +257,14 @@ def relink_folder(
             self_path = str(f.relative_to(cfg.vault))
             already_linked = existing_targets(content)
 
-            hits = vault_manager.search(body[:800], limit=max_links_per_note + 3)
+            # scope='notes': this relinks the user's own writing to itself. An
+            # unscoped search on a vault holding 3692 generated code-graph
+            # articles against 187 hand-written notes links a note about GPU
+            # memory to TestVisionCpuBurstCap and hermes-agent: managed_uv.py —
+            # observed directly on the first real run, which added 24 such links
+            # to 9 notes before they were removed again.
+            hits = vault_manager.search(body[:800], limit=max_links_per_note + 3,
+                                        scope="notes")
             new_links = []
             new_link_paths = []
             for h in hits:
