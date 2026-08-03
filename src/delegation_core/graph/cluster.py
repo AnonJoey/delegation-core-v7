@@ -5,6 +5,8 @@ import inspect
 import io
 import json
 import sys
+from collections import Counter
+from pathlib import PurePosixPath
 import networkx as nx
 
 
@@ -83,6 +85,61 @@ _COHESION_SPLIT_THRESHOLD = 0.05 # re-split communities with cohesion below this
 _COHESION_SPLIT_MIN_SIZE = 50    # only cohesion-split if community has at least this many nodes
 
 
+_MAX_LABEL_LEN = 60   # longer than any real symbol; prose starts here
+
+
+def _is_identifier_label(G: nx.Graph, node: str) -> bool:
+    """Whether a node's label reads as a symbol name rather than prose.
+
+    Extractors attach docstrings and test descriptions as node labels
+    (``file_type == "rationale"`` nodes especially). Those carry real degree
+    but make nonsense community names, so they are excluded from hub choice.
+    """
+    if str(G.nodes[node].get("file_type") or "") == "rationale":
+        return False
+    label = str(G.nodes[node].get("label") or node).strip()
+    if not label or len(label) > _MAX_LABEL_LEN:
+        return False
+    return not any(c.isspace() for c in label)
+
+
+_MAX_DISCRIMINATOR_WORDS = 4
+_MAX_DISCRIMINATOR_LEN = 30
+
+
+def _short_discriminator(G: nx.Graph, members: list[str]) -> str:
+    """A few words from the densest member, to tell same-file communities apart.
+
+    The source-file fallback alone collided hard on a real corpus: 39 separate
+    prose-only communities out of ``tui_gateway/methods_session.py`` all became
+    ``methods_session``, distinguished on disk only by a ``_2``..``_39`` suffix.
+    The nodes themselves differ, so a bounded excerpt of the densest one
+    restores meaning without bringing back 80-character sentence filenames.
+    """
+    if not members:
+        return ""
+    top = min(members, key=lambda n: (-G.degree(n), str(n)))
+    label = str(G.nodes[top].get("label") or "").strip()
+    if not label:
+        return ""
+    short = " ".join(label.split()[:_MAX_DISCRIMINATOR_WORDS])
+    return short[:_MAX_DISCRIMINATOR_LEN].strip(" .,;:-—–_")
+
+
+def _dominant_source_stem(G: nx.Graph, members: list[str]) -> str:
+    """Filename stem shared by most of *members*, or "" when they share none."""
+    counts: Counter[str] = Counter()
+    for n in members:
+        sf = str(G.nodes[n].get("source_file") or "").strip()
+        if sf:
+            counts[PurePosixPath(sf.replace("\\", "/")).stem] += 1
+    if not counts:
+        return ""
+    # ties break alphabetically so the name is stable run to run
+    top = max(counts.values())
+    return sorted(s for s, c in counts.items() if c == top)[0]
+
+
 def label_communities_by_hub(
     G: nx.Graph, communities: dict[int, list[str]]
 ) -> dict[int, str]:
@@ -101,8 +158,33 @@ def label_communities_by_hub(
         if not present:
             labels[cid] = f"Community {cid}"
             continue
+        # Restrict to symbols actually defined in the corpus. A node with an
+        # empty source_file is referenced-but-external — typing's ``Any``,
+        # ``pathlib.Path``, builtin ``ValueError`` — and those accumulate huge
+        # degree across a codebase, so an unrestricted hub search names whole
+        # communities after an import. Falls back to the full set when a
+        # community contains no locally-defined node.
+        defined = [n for n in present if str(G.nodes[n].get("source_file") or "").strip()]
+        # A community name becomes a wiki article's title AND its vault
+        # filename, so prose is unusable: extractors emit nodes whose label is
+        # a docstring or a test description, which produced filenames like
+        # "1000_comments_on_a_single_task_—_build_worker_context_should_...md".
+        # Require an identifier-shaped label (no whitespace, bounded length);
+        # fall back through the wider pools when a community has nothing else.
+        nameable = [n for n in (defined or present) if _is_identifier_label(G, n)]
+        if not nameable:
+            # Nothing symbol-shaped to name this after — typically a community
+            # of pure docstring/rationale nodes, sometimes a single one. Name
+            # it after the file those nodes come from rather than after a
+            # sentence: "test_atypical_scenarios", not "1000 comments on a
+            # single task — build worker context should still be reasonable".
+            stem = _dominant_source_stem(G, present)
+            if stem:
+                discriminator = _short_discriminator(G, present)
+                labels[cid] = f"{stem} — {discriminator}" if discriminator else stem
+                continue
         # highest degree wins; ties broken by node id (ascending) for determinism
-        hub = min(present, key=lambda n: (-G.degree(n), str(n)))
+        hub = min(nameable or defined or present, key=lambda n: (-G.degree(n), str(n)))
         name = str(G.nodes[hub].get("label") or hub).strip()
         if name.endswith("()"):
             name = name[:-2]

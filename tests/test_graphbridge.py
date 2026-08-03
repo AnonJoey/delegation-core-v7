@@ -311,3 +311,89 @@ def test_write_artifacts_to_vault_without_wiki_dir_writes_only_the_report(cfg):
     assert result["wiki_count"] == 0
     content = (cfg.vault / result["written_paths"][0]).read_text(encoding="utf-8")
     assert "Report body" in content
+
+
+def test_build_graph_labels_communities_by_hub_in_every_artifact(cfg, monkeypatch, tmp_path):
+    """Regression: label_communities_by_hub() existed but nothing ever called it.
+
+    build_graph() passed a literal {} for render_report's community_labels and
+    omitted the argument entirely for to_json/to_html/to_wiki, so all four fell
+    back to "Community {cid}". A real 2693-community build filed 2693 vault
+    notes titled "Community 0".."Community 2692" — bodies searchable, but titles
+    and Obsidian graph node labels carrying no information whatsoever.
+
+    Fakes stand in for the tree-sitter extraction stages (heavy, and not what
+    this pins). The labeler itself runs for real against a real graph, so the
+    assertion is on genuine hub names rather than on some dict being forwarded.
+    """
+    import asyncio
+    from pathlib import Path
+
+    nx = pytest.importorskip("networkx")
+
+    G = nx.DiGraph()
+    for spoke in ("a1", "a2", "a3"):
+        G.add_edge("auth_handler", spoke)
+    for spoke in ("b1", "b2"):
+        G.add_edge("log_action", spoke)
+    communities = {0: ["auth_handler", "a1", "a2", "a3"], 1: ["log_action", "b1", "b2"]}
+
+    seen: dict[str, object] = {}
+
+    import delegation_core.graph.analyze as analyze_mod
+    import delegation_core.graph.build as build_mod
+    import delegation_core.graph.callflow_html as callflow_mod
+    import delegation_core.graph.cluster as cluster_mod
+    import delegation_core.graph.detect as detect_mod
+    import delegation_core.graph.export as export_mod
+    import delegation_core.graph.extract as extract_mod
+    import delegation_core.graph.report as report_mod
+    import delegation_core.graph.wiki as wiki_mod
+
+    src = tmp_path / "src"
+    src.mkdir()
+    (src / "mod.py").write_text("x = 1\n", encoding="utf-8")
+
+    monkeypatch.setattr(detect_mod, "detect",
+                        lambda root, cache_root=None: {"files": {"code": [str(src / "mod.py")]}})
+    monkeypatch.setattr(extract_mod, "extract",
+                        lambda files, cache_root=None, root=None: {"input_tokens": 0, "output_tokens": 0})
+    monkeypatch.setattr(build_mod, "build", lambda results, directed=True, root=None: G)
+    monkeypatch.setattr(cluster_mod, "cluster", lambda g: communities)
+    monkeypatch.setattr(cluster_mod, "score_all", lambda g, c: {0: 0.5, 1: 0.5})
+    monkeypatch.setattr(analyze_mod, "god_nodes", lambda g: [])
+    monkeypatch.setattr(analyze_mod, "surprising_connections", lambda g, c: [])
+    monkeypatch.setattr(analyze_mod, "suggest_questions", lambda g, c, d: [])
+
+    def _fake_report(g, comms, cohesion, community_labels, *a, **kw):
+        seen["report"] = community_labels
+        return "# Report"
+
+    def _fake_to_json(g, comms, path, *, force=False, community_labels=None, **kw):
+        seen["json"] = community_labels
+        Path(path).write_text("{}", encoding="utf-8")
+        return True
+
+    def _fake_to_html(g, comms, path, community_labels=None, **kw):
+        seen["html"] = community_labels
+
+    def _fake_to_wiki(g, comms, out, community_labels=None, cohesion=None, god_nodes_data=None):
+        seen["wiki"] = community_labels
+        return 2
+
+    monkeypatch.setattr(report_mod, "generate", _fake_report)
+    monkeypatch.setattr(export_mod, "to_json", _fake_to_json)
+    monkeypatch.setattr(export_mod, "to_html", _fake_to_html)
+    monkeypatch.setattr(callflow_mod, "write_callflow_html", lambda **kw: None)
+    monkeypatch.setattr(wiki_mod, "to_wiki", _fake_to_wiki)
+
+    result = asyncio.run(graphbridge.build_graph(
+        cfg, FakeVaultManager(cfg), str(src), name="lbl", force=True, file_to_vault=False))
+
+    assert result["status"] == "ok"
+    expected = {0: "auth_handler", 1: "log_action"}
+    # Every artifact gets the same real hub names — none may fall back to "Community N".
+    assert seen["report"] == expected
+    assert seen["json"] == expected
+    assert seen["html"] == expected
+    assert seen["wiki"] == expected

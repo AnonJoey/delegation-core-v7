@@ -415,7 +415,11 @@ async def build_graph(cfg, vault_manager, source_path: str,
     from delegation_core.graph.detect import detect
     from delegation_core.graph.extract import extract as ast_extract
     from delegation_core.graph.build import build as build_graph_fn
-    from delegation_core.graph.cluster import cluster as cluster_fn, score_all
+    from delegation_core.graph.cluster import (
+        cluster as cluster_fn,
+        label_communities_by_hub,
+        score_all,
+    )
     from delegation_core.graph.analyze import god_nodes, surprising_connections, suggest_questions
     from delegation_core.graph.report import generate as render_report
     from delegation_core.graph.export import to_json, to_html
@@ -459,23 +463,30 @@ async def build_graph(cfg, vault_manager, source_path: str,
         ast_result = ast_extract(code_files, cache_root=cache_root, root=root)
         G = build_graph_fn([ast_result], directed=True, root=root)
         communities = cluster_fn(G)
+        # Name each community after its structural hub. Without this every
+        # artifact below falls back to "Community {cid}" — a 2693-community
+        # build filed 2693 vault notes titled "Community 0..2692", searchable
+        # only by body text and useless as Obsidian graph node labels.
+        community_labels = label_communities_by_hub(G, communities)
         cohesion = score_all(G, communities)
         gods = god_nodes(G)
         surprises = surprising_connections(G, communities)
         questions = suggest_questions(G, communities, {})
 
         report_md = render_report(
-            G, communities, cohesion, {}, gods, surprises,
+            G, communities, cohesion, community_labels, gods, surprises,
             detection,
             {"input_tokens": ast_result.get("input_tokens", 0),
              "output_tokens": ast_result.get("output_tokens", 0)},
             str(root), suggested_questions=questions,
         )
         (out_dir / "GRAPH_REPORT.md").write_text(report_md, encoding="utf-8")
-        to_json(G, communities, str(out_dir / "graph.json"), force=True)
+        to_json(G, communities, str(out_dir / "graph.json"), force=True,
+                community_labels=community_labels)
 
         try:
-            to_html(G, communities, str(out_dir / "graph.html"))
+            to_html(G, communities, str(out_dir / "graph.html"),
+                    community_labels=community_labels)
         except Exception as e:
             logger.warning("graph.html export skipped for %s: %s", graph_name, e)
 
@@ -493,7 +504,9 @@ async def build_graph(cfg, vault_manager, source_path: str,
         wiki_dir = out_dir / "wiki"
         wiki_count = 0
         try:
-            wiki_count = to_wiki(G, communities, wiki_dir, cohesion=cohesion, god_nodes_data=gods)
+            wiki_count = to_wiki(G, communities, wiki_dir,
+                                 community_labels=community_labels,
+                                 cohesion=cohesion, god_nodes_data=gods)
         except Exception as e:
             logger.warning("wiki export skipped for %s: %s", graph_name, e)
             wiki_dir = None
