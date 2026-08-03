@@ -230,10 +230,25 @@ def relink_folder(
     threshold = min_similarity if min_similarity is not None else cfg.search_threshold
     cutoff = (datetime.now().timestamp() - days * 86400) if days else None
 
-    md_files = [
-        f for f in target.rglob("*.md")
-        if cutoff is None or f.stat().st_mtime >= cutoff
-    ]
+    # Generated articles are excluded, not merely deprioritised: graph_build
+    # rewrites its wiki folder wholesale on every rebuild, so a "## Related"
+    # block injected here is discarded the next time the graph is built. It is
+    # also the bulk of the work — Reference/ holds 3656 generated articles
+    # against 59 written by hand, so an unfiltered pass spends its entire run on
+    # notes that will not keep the result.
+    from .vault import VaultManager
+
+    md_files = []
+    for f in target.rglob("*.md"):
+        if cutoff is not None and f.stat().st_mtime < cutoff:
+            continue
+        rel = str(f.relative_to(cfg.vault))
+        if VaultManager.classify_path(rel)[0] == "generated":
+            continue
+        md_files.append(f)
+
+    # Resolved once: every path the vault can legitimately link to.
+    resolvable_notes = set(vault_manager.resolvable_link_targets().values())
 
     results = {
         "folder": folder,
@@ -270,6 +285,14 @@ def relink_folder(
             for h in hits:
                 path = h.get("path")
                 if not path or path == self_path:
+                    continue
+                # A hit must be a note this vault can actually resolve. Externally
+                # ingested files are indexed by absolute source path and carry no
+                # kind marker, so they can survive a scoped search and then be
+                # written as [[SKILL]] or [[Start here]] — a link to a file that
+                # is not in the vault and never resolves. 23 such links were
+                # added on a real pass before this guard existed.
+                if (cfg.vault / path) not in resolvable_notes:
                     continue
                 if h.get("similarity", 0) < threshold:
                     continue
