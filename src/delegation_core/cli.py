@@ -929,6 +929,16 @@ def main():
                                 "(needed to backfill new metadata fields)")
     sub.add_parser("maintain", help="Run inbox maintenance once and exit")
 
+    # cmd_embed_model existed and was never registered, while cmd_status told
+    # users to run `delegation-core embed-model ...` — the command it named did
+    # not exist. Same shape as the graph labeler nothing called.
+    p_embed = sub.add_parser("embed-model",
+                             help="List calibrated embedding models, or switch to one")
+    p_embed.add_argument("model", nargs="?", default=None,
+                         help="Model to switch to; omit to list what is available")
+    p_embed.add_argument("--reindex", action="store_true",
+                         help="Reindex the vault into the new model's collection")
+
     p_dashboard_api = sub.add_parser(
         "dashboard-api", help="Run the local JSON API used by the Tauri dashboard (standalone/debug)"
     )
@@ -1059,6 +1069,7 @@ def main():
         "relink":   cmd_relink,
         "search":   cmd_search,
         "compress": cmd_compress,
+        "embed-model": cmd_embed_model,
     }
 
     note_dispatch = {

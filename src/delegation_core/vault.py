@@ -65,6 +65,24 @@ def _countable_wikilinks(content: str) -> list[str]:
     return out
 
 
+def resolve_in_vault(vault_root: Path, rel_path: str) -> Path | None:
+    """Resolve *rel_path* under *vault_root*, or None if it escapes.
+
+    Containment is checked with Path.relative_to, never a string prefix: a
+    sibling directory whose name merely starts with the vault's own name
+    (vault at .../vault, and .../vault-old exists) passes a prefix test while
+    resolving outside. That exact bug was fixed twice in this codebase before —
+    in relink_folder and in the dashboard's note route — so the check lives in
+    one place now rather than being re-typed at each new call site.
+    """
+    target = (vault_root / rel_path).resolve()
+    try:
+        target.relative_to(vault_root.resolve())
+    except ValueError:
+        return None
+    return target
+
+
 def safe_filename(title: str, max_len: int = 50) -> str:
     """Sanitize a title into a filesystem-safe filename stem.
 
@@ -553,10 +571,8 @@ class VaultManager:
         Paginated because a single directory here holds 2711 notes; the caller
         gets `total` and `has_more` so a page is never mistaken for the lot.
         """
-        target = (self.cfg.vault / dir_rel).resolve()
-        try:                                    # containment, not string prefix
-            target.relative_to(self.cfg.vault.resolve())
-        except ValueError:
+        target = resolve_in_vault(self.cfg.vault, dir_rel)
+        if target is None:
             return {"error": f"Path outside the vault: {dir_rel}"}
         if not target.is_dir():
             return {"error": f"Not a directory: {dir_rel}"}
@@ -622,10 +638,8 @@ class VaultManager:
         Broken outbound links are returned rather than dropped — 63 of them exist
         and a panel that silently omitted them would misreport the note.
         """
-        target = (self.cfg.vault / rel_path).resolve()
-        try:
-            target.relative_to(self.cfg.vault.resolve())
-        except ValueError:
+        target = resolve_in_vault(self.cfg.vault, rel_path)
+        if target is None:
             return {"error": f"Path outside the vault: {rel_path}"}
         if not target.is_file():
             return {"error": f"Not a note: {rel_path}"}

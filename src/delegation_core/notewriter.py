@@ -19,7 +19,7 @@ from datetime import datetime
 from pathlib import Path
 
 from .linker import inject_backlinks, wikilinks
-from .vault import compose_note, safe_filename, unique_note_path
+from .vault import compose_note, resolve_in_vault, safe_filename, unique_note_path
 
 logger = logging.getLogger("notewriter")
 
@@ -90,10 +90,8 @@ def save_note(vault, rel_path: str, content: str) -> dict:
     generated block on every save.
     """
     cfg = vault.cfg
-    dest = (cfg.vault / rel_path).resolve()
-    try:                                    # containment, not a string prefix
-        dest.relative_to(cfg.vault.resolve())
-    except ValueError:
+    dest = resolve_in_vault(cfg.vault, rel_path)
+    if dest is None:
         return {"error": f"Path outside the vault: {rel_path}"}
     if not dest.is_file():
         return {"error": f"Not a note: {rel_path}"}

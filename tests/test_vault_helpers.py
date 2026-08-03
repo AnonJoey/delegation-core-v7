@@ -144,3 +144,28 @@ def test_vault_manager_refuses_to_index_into_cwd_when_vault_path_unset(tmp_path,
         vm._init()
 
     assert not (tmp_path / ".chroma_bge").exists()
+
+
+def test_resolve_in_vault_accepts_a_path_inside(tmp_path):
+    from delegation_core.vault import resolve_in_vault
+    (tmp_path / "Reference").mkdir()
+    assert resolve_in_vault(tmp_path, "Reference/a.md") == tmp_path / "Reference" / "a.md"
+
+
+def test_resolve_in_vault_rejects_traversal(tmp_path):
+    from delegation_core.vault import resolve_in_vault
+    assert resolve_in_vault(tmp_path, "../../etc/passwd") is None
+
+
+def test_resolve_in_vault_rejects_a_sibling_sharing_the_name_prefix(tmp_path):
+    """The bug this centralises: `str(target).startswith(str(root))` passes for
+    .../vault-old when the root is .../vault. It was fixed twice independently,
+    in relink_folder and in the dashboard note route, before being one function.
+    """
+    from delegation_core.vault import resolve_in_vault
+    root = tmp_path / "vault"
+    root.mkdir()
+    (tmp_path / "vault-old").mkdir()
+    # The naive check passes here — that is the bug being guarded against.
+    assert str(tmp_path / "vault-old" / "x.md").startswith(str(root)) is True
+    assert resolve_in_vault(root, "../vault-old/x.md") is None

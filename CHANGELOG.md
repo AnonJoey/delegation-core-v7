@@ -171,6 +171,21 @@ error, which is why they survived unnoticed.
   create does, but doing it on save would edit the user's text behind them every
   time they hit save.
 
+- **`delegation-core embed-model` did not exist.** `cmd_embed_model` was
+  written, complete, and never registered on the argument parser — while
+  `cmd_status` printed "Rode: `delegation-core embed-model <modelo>`", so the
+  CLI instructed users to run a command that answered "invalid choice". Now
+  registered, with `tests/test_cli_commands.py` asserting that every top-level
+  subcommand is reachable and that every registered one still has a handler.
+  Running it revealed 1608 rows still indexed under the previous embedding
+  model's collection, which is worth reviewing separately.
+
+- **Path containment is one function.** `resolve_in_vault()` replaces three
+  copies of the resolve-then-`relative_to` dance. The check exists because a
+  string-prefix test passes for `.../vault-old` when the root is `.../vault`;
+  that bug was found and fixed twice independently in this codebase before it
+  had a single home.
+
 ### Notes
 
 Items 1 and 5 share a shape worth naming: a fallback that *fabricates* a
