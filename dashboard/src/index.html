@@ -191,6 +191,10 @@
                   </div>
                   <div class="note-view-actions">
                     <button class="btn-action-sm" id="btn-toggle-raw" title="Toggle raw Markdown view">Raw</button>
+                    <button class="btn-action-sm" id="btn-edit-note" title="Edit this note">Edit</button>
+                    <button class="btn-action-sm" id="btn-save-note" title="Save changes" hidden>Save</button>
+                    <button class="btn-action-sm" id="btn-cancel-edit" title="Discard changes" hidden>Cancel</button>
+                    <button class="btn-action-sm" id="btn-new-note" title="Create a note in this folder">New</button>
                     <button class="btn-action-sm" id="btn-copy-path" title="Copy note path">Copy Path</button>
                   </div>
                 </div>
@@ -206,6 +210,8 @@
                   <div id="note-frontmatter" class="note-frontmatter" hidden></div>
                   <div id="note-rendered" class="note-rendered"></div>
                   <pre id="note-content" class="note-content" hidden></pre>
+                  <textarea id="note-editor" class="note-editor" hidden spellcheck="false"></textarea>
+                  <div id="note-editor-status" class="note-editor-status" hidden></div>
                   <div id="note-links" class="note-links" hidden></div>
                 </div>
               </div>

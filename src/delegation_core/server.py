@@ -101,6 +101,7 @@ from . import graph_hook
 from . import capabilities as _capabilities
 from . import graphbridge
 from . import jobs
+from . import notewriter as _notewriter
 from .client_tracking import ClientTrackingMiddleware as _ClientTrackingMiddleware
 from .client_tracking import cleanup_own_session_file as _cleanup_own_session_file
 from .client_tracking import list_connected_clients as _list_connected_clients
@@ -119,29 +120,12 @@ from .vault import VaultManager, compose_note, safe_filename, unique_note_path
 
 
 def _post_write_links(note_path: Path, rel_path: str, folder: str, stem: str) -> None:
-    """Inject forward wikilinks + backlinks after any direct vault write.
+    """Thin binding of notewriter.post_write_links to this module's vault.
 
-    Uses BGE search only — no llama.cpp call, fast enough to run inline.
-    Also invalidates the vault_health.json cache so heartbeat() stays current.
+    The body moved to notewriter.py when the dashboard gained editing, so both
+    surfaces share one write path instead of two that can drift.
     """
-    try:
-        content = note_path.read_text(encoding="utf-8")
-        hits = [h for h in _vault.search(content[:600], limit=6)
-                if h.get("path") != rel_path][:5]
-        links = _wikilinks(hits, _vault.cfg.merge_threshold)
-        if links:
-            updated = content.rstrip() + f"\n\n## Related\n{links}\n"
-            note_path.write_text(updated, encoding="utf-8")
-            _vault.index_note(updated, {"title": stem, "path": rel_path, "folder": folder})
-            _inject_backlinks(_vault, stem,
-                              [h["path"] for h in hits
-                               if h.get("similarity", 0) >= _vault.cfg.merge_threshold])
-    except Exception as e:
-        logger.warning("post_write_links failed for %s: %s", rel_path, e)
-    try:
-        (Path.home() / ".delegation_core" / "vault_health.json").unlink(missing_ok=True)
-    except Exception:
-        pass
+    _notewriter.post_write_links(_vault, note_path, rel_path, folder, stem)
 
 
 async def _full_maintenance_cycle(engine, vault) -> dict:
@@ -282,25 +266,11 @@ async def write_note(folder: str, title: str, content: str) -> str:
     Use vault_update_note when adding to an existing topic.
     folder must be one of the configured vault_folders.
     """
-    cfg = _vault.cfg
-    if folder not in cfg.vault_folders:
-        return json.dumps({"error": f"Invalid folder '{folder}'. Valid: {cfg.vault_folders}"})
-    safe = safe_filename(title)
-    dest = cfg.vault / folder / f"{datetime.now().strftime('%Y-%m-%d')}-{safe}.md"
-    dest.parent.mkdir(parents=True, exist_ok=True)
-    dest = unique_note_path(dest)
-    # compose_note, not string concatenation: callers commonly pass their own
-    # frontmatter block inside content, which used to stack a second block under
-    # the generated one — Obsidian reads only the first, so those keys were lost.
-    full = compose_note(title, content, datetime.now().strftime("%Y-%m-%d"))
-    try:
-        dest.write_text(full, encoding="utf-8")
-    except OSError as e:
-        return json.dumps({"error": f"Write failed: {e}"})
-    rel = str(dest.relative_to(cfg.vault))
-    _vault.index_note(full, {"title": title, "path": rel, "folder": folder})
-    _post_write_links(dest, rel, folder, dest.stem)
-    return json.dumps({"status": "ok", "path": str(dest.name), "folder": folder})
+    result = _notewriter.create_note(_vault, folder, title, content)
+    if "error" in result:
+        return json.dumps(result)
+    # Historic response shape: bare filename, not the vault-relative path.
+    return json.dumps({"status": "ok", "path": result["name"], "folder": result["folder"]})
 
 
 @mcp.tool()

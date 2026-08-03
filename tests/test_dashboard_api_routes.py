@@ -323,3 +323,62 @@ def test_vault_backlinks_propagates_a_bad_path_as_400(server):
     port, _, _ = server
     status, _ = _get(port, "/api/vault/backlinks?path=bad")
     assert status == 400
+
+
+def _post(port, path, payload):
+    conn = http.client.HTTPConnection("127.0.0.1", port, timeout=5)
+    conn.request("POST", path, body=json.dumps(payload),
+                 headers={"Content-Type": "application/json"})
+    res = conn.getresponse()
+    body = json.loads(res.read())
+    conn.close()
+    return res.status, body
+
+
+def test_note_create_route_goes_through_notewriter(server, monkeypatch):
+    """The dashboard must not grow its own write path — both surfaces call
+    notewriter.create_note so they cannot drift."""
+    seen = {}
+
+    def fake_create(vault, folder, title, content):
+        seen.update(folder=folder, title=title, content=content)
+        return {"status": "ok", "path": f"{folder}/x.md", "folder": folder, "name": "x.md"}
+
+    monkeypatch.setattr(dashboard_api._notewriter, "create_note", fake_create)
+    port, _, _ = server
+    status, body = _post(port, "/api/vault/note/create",
+                         {"folder": "reference", "title": "T", "content": "C"})
+    assert status == 200
+    assert body["path"] == "reference/x.md"
+    assert seen == {"folder": "reference", "title": "T", "content": "C"}
+
+
+def test_note_create_route_surfaces_a_writer_error_as_400(server, monkeypatch):
+    monkeypatch.setattr(dashboard_api._notewriter, "create_note",
+                        lambda *a, **k: {"error": "Invalid folder 'Nope'"})
+    port, _, _ = server
+    status, body = _post(port, "/api/vault/note/create", {"folder": "Nope", "title": "T"})
+    assert status == 400
+    assert "error" in body
+
+
+def test_note_save_route_requires_path_and_content(server):
+    port, _, _ = server
+    assert _post(port, "/api/vault/note/save", {"content": "x"})[0] == 400
+    assert _post(port, "/api/vault/note/save", {"path": "a.md"})[0] == 400
+
+
+def test_note_save_route_goes_through_notewriter(server, monkeypatch):
+    seen = {}
+
+    def fake_save(vault, rel, content):
+        seen.update(rel=rel, content=content)
+        return {"status": "ok", "path": rel, "bytes": len(content)}
+
+    monkeypatch.setattr(dashboard_api._notewriter, "save_note", fake_save)
+    port, _, _ = server
+    status, body = _post(port, "/api/vault/note/save",
+                         {"path": "reference/a.md", "content": "new text"})
+    assert status == 200
+    assert body["bytes"] == 8
+    assert seen == {"rel": "reference/a.md", "content": "new text"}

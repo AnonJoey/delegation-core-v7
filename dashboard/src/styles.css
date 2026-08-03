@@ -1766,3 +1766,22 @@ body {
 .note-link-row:hover { text-decoration: underline; }
 .note-link-row.broken { opacity: 0.5; cursor: default; font-style: italic; }
 .note-link-row.broken:hover { text-decoration: none; }
+
+/* Note editor. Raw text with frontmatter, saved verbatim through the server so
+   the write is indexed by the same path the MCP tools use. */
+.note-editor {
+  width: 100%;
+  min-height: 24rem;
+  padding: 0.9rem;
+  font-family: "JetBrains Mono", ui-monospace, monospace;
+  font-size: 0.82rem;
+  line-height: 1.6;
+  color: inherit;
+  background: color-mix(in srgb, currentColor 4%, transparent);
+  border: 1px solid color-mix(in srgb, currentColor 18%, transparent);
+  border-radius: 8px;
+  resize: vertical;
+}
+.note-editor:focus { outline: none; border-color: color-mix(in srgb, currentColor 40%, transparent); }
+.note-editor-status { margin-top: 0.5rem; font-size: 0.75rem; opacity: 0.7; }
+.note-editor-status.error { opacity: 1; color: #f87171; }

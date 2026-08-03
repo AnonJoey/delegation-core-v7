@@ -24,6 +24,8 @@ Endpoints:
   GET  /api/graphs                   previously built code graphs (graphbridge registry)
   GET  /api/processes?status=&query= tracked processes (ProcessTracker.list_processes)
   GET  /api/processes/get?id=...     full detail of one process
+  POST /api/vault/note/create        {folder, title, content} -> new dated note
+  POST /api/vault/note/save          {path, content} -> overwrite + reindex
   POST /api/processes/create         {name, description, steps: [str]}
   POST /api/processes/update         {process_id, note, step_done, status}
 
@@ -69,6 +71,8 @@ import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
+
+from . import notewriter as _notewriter
 
 logger = logging.getLogger("dashboard_api")
 
@@ -401,7 +405,11 @@ class _Handler(BaseHTTPRequestHandler):
     def do_POST(self):
         parsed = urlparse(self.path)
         try:
-            if parsed.path == "/api/processes/create":
+            if parsed.path == "/api/vault/note/create":
+                self._handle_note_create()
+            elif parsed.path == "/api/vault/note/save":
+                self._handle_note_save()
+            elif parsed.path == "/api/processes/create":
                 self._handle_processes_create()
             elif parsed.path == "/api/processes/update":
                 self._handle_processes_update()
@@ -582,6 +590,39 @@ class _Handler(BaseHTTPRequestHandler):
             "killed_orphans": killed_orphans,
             "message": f"Purged {purged_sessions} dead session files and killed {killed_orphans} orphaned sidecar processes."
         })
+
+    def _handle_note_create(self) -> None:
+        """Create a note through the same code path the MCP write_note uses.
+
+        Both call notewriter.create_note rather than each writing files and
+        indexing on their own — a second write path would be free to drift from
+        the first, which is the failure mode this codebase has been removing.
+        """
+        data = self._read_json_body()
+        if data is None:
+            return
+        result = _notewriter.create_note(
+            _vault,
+            str(data.get("folder", "")).strip(),
+            str(data.get("title", "")).strip(),
+            str(data.get("content", "")),
+        )
+        self._send_json(result, status=400 if "error" in result else 200)
+
+    def _handle_note_save(self) -> None:
+        """Overwrite an existing note's raw text and reindex it."""
+        data = self._read_json_body()
+        if data is None:
+            return
+        rel = str(data.get("path", "")).strip()
+        if not rel:
+            self._send_json({"error": "path is required"}, status=400)
+            return
+        if "content" not in data:
+            self._send_json({"error": "content is required"}, status=400)
+            return
+        result = _notewriter.save_note(_vault, rel, str(data["content"]))
+        self._send_json(result, status=400 if "error" in result else 200)
 
     def _handle_processes_create(self) -> None:
         data = self._read_json_body()

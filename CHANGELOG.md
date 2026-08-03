@@ -157,6 +157,20 @@ error, which is why they survived unnoticed.
   parser so it cannot disagree with the health count. Note that `heartbeat()`
   still reports 31, since `vault_health.json` is a cache.
 
+- **Phase 3: the dashboard can create and edit notes, through the server.**
+  `notewriter.py` is new and is now the only path a note takes into the vault:
+  `create_note` (dated filename, collision-safe, single frontmatter block,
+  wikilinks injected) and `save_note` (verbatim overwrite plus reindex).
+  `server.py`'s `write_note` delegates to it, and `POST /api/vault/note/create`
+  and `/save` call the same functions.
+
+  Writing straight to disk from Tauri would have been faster and would have left
+  the note unindexed until something else noticed — a second write path free to
+  drift from the first, which is the failure this release spent its length
+  removing. `save_note` deliberately does *not* inject a `## Related` block:
+  create does, but doing it on save would edit the user's text behind them every
+  time they hit save.
+
 ### Notes
 
 Items 1 and 5 share a shape worth naming: a fallback that *fabricates* a

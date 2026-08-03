@@ -662,6 +662,10 @@ async function renderNoteLinks(path) {
 }
 
 async function selectNote(path, el) {
+  // Leaving edit mode on switch: otherwise the editor keeps the previous note's
+  // text while the header shows the new one, and Save would overwrite the wrong
+  // file with it.
+  if (editing) setEditChrome(false);
   currentNotePath = path;
   document.querySelectorAll("#note-list .list-item").forEach((e) => e.classList.remove("active"));
   if (el) el.classList.add("active");
@@ -773,6 +777,85 @@ function setupNoteActions() {
       setTimeout(() => (btn.textContent = "Copy Path"), 1500);
     }
   });
+
+  document.getElementById("btn-edit-note").addEventListener("click", () => enterEditMode());
+  document.getElementById("btn-cancel-edit").addEventListener("click", () => exitEditMode());
+  document.getElementById("btn-save-note").addEventListener("click", () => saveCurrentNote());
+  document.getElementById("btn-new-note").addEventListener("click", () => createNoteHere());
+}
+
+// ── Editing ───────────────────────────────────────────────────────────────────
+// Writes go through the server (POST /api/vault/note/*), which owns indexing.
+// Writing straight to disk from Tauri would be faster and would leave the note
+// unindexed until something else noticed — a second write path free to drift
+// from the one the MCP tools use.
+
+let editing = false;
+
+function setEditChrome(on) {
+  editing = on;
+  document.getElementById("btn-edit-note").hidden = on;
+  document.getElementById("btn-save-note").hidden = !on;
+  document.getElementById("btn-cancel-edit").hidden = !on;
+  document.getElementById("note-editor").hidden = !on;
+  document.getElementById("note-rendered").hidden = on || currentRawMode;
+  document.getElementById("note-content").hidden = on || !currentRawMode;
+  document.getElementById("note-links").hidden = on;
+}
+
+function editorStatus(text, isError) {
+  const el = document.getElementById("note-editor-status");
+  el.textContent = text;
+  el.classList.toggle("error", Boolean(isError));
+  el.hidden = !text;
+}
+
+function enterEditMode() {
+  if (!currentNotePath) return;
+  // The raw pane already holds the exact file text, frontmatter included —
+  // which is what save writes back, so the editor starts from it verbatim.
+  document.getElementById("note-editor").value =
+    document.getElementById("note-content").textContent;
+  setEditChrome(true);
+  editorStatus("");
+}
+
+function exitEditMode() {
+  setEditChrome(false);
+  editorStatus("");
+}
+
+async function saveCurrentNote() {
+  if (!currentNotePath) return;
+  const content = document.getElementById("note-editor").value;
+  editorStatus("Saving…");
+  try {
+    const res = await apiPost("/api/vault/note/save", { path: currentNotePath, content });
+    if (res.error) throw new Error(res.error);
+    exitEditMode();
+    await selectNote(currentNotePath, null);   // re-read from disk, re-render, refresh links
+  } catch (e) {
+    editorStatus(`Save failed: ${e.message}`, true);
+  }
+}
+
+async function createNoteHere() {
+  const folder = (selectedFolder || "").split("/")[0];
+  if (!folder) return;
+  const title = prompt(`New note in ${folder}:`);
+  if (!title || !title.trim()) return;
+  try {
+    const res = await apiPost("/api/vault/note/create", {
+      folder,
+      title: title.trim(),
+      content: "## Summary\n\n",
+    });
+    if (res.error) throw new Error(res.error);
+    await loadNotes(selectedFolder);
+    await selectNote(res.path, null);
+  } catch (e) {
+    editorStatus(`Create failed: ${e.message}`, true);
+  }
 }
 
 // ── Vector Semantic Search Studio ──────────────────────────────────────────────
