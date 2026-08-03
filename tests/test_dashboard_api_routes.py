@@ -65,8 +65,8 @@ class FakeVault:
         self.find_calls.append((query, limit))
         return [{"title": query, "path": f"reference/{query}.md", "match_rank": 0}]
 
-    def search(self, query, limit=5):
-        self.search_calls.append((query, limit))
+    def search(self, query, limit=5, scope="all"):
+        self.search_calls.append((query, limit, scope))
         return [{"title": "hit", "path": "reference/hit.md", "similarity": 0.9}]
 
     def get_stats(self):
@@ -207,13 +207,23 @@ def test_vault_find_requires_a_query(server):
     assert "error" in body
 
 
-def test_vault_search_passes_query_and_limit_through(server):
+def test_vault_search_passes_query_limit_and_scope_through(server):
     port, _, fake_vault = server
-    status, body = _get(port, "/api/vault/search?q=budget&limit=3")
+    status, body = _get(port, "/api/vault/search?q=budget&limit=3&scope=all")
     assert status == 200
     assert body["query"] == "budget"
+    assert body["scope"] == "all"
     assert body["results"][0]["title"] == "hit"
-    assert fake_vault.search_calls == [("budget", 3)]
+    assert fake_vault.search_calls == [("budget", 3, "all")]
+
+
+def test_vault_search_defaults_to_hand_written_notes(server):
+    """This vault holds 3692 generated articles against 187 written by hand, so
+    an unscoped search buries the user's own notes under machine output."""
+    port, _, fake_vault = server
+    status, body = _get(port, "/api/vault/search?q=budget")
+    assert body["scope"] == "notes"
+    assert fake_vault.search_calls == [("budget", 5, "notes")]
 
 
 def test_vault_search_missing_q_returns_400(server):
@@ -226,7 +236,7 @@ def test_vault_search_missing_q_returns_400(server):
 def test_vault_search_defaults_limit_to_five_when_not_given(server):
     port, _, fake_vault = server
     _get(port, "/api/vault/search?q=budget")
-    assert fake_vault.search_calls == [("budget", 5)]
+    assert fake_vault.search_calls[0][1] == 5
 
 
 def test_graphs_endpoint_reports_empty_registry_when_none_built(server, monkeypatch, tmp_path):

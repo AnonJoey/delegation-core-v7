@@ -834,7 +834,9 @@ Did research             → write_note(folder="Reference", ...)
 Had a meeting            → write_note(folder="Sessions", ...)
 Found a fix              → write_note(folder="Fixes", ...)
 Adding to existing note  → vault_update_note(<name>, <new content>)
-User asks recall         → search_vault(<query>)
+User asks recall         → search_vault(<query>)   [scope='notes' por padrão]
+Question about a codebase→ search_vault(<query>, graph=<name>) ou scope='generated'
+Rename a note            → vault_rename_note(<path>, <new title>)  (repoints links)
 Browse a folder          → vault_list_notes(<folder>)
 Check for duplicates     → vault_find_similar(<note_name>)
 Files to sort (small)    → vault_inbox_status() → run_maintenance()

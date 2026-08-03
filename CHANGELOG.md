@@ -1,5 +1,45 @@
 # Changelog
 
+## Unreleased — 2026-08-03 (part 2)
+
+### Added
+
+- **`vault_rename_note` / `POST /api/vault/note/rename`.** Renaming a note
+  repoints every `[[wikilink]]` aimed at it. Without this, renaming is silent
+  corruption — a stem *is* a note's link identity — and it bit this project
+  directly: a note renamed by hand left two links dangling, found days later by
+  an audit. Section anchors and display text (`[[stem#Summary|label]]`) survive,
+  because 71 links in this vault carry one and a whole-link replacement would
+  discard them. Writes are staged and rolled back on failure, so a half-renamed
+  vault is not reachable. Exercised against a copy of the real vault: the
+  most-referenced note renamed cleanly, 35 notes repointed, 0 broken links, all
+  33 inbound references preserved.
+
+### Changed
+
+- **`search_vault` defaults to `scope='notes'`.** This vault holds 3692
+  generated articles against 187 hand-written notes, and under `scope='all'` a
+  search for the exact title of a note written minutes earlier returned two
+  unrelated code-graph articles instead of it. Questions about a codebase now
+  need `graph='<name>'` or `scope='generated'` — deliberately, since that is the
+  narrower intent. Every response names the scope it used, so a caller can tell
+  a scoped answer from an exhaustive one. `VaultManager.search()` keeps
+  `scope='all'` so internal callers (wikilink suggestion, health) are unchanged.
+
+### Removed
+
+- **The `vault_bge` ChromaDB collection (1608 rows).** Left behind by the switch
+  to `bge-m3`; the active collection is `vault_bge_m3`. Regenerable with
+  `delegation-core embed-model <model> --reindex`.
+- **`graphs/hermes-agent/pruned_from_vault/` (1071 files, 4.2 MB).** The
+  pre-rebuild `Community_N` articles, superseded when the graph was rebuilt with
+  semantic names. Regenerable with `graph_build`.
+
+Vault orphans were reviewed and deliberately **not** touched: the 113 notes with
+no inbound link are curated writing — project docs, decisions, archived sessions
+— and deleting them would destroy content, not tidy it. `relink_folder` is the
+additive fix if they should be connected.
+
 ## Unreleased — 2026-08-03
 
 Found while ingesting the `hermes-agent` repository (7.7k files, 115.756 graph
