@@ -144,3 +144,44 @@ def test_rename_rolls_back_when_a_write_fails(vault, monkeypatch):
     # original file still in place, and the note it touched first is restored
     assert (vault.cfg.vault / "Reference/2026-08-01-old name.md").exists()
     assert 'title: "old name"' in _read(vault, "Reference/2026-08-01-old name.md")
+
+
+def test_rename_matches_a_stem_that_carries_a_trailing_space(tmp_path):
+    """The old safe_filename left a trailing space on truncated stems: five notes
+    in the real vault are named "…for the .md" and 85 links spell the target with
+    that space. Comparing a stripped link target against an unstripped stem
+    matched none of them."""
+    cfg = Config(vault_path=str(tmp_path), vault_folders=["Reference"])
+    ref = tmp_path / "Reference"
+    ref.mkdir(parents=True)
+    (ref / "2026-07-24-truncated stem .md").write_text(
+        '---\ntitle: "The full untruncated title"\n---\n\nbody\n', encoding="utf-8")
+    (ref / "referrer.md").write_text(
+        "See [[2026-07-24-truncated stem ]] and [[2026-07-24-truncated stem |label]].\n",
+        encoding="utf-8")
+
+    vault = FakeVault(cfg)
+    result = notewriter.rename_note(
+        vault, "Reference/2026-07-24-truncated stem .md", "truncated stem", retitle=False)
+
+    assert result["status"] == "ok"
+    assert result["links_rewritten"] == 1
+    body = (tmp_path / "Reference" / "referrer.md").read_text(encoding="utf-8")
+    assert "[[2026-07-24-truncated stem]]" in body
+    assert "[[2026-07-24-truncated stem|label]]" in body
+
+
+def test_rename_with_retitle_false_leaves_the_real_title_alone(tmp_path):
+    """Repairing a filename must not drag the title down to the truncated form."""
+    cfg = Config(vault_path=str(tmp_path), vault_folders=["Reference"])
+    ref = tmp_path / "Reference"
+    ref.mkdir(parents=True)
+    (ref / "2026-07-24-short stem .md").write_text(
+        '---\ntitle: "A much longer real title that the filename truncated"\n---\n\nx\n',
+        encoding="utf-8")
+
+    result = notewriter.rename_note(
+        FakeVault(cfg), "Reference/2026-07-24-short stem .md", "short stem", retitle=False)
+
+    text = (tmp_path / result["path"]).read_text(encoding="utf-8")
+    assert 'title: "A much longer real title that the filename truncated"' in text

@@ -130,14 +130,20 @@ _LINK_RE = re.compile(r"\[\[([^\]|#]+)((?:#[^\]|]+)?(?:\|[^\]]+)?)\]\]")
 
 def _retarget(content: str, old_stem: str, new_stem: str) -> str:
     """Point every `[[old_stem…]]` at new_stem, keeping section and display parts."""
+    target = old_stem.strip().lower()
+
     def sub(m):
-        if m.group(1).strip().lower() != old_stem.lower():
+        # Both sides stripped: safe_filename used to leave a trailing space on a
+        # truncated stem, so five notes in this vault are named "…for the .md"
+        # and 85 links spell the target with that space. Comparing a stripped
+        # link target against an unstripped stem matched none of them.
+        if m.group(1).strip().lower() != target:
             return m.group(0)
         return f"[[{new_stem}{m.group(2)}]]"
     return _LINK_RE.sub(sub, content)
 
 
-def rename_note(vault, rel_path: str, new_title: str) -> dict:
+def rename_note(vault, rel_path: str, new_title: str, retitle: bool = True) -> dict:
     """Rename a note and repoint every wikilink that referenced it.
 
     Renaming without this is silent corruption: a stem is a note's link
@@ -179,10 +185,15 @@ def rename_note(vault, rel_path: str, new_title: str) -> dict:
         own = src.read_text(encoding="utf-8")
     except OSError as e:
         return {"error": f"Could not read {rel_path}: {e}"}
-    # The frontmatter title is what readers see; leaving the old one would show
-    # a note whose displayed name disagrees with its filename.
-    own_new = re.sub(r'^title:.*$', f"title: {yaml_quote_scalar(new_title)}",
-                     own, count=1, flags=re.MULTILINE)
+    # The frontmatter title is what readers see; leaving the old one normally
+    # shows a note whose displayed name disagrees with its filename. retitle=False
+    # is for repairing a filename alone — a stem carrying a trailing space from
+    # the old safe_filename must not drag the note's real title down to the
+    # truncated form the filename happens to hold.
+    own_new = own
+    if retitle:
+        own_new = re.sub(r'^title:.*$', f"title: {yaml_quote_scalar(new_title)}",
+                         own, count=1, flags=re.MULTILINE)
     staged.append((src, own, own_new))
 
     referrers = []
