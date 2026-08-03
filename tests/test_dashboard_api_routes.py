@@ -26,6 +26,8 @@ from delegation_core.tracker import ProcessTracker
 class FakeVault:
     def __init__(self):
         self.list_notes_calls = []
+        self.list_notes_in_calls = []
+        self.find_calls = []
         self.search_calls = []
 
     def list_notes(self, folder, limit=20):
@@ -33,9 +35,28 @@ class FakeVault:
         return [{"title": f"note-in-{folder}", "path": f"{folder}/x.md"}]
 
     def count_notes(self, folder):
-        # Deliberately larger than list_notes returns, so the tree route's
-        # truncation reporting is exercised rather than trivially satisfied.
         return 5
+
+    def list_directories(self):
+        # Nested on purpose: the flat-list bug this replaced hid exactly this shape.
+        return [
+            {"path": "reference", "name": "reference", "depth": 0, "count": 2},
+            {"path": "reference/graphs", "name": "graphs", "depth": 1, "count": 0},
+            {"path": "reference/graphs/repo", "name": "repo", "depth": 2, "count": 900},
+        ]
+
+    def list_notes_in(self, dir_rel, offset=0, limit=200):
+        self.list_notes_in_calls.append((dir_rel, offset, limit))
+        if dir_rel == "nope":
+            return {"error": "Not a directory: nope"}
+        return {"dir": dir_rel, "total": 900, "offset": offset, "limit": limit,
+                "has_more": offset + 2 < 900,
+                "notes": [{"title": "a", "path": f"{dir_rel}/a.md"},
+                          {"title": "b", "path": f"{dir_rel}/b.md"}]}
+
+    def find_notes(self, query, limit=30):
+        self.find_calls.append((query, limit))
+        return [{"title": query, "path": f"reference/{query}.md", "match_rank": 0}]
 
     def search(self, query, limit=5):
         self.search_calls.append((query, limit))
@@ -119,13 +140,64 @@ def test_clients_endpoint_returns_empty_list_with_no_sessions(server, monkeypatc
     assert body == {"clients": []}
 
 
-def test_vault_tree_lists_every_configured_folder(server):
-    port, cfg, fake_vault = server
+def test_vault_tree_returns_directory_shape_including_nested_ones(server):
+    """The route used to return the newest 1000 notes per top-level folder and
+    no hierarchy, so 3661 notes three levels down were unreachable."""
+    port, _, _ = server
     status, body = _get(port, "/api/vault/tree")
     assert status == 200
-    assert set(body["folders"].keys()) == {"reference", "decisions"}
-    assert body["folders"]["reference"][0]["title"] == "note-in-reference"
-    assert set(fake_vault.list_notes_calls) == {("reference", 1000), ("decisions", 1000)}
+    paths = [d["path"] for d in body["directories"]]
+    assert paths == ["reference", "reference/graphs", "reference/graphs/repo"]
+    assert body["directories"][2]["depth"] == 2
+    assert body["directories"][2]["count"] == 900
+
+
+def test_vault_notes_pages_one_directory(server):
+    port, _, fake_vault = server
+    status, body = _get(port, "/api/vault/notes?dir=reference/graphs/repo&offset=0&limit=2")
+    assert status == 200
+    assert body["total"] == 900
+    assert body["has_more"] is True
+    assert fake_vault.list_notes_in_calls == [("reference/graphs/repo", 0, 2)]
+
+
+def test_vault_notes_requires_a_dir(server):
+    port, _, _ = server
+    status, body = _get(port, "/api/vault/notes")
+    assert status == 400
+    assert "error" in body
+
+
+def test_vault_notes_propagates_a_bad_directory_as_400(server):
+    port, _, _ = server
+    status, body = _get(port, "/api/vault/notes?dir=nope")
+    assert status == 400
+    assert "error" in body
+
+
+def test_vault_notes_rejects_non_integer_paging(server):
+    port, _, _ = server
+    status, _ = _get(port, "/api/vault/notes?dir=reference&offset=abc")
+    assert status == 400
+
+
+def test_vault_find_does_a_literal_lookup(server):
+    """Distinct from /api/vault/search: no embeddings, no similarity cutoff.
+    The semantic endpoint did not return the exact title of a note written
+    minutes earlier in its top 3."""
+    port, _, fake_vault = server
+    status, body = _get(port, "/api/vault/find?q=AIAgent&limit=5")
+    assert status == 200
+    assert body["count"] == 1
+    assert body["results"][0]["match_rank"] == 0
+    assert fake_vault.find_calls == [("AIAgent", 5)]
+
+
+def test_vault_find_requires_a_query(server):
+    port, _, _ = server
+    status, body = _get(port, "/api/vault/find?q=%20")
+    assert status == 400
+    assert "error" in body
 
 
 def test_vault_search_passes_query_and_limit_through(server):
@@ -223,19 +295,3 @@ def test_vault_search_non_numeric_limit_returns_clean_500_not_a_crash(server):
     status, body = _get(port, "/api/vault/search?q=x&limit=notanumber")
     assert status == 500
     assert "error" in body
-
-
-def test_vault_tree_reports_per_folder_totals_and_truncation(server):
-    """The route caps each folder at 1000 notes. Reference held 3715 and the
-    browser showed its newest 1000 with nothing saying so."""
-    port, cfg, fake = server
-    status, body = _get(port, "/api/vault/tree")
-
-    assert status == 200
-    assert set(body["folders"]) == set(cfg.vault_folders)
-    assert body["limit"] == 1000
-    for folder in cfg.vault_folders:
-        counts = body["counts"][folder]
-        assert counts["shown"] == len(body["folders"][folder])
-        assert counts["total"] == 5          # FakeVault.count_notes
-        assert counts["truncated"] is True   # 1 shown of 5

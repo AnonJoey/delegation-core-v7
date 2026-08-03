@@ -14,7 +14,9 @@ meant to be reached exclusively by the local Tauri webview.
 Endpoints:
   GET  /api/status                  vault/binary/model/llama.cpp health
   GET  /api/clients                 currently-connected MCP client surfaces
-  GET  /api/vault/tree               folder -> notes listing
+  GET  /api/vault/tree               directory shape (path, depth, note count)
+  GET  /api/vault/notes?dir=&offset= notes inside one directory, paginated
+  GET  /api/vault/find?q=            literal title/path lookup (no embeddings)
   GET  /api/vault/note?path=...      one note's raw content
   GET  /api/vault/search?q=...       BGE similarity search
   GET  /api/vault/graph              {nodes, edges} from [[wikilinks]] across the vault
@@ -336,6 +338,10 @@ class _Handler(BaseHTTPRequestHandler):
                 # connections"; they point in opposite directions.
                 from .windows import list_windows
                 self._send_json(list_windows())
+            elif parsed.path == "/api/vault/notes":
+                self._handle_vault_notes(parse_qs(parsed.query))
+            elif parsed.path == "/api/vault/find":
+                self._handle_vault_find(parse_qs(parsed.query))
             elif parsed.path == "/api/vault/tree":
                 self._handle_vault_tree()
             elif parsed.path == "/api/vault/note":
@@ -651,17 +657,48 @@ class _Handler(BaseHTTPRequestHandler):
         self._send_json({"status": "stopped"})
 
     def _handle_vault_tree(self) -> None:
-        limit = 1000
-        tree, counts = {}, {}
-        for folder in _cfg.vault_folders:
-            notes = _vault.list_notes(folder, limit=limit)
-            total = _vault.count_notes(folder)
-            tree[folder] = notes
-            # A folder can hold thousands of generated articles; without this the
-            # browser silently showed its newest 1000 as if that were all of them.
-            counts[folder] = {"shown": len(notes), "total": total,
-                              "truncated": total > len(notes)}
-        self._send_json({"folders": tree, "counts": counts, "limit": limit})
+        """Directory shape only — notes come from /api/vault/notes per directory.
+
+        The old version returned the newest 1000 notes of every top-level folder
+        in one payload and no hierarchy at all, so 3661 notes sitting three
+        levels down were unreachable. Directories are cheap to enumerate (25 in
+        this vault), and paging notes per directory is what makes a 2711-note
+        folder browsable.
+        """
+        self._send_json({"directories": _vault.list_directories()})
+
+    def _handle_vault_notes(self, query) -> None:
+        dir_rel = (query.get("dir") or [""])[0]
+        if not dir_rel:
+            self._send_json({"error": "dir is required"}, status=400)
+            return
+        try:
+            offset = max(int((query.get("offset") or ["0"])[0]), 0)
+            limit = min(max(int((query.get("limit") or ["200"])[0]), 1), 500)
+        except ValueError:
+            self._send_json({"error": "offset and limit must be integers"}, status=400)
+            return
+        result = _vault.list_notes_in(dir_rel, offset=offset, limit=limit)
+        self._send_json(result, status=400 if "error" in result else 200)
+
+    def _handle_vault_find(self, query) -> None:
+        """Literal title/path lookup — deliberately not the semantic search.
+
+        /api/vault/search is BGE with a similarity cutoff, which cannot reliably
+        answer "open the note called X": the exact title of a note written
+        minutes earlier did not come back in its top 3.
+        """
+        q = (query.get("q") or [""])[0].strip()
+        if not q:
+            self._send_json({"error": "q is required"}, status=400)
+            return
+        try:
+            limit = min(max(int((query.get("limit") or ["30"])[0]), 1), 100)
+        except ValueError:
+            self._send_json({"error": "limit must be an integer"}, status=400)
+            return
+        results = _vault.find_notes(q, limit=limit)
+        self._send_json({"query": q, "count": len(results), "results": results})
 
     def _handle_vault_note(self, query) -> None:
         rel_path = (query.get("path") or [""])[0]

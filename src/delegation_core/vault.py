@@ -518,6 +518,107 @@ class VaultManager:
                              "path": str(f.relative_to(self.cfg.vault)), "size_bytes": size})
         return results
 
+    def _note_row(self, f: Path) -> dict:
+        """Title/date/path/size for one note, reading only its frontmatter head."""
+        title, date = f.name[:-3], ""
+        try:
+            size = f.stat().st_size
+        except OSError:
+            size = 0
+        try:
+            for line in f.read_text(encoding="utf-8").splitlines()[:8]:
+                if line.startswith("title:"):
+                    title = yaml_unquote_scalar(line.split(":", 1)[1])
+                elif line.startswith("date:"):
+                    date = line.split(":", 1)[1].strip()
+        except Exception as e:
+            logger.warning("Could not read frontmatter from %s: %s", f.name, e)
+        return {"title": title, "date": date,
+                "path": str(f.relative_to(self.cfg.vault)), "size_bytes": size}
+
+    def list_directories(self) -> list[dict]:
+        """Every directory under a configured folder that holds notes.
+
+        The browser used to list only the configured top-level folders, so a
+        vault where 3661 of 3878 notes sit three levels down showed them as if
+        they were loose in their top folder, with no way to reach the subtree.
+        Returning the real shape is cheap here: this vault has 25 such
+        directories.
+        """
+        out = []
+        for folder in self.cfg.vault_folders:
+            root = self.cfg.vault / folder
+            if not root.exists():
+                continue
+            seen: dict[str, int] = {}
+            for f in root.rglob("*.md"):
+                rel = str(f.parent.relative_to(self.cfg.vault))
+                seen[rel] = seen.get(rel, 0) + 1
+            for rel in sorted(seen):
+                out.append({"path": rel,
+                            "name": rel.split("/")[-1],
+                            "depth": rel.count("/"),
+                            "count": seen[rel]})
+        return out
+
+    def list_notes_in(self, dir_rel: str, offset: int = 0, limit: int = 200) -> dict:
+        """Notes directly inside one directory — not its subdirectories.
+
+        Paginated because a single directory here holds 2711 notes; the caller
+        gets `total` and `has_more` so a page is never mistaken for the lot.
+        """
+        target = (self.cfg.vault / dir_rel).resolve()
+        try:                                    # containment, not string prefix
+            target.relative_to(self.cfg.vault.resolve())
+        except ValueError:
+            return {"error": f"Path outside the vault: {dir_rel}"}
+        if not target.is_dir():
+            return {"error": f"Not a directory: {dir_rel}"}
+
+        files = sorted(target.glob("*.md"), key=lambda f: f.stat().st_mtime, reverse=True)
+        page = files[offset:offset + limit]
+        return {"dir": dir_rel, "total": len(files), "offset": offset,
+                "limit": limit, "has_more": offset + len(page) < len(files),
+                "notes": [self._note_row(f) for f in page]}
+
+    def find_notes(self, query: str, limit: int = 30) -> list[dict]:
+        """Literal title/path search — no embeddings, no similarity threshold.
+
+        search() is semantic and answers "what is about X". It cannot reliably
+        answer "open the note called X": searching this vault for the exact
+        title of a note written minutes earlier did not return it in the top 3,
+        and a one-word title matched at 0.57 against a 0.55 cutoff. Exact recall
+        needs literal matching, so this walks filenames instead.
+
+        Ranked: exact stem, then prefix, then substring in the stem, then
+        anywhere in the path.
+        """
+        q = (query or "").strip().lower()
+        if not q:
+            return []
+        scored = []
+        for folder in self.cfg.vault_folders:
+            root = self.cfg.vault / folder
+            if not root.exists():
+                continue
+            for f in root.rglob("*.md"):
+                stem = f.stem.lower()
+                rel = str(f.relative_to(self.cfg.vault))
+                if stem == q:
+                    rank = 0
+                elif stem.startswith(q):
+                    rank = 1
+                elif q in stem:
+                    rank = 2
+                elif q in rel.lower():
+                    rank = 3
+                else:
+                    continue
+                scored.append((rank, len(stem), rel, f))
+        scored.sort(key=lambda t: (t[0], t[1], t[2]))
+        return [dict(self._note_row(f), match_rank=rank)
+                for rank, _, _, f in scored[:limit]]
+
     def inbox_status(self) -> dict:
         """Return what is waiting in the vault _inbox folder."""
         from .extractor import SUPPORTED, format_label

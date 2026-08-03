@@ -123,6 +123,22 @@ error, which is why they survived unnoticed.
   seconds. `to_obsidian`/`to_canvas` stay unexposed by decision, now recorded:
   Obsidian is no longer the target reader.
 
+- **Phase 1 of replacing Obsidian: the note browser has a real tree and a
+  literal search.** Measured first: 3661 of 3878 notes sit three levels down,
+  the browser listed only the 9 configured top-level folders, and the largest
+  single directory holds 2711 notes. `/api/vault/tree` now returns directory
+  shape (25 entries here, with depth and per-directory counts) and
+  `/api/vault/notes?dir=&offset=` pages one directory at a time, so a 2711-note
+  folder is browsable instead of capped. `graphs/` subtrees start folded.
+
+  `/api/vault/find?q=` and the `vault_find_notes` MCP tool do literal
+  title/path matching with no embeddings and no similarity cutoff, ranked exact
+  stem → prefix → substring → path. This is not a nicety: searching the vault
+  semantically for the exact title of a note written minutes earlier did not
+  return it in the top 3, and the one-word title "AIAgent" matched at 0.57
+  against a 0.55 threshold. The filter box now hits this endpoint, so it can
+  see the whole vault rather than whichever page was already loaded.
+
 ### Notes
 
 Items 1 and 5 share a shape worth naming: a fallback that *fabricates* a

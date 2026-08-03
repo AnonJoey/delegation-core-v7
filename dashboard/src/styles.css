@@ -1694,3 +1694,43 @@ body {
   opacity: 0.85;
   font-variant-numeric: tabular-nums;
 }
+
+/* Folder tree — 25 directories, indented by server-provided depth. The browser
+   was a flat list of the 9 configured folders while 3661 of 3878 notes sat
+   three levels down, unreachable. */
+.dir-row {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+}
+.dir-caret {
+  display: inline-block;
+  width: 0.9em;
+  flex: 0 0 auto;
+  opacity: 0.6;
+  cursor: pointer;
+  user-select: none;
+}
+.dir-caret:hover { opacity: 1; }
+/* Filter results span the whole vault, so each row states where it lives. */
+.note-dir {
+  display: block;
+  font-size: 0.7rem;
+  opacity: 0.55;
+  margin-top: 0.1rem;
+}
+.list-more {
+  display: block;
+  width: 100%;
+  padding: 0.5rem;
+  margin-top: 0.35rem;
+  font: inherit;
+  font-size: 0.75rem;
+  color: inherit;
+  background: transparent;
+  border: 1px dashed currentColor;
+  border-radius: 6px;
+  opacity: 0.7;
+  cursor: pointer;
+}
+.list-more:hover { opacity: 1; }

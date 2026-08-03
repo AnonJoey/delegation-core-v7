@@ -553,6 +553,20 @@ async def vault_list_notes(folder: str, limit: int = 20) -> str:
 
 
 @mcp.tool()
+async def vault_find_notes(query: str, limit: int = 30) -> str:
+    """Find notes by literal title or path match — no embeddings, no threshold.
+
+    Use this when you know what a note is CALLED. search_vault is semantic and
+    answers "what is about X"; it cannot reliably answer "open the note named X"
+    — searching this vault for the exact title of a note written minutes earlier
+    did not return it in the top 3. Results are ranked: exact stem, prefix,
+    substring, then anywhere in the path.
+    """
+    results = _vault.find_notes(query, limit=limit)
+    return json.dumps({"query": query, "count": len(results), "results": results})
+
+
+@mcp.tool()
 async def vault_inbox_status() -> str:
     """Check what files are waiting in _inbox. Call BEFORE run_maintenance."""
     return json.dumps(_vault.inbox_status())

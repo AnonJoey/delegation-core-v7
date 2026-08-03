@@ -439,115 +439,180 @@ function switchGraphMode(mode) {
 
 // ── Knowledge Vault Browser & Markdown Reader ────────────────────────────────
 
-let vaultTree = null;
-let notesFilter = "";
+let vaultDirs = null;          // [{path, name, depth, count}] — 25 entries here
+let collapsedDirs = new Set();  // dir paths the user folded shut
+let currentListing = null;      // {dir, total, offset, notes, has_more}
+let findResults = null;         // literal-search results, when the filter is active
 let selectedFolder = null;
-
-function noteMatchesFilter(n) {
-  return !notesFilter || n.title.toLowerCase().includes(notesFilter);
-}
+const NOTES_PAGE = 200;
 
 function renderFolderList() {
   const folderList = document.getElementById("folder-list");
-  if (!vaultTree || !vaultTree.folders) return;
-  const folders = Object.keys(vaultTree.folders);
-  if (!folders.length) {
-    folderList.innerHTML = paneState("No Folders", "The vault has no configured folders yet.");
+  if (!vaultDirs) return;
+  if (!vaultDirs.length) {
+    folderList.innerHTML = paneState("No Folders", "The vault has no notes yet.");
     return;
   }
-  folderList.innerHTML = folders
-    .map((f) => {
-      const count = vaultTree.folders[f].filter(noteMatchesFilter).length;
-      // The API caps each folder; without the total, a folder of 3715 notes
-      // showing its newest 1000 looked exactly like a folder of 1000.
-      const info = (vaultTree.counts || {})[f];
-      const truncated = info && info.truncated;
-      const label = truncated ? `${count} of ${info.total}` : `${count}`;
-      const title = truncated
-        ? `Showing the newest ${info.shown} of ${info.total} notes — use search to reach the rest`
-        : "";
-      return `<div class="list-item ${f === selectedFolder ? "active" : ""}" data-folder="${escapeHtml(f)}" tabindex="0">
-        ${escapeHtml(f)} <span class="count${truncated ? " count-truncated" : ""}" title="${escapeHtml(title)}">${label}</span>
+
+  // A directory is hidden when any ancestor is collapsed. Depth is precomputed
+  // server-side, so rendering is a flat map with an indent — no recursion, and
+  // no virtualization needed for 25 rows.
+  const hidden = (path) => {
+    const parts = path.split("/");
+    for (let i = 1; i < parts.length; i++) {
+      if (collapsedDirs.has(parts.slice(0, i).join("/"))) return true;
+    }
+    return false;
+  };
+  const hasChildren = (path) => vaultDirs.some((d) => d.path.startsWith(path + "/"));
+
+  folderList.innerHTML = vaultDirs
+    .filter((d) => !hidden(d.path))
+    .map((d) => {
+      const kids = hasChildren(d.path);
+      const folded = collapsedDirs.has(d.path);
+      const caret = kids ? (folded ? "▸" : "▾") : "&nbsp;";
+      return `<div class="list-item dir-row ${d.path === selectedFolder ? "active" : ""}"
+        data-folder="${escapeHtml(d.path)}" style="padding-left:${0.5 + d.depth * 0.85}rem" tabindex="0">
+        <span class="dir-caret" data-toggle="${escapeHtml(d.path)}">${caret}</span>
+        ${escapeHtml(d.name)} <span class="count">${d.count}</span>
       </div>`;
     })
     .join("");
 
+  folderList.querySelectorAll(".dir-caret").forEach((el) => {
+    el.addEventListener("click", (ev) => {
+      ev.stopPropagation();
+      const path = el.dataset.toggle;
+      collapsedDirs.has(path) ? collapsedDirs.delete(path) : collapsedDirs.add(path);
+      renderFolderList();
+    });
+  });
   folderList.querySelectorAll(".list-item").forEach((el) => {
     el.addEventListener("click", () => selectFolder(el.dataset.folder));
+    el.addEventListener("keydown", (ev) => {
+      if (ev.key === "Enter") selectFolder(el.dataset.folder);
+    });
   });
 }
 
 function renderNoteList() {
   const noteList = document.getElementById("note-list");
   const countBadge = document.getElementById("note-count-badge");
-  const notes = (vaultTree.folders[selectedFolder] || []).filter(noteMatchesFilter);
-  if (countBadge) countBadge.textContent = notes.length;
 
-  if (!notes.length) {
-    noteList.innerHTML = notesFilter
-      ? paneState("No matches", "No note titles in this folder match the filter.")
+  // Filter active → show literal-search hits across the whole vault instead of
+  // one directory. The old filter was a substring test over whichever notes had
+  // already been loaded, so it could not see past the first page.
+  const listing = findResults
+    ? { notes: findResults.results, total: findResults.count, has_more: false, offset: 0 }
+    : currentListing;
+
+  if (!listing) {
+    noteList.innerHTML = paneState("Pick a folder", "Choose a directory to list its notes.");
+    if (countBadge) countBadge.textContent = "0";
+    return;
+  }
+  if (countBadge) countBadge.textContent = listing.total;
+
+  if (!listing.notes.length) {
+    noteList.innerHTML = findResults
+      ? paneState("No matches", "No note title or path contains that text.")
       : paneState("Empty folder", "Notes filed here will appear in this list.");
     return;
   }
 
-  noteList.innerHTML = notes
-    .map((n) => `<div class="list-item" data-path="${escapeHtml(n.path)}" tabindex="0">${escapeHtml(n.title)}</div>`)
+  const rows = listing.notes
+    .map((n) => `<div class="list-item" data-path="${escapeHtml(n.path)}" tabindex="0">
+      ${escapeHtml(n.title)}${findResults ? `<span class="note-dir">${escapeHtml(n.path.split("/").slice(0, -1).join("/"))}</span>` : ""}
+    </div>`)
     .join("");
+
+  const shown = listing.offset + listing.notes.length;
+  const more = listing.has_more
+    ? `<button class="list-more" id="notes-load-more">Load more — showing ${shown} of ${listing.total}</button>`
+    : "";
+  noteList.innerHTML = rows + more;
 
   noteList.querySelectorAll(".list-item").forEach((el) => {
     el.addEventListener("click", () => selectNote(el.dataset.path, el));
+    el.addEventListener("keydown", (ev) => {
+      if (ev.key === "Enter") selectNote(el.dataset.path, el);
+    });
   });
+  const moreBtn = document.getElementById("notes-load-more");
+  if (moreBtn) moreBtn.addEventListener("click", () => loadNotes(selectedFolder, shown, true));
 }
 
 async function loadNotesBrowser() {
   const folderList = document.getElementById("folder-list");
   try {
-    vaultTree = await apiGet("/api/vault/tree");
+    const data = await apiGet("/api/vault/tree");
+    vaultDirs = data.directories || [];
   } catch (e) {
-    folderList.innerHTML = paneState("Vault unavailable", "Could not load the note tree.");
+    folderList.innerHTML = paneState("Vault unavailable", "Could not load the directory tree.");
     return;
   }
+  // Generated code-graph articles live under <folder>/graphs/<name>/ and number
+  // in the thousands; start them folded so the browser opens on real notes.
+  vaultDirs.forEach((d) => {
+    if (d.path.endsWith("/graphs")) collapsedDirs.add(d.path);
+  });
   renderFolderList();
-  const folders = Object.keys(vaultTree.folders);
-  if (folders.length) selectFolder(folders[0]);
+  if (vaultDirs.length) selectFolder(vaultDirs[0].path);
 }
 
-function selectFolder(folder) {
-  selectedFolder = folder;
-  document.querySelectorAll("#folder-list .list-item").forEach((el) => {
-    el.classList.toggle("active", el.dataset.folder === folder);
-  });
+async function loadNotes(dir, offset = 0, append = false) {
+  try {
+    const data = await apiGet(`/api/vault/notes?dir=${encodeURIComponent(dir)}&offset=${offset}&limit=${NOTES_PAGE}`);
+    if (data.error) throw new Error(data.error);
+    currentListing = append && currentListing
+      ? { ...data, notes: currentListing.notes.concat(data.notes), offset: 0 }
+      : data;
+  } catch (e) {
+    currentListing = { dir, total: 0, offset: 0, notes: [], has_more: false };
+  }
   renderNoteList();
+}
+
+function selectFolder(dir) {
+  selectedFolder = dir;
+  document.querySelectorAll("#folder-list .list-item").forEach((el) => {
+    el.classList.toggle("active", el.dataset.folder === dir);
+  });
+  loadNotes(dir);
 }
 
 function setupNotesFilter() {
   const input = document.getElementById("notes-filter");
+  let timer = null;
   input.addEventListener("input", () => {
-    notesFilter = input.value.trim().toLowerCase();
-    if (!vaultTree) return;
-    renderFolderList();
-    renderNoteList();
+    const q = input.value.trim();
+    clearTimeout(timer);
+    // Debounced because this is a server round-trip now, not a local filter.
+    timer = setTimeout(async () => {
+      if (!q) {
+        findResults = null;
+        renderNoteList();
+        return;
+      }
+      try {
+        findResults = await apiGet(`/api/vault/find?q=${encodeURIComponent(q)}&limit=100`);
+      } catch (e) {
+        findResults = { results: [], count: 0 };
+      }
+      renderNoteList();
+    }, 180);
   });
 }
 
 async function selectNoteByTitle(title) {
-  if (!vaultTree) return;
-  const lower = title.toLowerCase();
-  for (const folder in vaultTree.folders) {
-    for (const note of vaultTree.folders[folder]) {
-      if (note.title.toLowerCase() === lower || note.path.toLowerCase().includes(lower)) {
-        selectFolder(folder);
-        const items = document.querySelectorAll("#note-list .list-item");
-        for (const item of items) {
-          if (item.dataset.path === note.path) {
-            selectNote(note.path, item);
-            return;
-          }
-        }
-        selectNote(note.path, null);
-        return;
-      }
-    }
+  // Literal lookup: the semantic endpoint cannot be trusted to return an exact
+  // title — one written minutes earlier did not make its own top 3.
+  try {
+    const data = await apiGet(`/api/vault/find?q=${encodeURIComponent(title)}&limit=1`);
+    if (data.results && data.results.length) selectNote(data.results[0].path, null);
+  } catch (e) {
+    /* nothing to open */
   }
 }
 
