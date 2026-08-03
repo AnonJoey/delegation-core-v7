@@ -98,6 +98,7 @@ from pathlib import Path
 from fastmcp import FastMCP
 
 from . import graph_hook
+from . import capabilities as _capabilities
 from . import graphbridge
 from . import jobs
 from .client_tracking import ClientTrackingMiddleware as _ClientTrackingMiddleware
@@ -822,6 +823,38 @@ async def extract_source_maps(source_path: str, out_dir: str) -> str:
     loop = asyncio.get_running_loop()
     result = await loop.run_in_executor(
         None, lambda: graphbridge.extract_source_maps(source_path, out_dir))
+    return json.dumps(result)
+
+
+@mcp.tool()
+async def capabilities() -> str:
+    """CALL THIS FIRST on connecting — what this server can actually do.
+
+    Returns the live tool list (asked of the running server, so it cannot drift
+    from what is actually served), the graph exporters and which tool reaches
+    each, the ones deliberately left unexposed and why, capabilities that exist
+    in the code but are still unwired, and the search scopes.
+
+    Prefer this over any prose description of this server, AGENT_GUIDE.md
+    included: prose has no guard against drifting from the code, and this
+    report is generated plus test-enforced.
+    """
+    tools = await mcp.list_tools()
+    listed = [{"name": t.name,
+               "summary": (t.description or "").strip().split("\n")[0]}
+              for t in sorted(tools, key=lambda t: t.name)]
+    return json.dumps(_capabilities.describe(listed))
+
+
+@mcp.tool()
+async def graph_export(name: str, format: str) -> str:
+    """Re-export an already-built graph into another format.
+
+    format: "graphml" (Gephi, yEd, Cytoscape), "svg" (static image, embeds
+    anywhere), or "cypher" (replay script for Neo4j). Reads the existing
+    graph.json, so it costs seconds — no re-extraction. Run graph_build first.
+    """
+    result = await asyncio.to_thread(graphbridge.export_graph, _vault.cfg, name, format)
     return json.dumps(result)
 
 

@@ -100,6 +100,29 @@ error, which is why they survived unnoticed.
   with `total_nodes`/`truncated`/`max_nodes` reported, and the pane states its
   own scope under the legend.
 
+- **`capabilities()` — a connecting client can now ask what this server does.**
+  Returns the live tool list (asked of the running server via `mcp.list_tools()`,
+  so it cannot drift from what is served), every graph exporter with the tool
+  that reaches it, the ones deliberately unexposed with reasons, capabilities
+  that exist but are still unwired, and the search scopes. `AGENT_GUIDE.md` now
+  says outright that it is not authoritative and this report is — the guide's
+  numeric claims are copies with no test comparing them to source, which is how
+  a comparable project's guide ended up wrong on four of four constants.
+
+- **`tests/test_capability_registry.py` makes unwired capability a written
+  decision.** It scans the vendored pipeline for artifact-producing functions
+  and fails when one is not classified in `capabilities.GRAPH_CAPABILITIES` as
+  either wired to a named tool or deliberately unexposed with a reason. Verified
+  by adding a `to_parquet()` stub: the suite fails until it is classified. This
+  is the structural answer to the three bugs above — each was a working,
+  reachable function that nothing pointed at.
+
+- **`graph_export(name, format)` exposes three exporters that had no caller.**
+  `graphml` (Gephi, yEd, Cytoscape), `svg`, and `cypher` (Neo4j replay script).
+  They read the existing `graph.json` rather than re-extracting, so they cost
+  seconds. `to_obsidian`/`to_canvas` stay unexposed by decision, now recorded:
+  Obsidian is no longer the target reader.
+
 ### Notes
 
 Items 1 and 5 share a shape worth naming: a fallback that *fabricates* a

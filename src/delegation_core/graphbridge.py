@@ -617,3 +617,55 @@ def get_affected(cfg, name: str, query: str, depth: int = 2, relations: list[str
         "hit_count": len(hits),
         "report": text,
     }
+
+
+# Formats a built graph can be re-exported into without rebuilding it. The
+# heavy work (detect/extract/build/cluster) is already on disk in graph.json;
+# these read it back and write one more file, so they cost seconds.
+EXPORT_FORMATS = {
+    "graphml": ("graph.graphml", "Gephi, yEd, Cytoscape"),
+    "svg": ("graph.svg", "static image, embeds anywhere"),
+    "cypher": ("graph.cypher", "replay script for Neo4j"),
+}
+
+
+def export_graph(cfg, name: str, fmt: str) -> dict:
+    """Re-export an existing graph into another format.
+
+    These exporters shipped with the vendored pipeline and had no caller — the
+    same shape as the community-label bug, so they are registered in
+    capabilities.py and guarded by tests/test_capability_registry.py.
+    """
+    fmt = (fmt or "").strip().lower()
+    if fmt not in EXPORT_FORMATS:
+        return {"error": f"Unknown format '{fmt}'. Valid: {sorted(EXPORT_FORMATS)}"}
+
+    graph_name = _slugify(name)
+    out_dir = cfg.graphs_dir / graph_name
+    graph_json = out_dir / "graph.json"
+    if not graph_json.exists():
+        return {"error": f"Graph '{graph_name}' has not been built. Run graph_build first."}
+
+    from delegation_core.graph.affected import load_graph
+    from delegation_core.graph.cluster import cluster as cluster_fn, label_communities_by_hub
+    from delegation_core.graph.export import to_cypher, to_graphml, to_svg
+
+    filename, opens_in = EXPORT_FORMATS[fmt]
+    dest = out_dir / filename
+    try:
+        G = load_graph(graph_json)
+        communities = cluster_fn(G)
+        if fmt == "graphml":
+            to_graphml(G, communities, str(dest))
+        elif fmt == "svg":
+            to_svg(G, communities, str(dest),
+                   community_labels=label_communities_by_hub(G, communities))
+        else:
+            to_cypher(G, str(dest))
+    except Exception as e:
+        logger.error("Export %s of graph %s failed: %s", fmt, graph_name, e)
+        return {"error": f"Export failed: {e}"}
+
+    return {"status": "ok", "name": graph_name, "format": fmt,
+            "path": str(dest), "opens_in": opens_in,
+            "node_count": G.number_of_nodes()}

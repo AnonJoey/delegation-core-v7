@@ -8,8 +8,13 @@ Read it fully at the start of any session where these tools are available.
 ## What this is
 
 `delegation-core` is a local AI workhorse running on the user's machine.
-It has a vector search index of the user's Obsidian vault, a local language model (llama.cpp),
-and persistent storage. It exists so that **you do not have to do the heavy lifting**.
+It has a vector search index of the user's markdown vault, a local language model (llama.cpp),
+and persistent storage. The vault is plain markdown on disk — Obsidian is no longer
+the intended reader, and the Tauri dashboard is the primary surface. Do not write
+for Obsidian's constraints; `[[wikilinks]]` stay because the vault graph is built
+from them, not because Obsidian renders them.
+
+It exists so that **you do not have to do the heavy lifting**.
 
 Your role is orchestration. delegation-core's role is execution.
 
@@ -21,9 +26,34 @@ zero marginal cost. Push work to it aggressively.
 
 ## Tools
 
+### `capabilities()`
+**Call this first, before `heartbeat()`, on every session.**
+
+Returns what this server can actually do, generated rather than written: the live
+tool list (asked of the running server), every graph exporter and which tool
+reaches it, the ones deliberately unexposed and why, capabilities that exist in
+the code but are still unwired, and the search scopes.
+
+```json
+→ { "tool_count": 45,
+    "tools": [{ "name": "search_vault", "summary": "..." }, ...],
+    "graph_exports": { "wired": {...}, "not_exposed": {...} },
+    "known_unwired": {...},
+    "search_scopes": {...} }
+```
+
+**This document is not authoritative; that report is.** Prose drifts from code
+with nothing to catch it — every numeric constant in this guide is a copy that
+no test compares against its source. `capabilities()` is generated at call time
+and guarded by `tests/test_capability_registry.py`, which fails when a new
+artifact-producing function appears unclassified. When the two disagree, the
+tool is right and this file is stale.
+
+---
+
 ### `heartbeat()`
 Check that llama.cpp and ChromaDB are online.  
-**Call this first in every session.** If status is `degraded`, warn the user before proceeding.
+Call this after `capabilities()`. If status is `degraded`, warn the user before proceeding.
 
 ```json
 → { "status": "healthy", "llama_cpp": "online", "vault": { "indexed_notes": 247, ... } }
@@ -612,7 +642,7 @@ aliases:
 
 A `title:` you supply wins over the generated one. That is how a note carries a
 short display title while its filename still comes from the `title` argument —
-useful because the filename is what Obsidian and the dashboard label graph nodes
+useful because the filename is what the dashboard labels graph nodes
 with, and `safe_filename` truncates it at 50 characters.
 
 Avoid vague titles like "Meeting notes" or "Research". Use specific titles like
@@ -790,7 +820,7 @@ avoid several unrelated sessions piling into one shared note.
 ## Quick reference
 
 ```
-Session start            → heartbeat() + check processes + search_vault(<first topic>)
+Session start            → capabilities() + heartbeat() + search_vault(<first topic>)
 Session end (any goodbye)→ export_session(<title>, <summary>, <key_decisions>)
 Multi-step task begins   → process_create(<name>, <description>, <steps>)
 Step completed           → process_update(<id>, step_done=<index>)
@@ -817,6 +847,8 @@ Search web               → search_web(<query>) → write_note if useful
 Cross-link a folder      → relink_folder(<folder>)
 Vault repair backlog     → vault_health.needs_repair > 5 → run_maintenance_bg()
 Graph a codebase         → graph_preview(<path>, exclude=[...]) → graph_build_bg(same exclude)
+Re-export a built graph  → graph_export(<name>, "graphml"|"svg"|"cypher")
+What can this server do  → capabilities()
 Check job progress       → task_status(<job_id>) → wait check_again_in_seconds
 Check vault size         → vault_stats()
 Check what's connected   → list_mcp_clients()
