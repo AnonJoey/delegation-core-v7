@@ -1,4 +1,4 @@
-"""delegation-core v0.9.0 — local MCP delegation server."""
+"""delegation-core v0.10.0 — local MCP delegation server."""
 
 # v5.1 patch: this docstring previously read "v0.2.0" while pyproject.toml
 # declared 0.5.0 — a stale copy-paste. Kept in lockstep with pyproject going

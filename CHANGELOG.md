@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased — 2026-08-03 (part 2)
+## v0.10.0 — 2026-08-03
 
 ### Added
 
@@ -39,8 +39,6 @@ Vault orphans were reviewed and deliberately **not** touched: the 113 notes with
 no inbound link are curated writing — project docs, decisions, archived sessions
 — and deleting them would destroy content, not tidy it. `relink_folder` is the
 additive fix if they should be connected.
-
-## Unreleased — 2026-08-03
 
 Found while ingesting the `hermes-agent` repository (7.7k files, 115.756 graph
 nodes) into the vault. The corpus was large enough to surface failures that a
