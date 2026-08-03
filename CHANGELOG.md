@@ -139,6 +139,24 @@ error, which is why they survived unnoticed.
   against a 0.55 threshold. The filter box now hits this endpoint, so it can
   see the whole vault rather than whichever page was already loaded.
 
+- **Phase 2: a backlinks panel, and a corrected broken-link count.** The
+  relation was always computed — `linker.inject_backlinks` writes it into note
+  bodies on every write — but nothing exposed it, so a reader saw only whatever
+  text happened to be present. `VaultManager.note_links()`,
+  `/api/vault/backlinks?path=` and the `vault_note_links` MCP tool return
+  inbound references and outbound targets, with dead targets marked
+  `broken: true` rather than dropped. Half the hand-written notes here have
+  inbound links, so this is not a corner case: the most-referenced note has 33.
+  Costs 0.14s on a 3878-note vault.
+
+  While implementing it, the earlier "248 broken links / 31%" figure was found
+  to be wrong. It came from an ad-hoc naive regex; the codebase has two wikilink
+  parsers and the strict one (`_countable_wikilinks`, which strips code spans
+  and shell `[[ -f ]]` syntax) is what `vault_health` uses. Measured properly:
+  527 links, **63 broken across 42 notes**, not 248. The panel uses the strict
+  parser so it cannot disagree with the health count. Note that `heartbeat()`
+  still reports 31, since `vault_health.json` is a cache.
+
 ### Notes
 
 Items 1 and 5 share a shape worth naming: a fallback that *fabricates* a

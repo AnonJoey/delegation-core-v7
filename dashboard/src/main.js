@@ -616,6 +616,51 @@ async function selectNoteByTitle(title) {
   }
 }
 
+// Backlinks were always computed server-side (linker.inject_backlinks writes
+// them into note bodies on every write) but never shown as a relation, so a
+// reader saw only whatever text happened to be in the note. Half the
+// hand-written notes here have inbound links, so this is not a corner feature.
+async function renderNoteLinks(path) {
+  const el = document.getElementById("note-links");
+  if (!el) return;
+  el.hidden = true;
+  el.innerHTML = "";
+  let data;
+  try {
+    data = await apiGet(`/api/vault/backlinks?path=${encodeURIComponent(path)}`);
+  } catch (e) {
+    return;
+  }
+  if (data.error) return;
+  // The note may have been switched while this request was in flight.
+  if (currentNotePath !== path) return;
+  if (!data.inbound.length && !data.outbound.length) return;
+
+  const section = (title, rows) =>
+    rows.length
+      ? `<div class="note-links-group"><h4>${title}</h4>${rows.join("")}</div>`
+      : "";
+
+  const inbound = data.inbound.map(
+    (n) => `<a class="note-link-row" data-path="${escapeHtml(n.path)}">${escapeHtml(n.title)}</a>`
+  );
+  // Broken targets are shown, not dropped: a note pointing at something that no
+  // longer exists would otherwise look well-connected.
+  const outbound = data.outbound.map((o) =>
+    o.broken
+      ? `<span class="note-link-row broken" title="No note with this name">${escapeHtml(o.target)} — missing</span>`
+      : `<a class="note-link-row" data-path="${escapeHtml(o.path)}">${escapeHtml(o.target)}</a>`
+  );
+
+  el.innerHTML =
+    section(`Linked from (${data.inbound_count})`, inbound) +
+    section(`Links to (${data.outbound.length})`, outbound);
+  el.hidden = false;
+  el.querySelectorAll("a.note-link-row").forEach((a) => {
+    a.addEventListener("click", () => selectNote(a.dataset.path, null));
+  });
+}
+
 async function selectNote(path, el) {
   currentNotePath = path;
   document.querySelectorAll("#note-list .list-item").forEach((e) => e.classList.remove("active"));
@@ -665,6 +710,8 @@ async function selectNote(path, el) {
         selectNoteByTitle(target);
       });
     });
+
+    renderNoteLinks(path);
 
     state.hidden = true;
     wrapper.hidden = false;

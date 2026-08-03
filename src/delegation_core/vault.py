@@ -619,6 +619,63 @@ class VaultManager:
         return [dict(self._note_row(f), match_rank=rank)
                 for rank, _, _, f in scored[:limit]]
 
+    def note_links(self, rel_path: str) -> dict:
+        """Inbound and outbound wikilinks for one note.
+
+        The server has always computed backlinks — linker.inject_backlinks writes
+        them into the note body on every write — but nothing exposed the relation
+        itself, so a reader could only see whatever text happened to be there.
+
+        Uses `_countable_wikilinks`, the same filter vault_health's broken-link
+        count uses, rather than linker.existing_targets. The distinction is not
+        cosmetic: existing_targets is a bare `[[...]]` regex, so it counts shell
+        test syntax and imported path references as links. Measured on this
+        vault, the naive reading gives 606 links / 176 broken; the filtered one
+        gives 527 / 63.
+
+        Broken outbound links are returned rather than dropped — 63 of them exist
+        and a panel that silently omitted them would misreport the note.
+        """
+        target = (self.cfg.vault / rel_path).resolve()
+        try:
+            target.relative_to(self.cfg.vault.resolve())
+        except ValueError:
+            return {"error": f"Path outside the vault: {rel_path}"}
+        if not target.is_file():
+            return {"error": f"Not a note: {rel_path}"}
+
+        by_stem: dict[str, Path] = {}
+        for folder in self.cfg.vault_folders:
+            root = self.cfg.vault / folder
+            if not root.exists():
+                continue
+            for f in root.rglob("*.md"):
+                by_stem.setdefault(f.stem.lower(), f)
+
+        own_stem = target.stem.lower()
+        outbound = []
+        for link in _countable_wikilinks(target.read_text(encoding="utf-8", errors="ignore")):
+            hit = by_stem.get(link.strip().lower())
+            outbound.append({"target": link.strip(),
+                             "path": str(hit.relative_to(self.cfg.vault)) if hit else None,
+                             "broken": hit is None})
+
+        inbound = []
+        for stem, f in by_stem.items():
+            if stem == own_stem:
+                continue
+            try:
+                content = f.read_text(encoding="utf-8", errors="ignore")
+            except OSError:
+                continue
+            if any(t.strip().lower() == own_stem for t in _countable_wikilinks(content)):
+                inbound.append(self._note_row(f))
+
+        inbound.sort(key=lambda n: n["title"].lower())
+        return {"path": rel_path, "inbound": inbound, "outbound": outbound,
+                "inbound_count": len(inbound),
+                "broken_count": sum(1 for o in outbound if o["broken"])}
+
     def inbox_status(self) -> dict:
         """Return what is waiting in the vault _inbox folder."""
         from .extractor import SUPPORTED, format_label

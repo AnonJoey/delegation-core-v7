@@ -93,3 +93,66 @@ def test_find_notes_empty_query_returns_nothing(vm):
 
 def test_find_notes_respects_the_limit(vm):
     assert len(vm.find_notes("a", limit=1)) == 1
+
+
+# ── note_links: the backlinks relation ───────────────────────────────────────
+
+@pytest.fixture
+def linked(tmp_path):
+    """hub is referenced by two notes; it points at one real and one dead target."""
+    cfg = Config(vault_path=str(tmp_path), vault_folders=["Reference"])
+    notes = {
+        "hub": "See [[leaf]] and [[ghost]].",
+        "a": "Points at [[hub]].",
+        "b": "Also points at [[hub]].",
+        "leaf": "No links here.",
+        "shell": "Bash idiom: `[[ -f x ]]` and [[hub]] in prose.",
+    }
+    for stem, body in notes.items():
+        p = tmp_path / "Reference" / f"{stem}.md"
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(f'---\ntitle: "{stem}"\n---\n\n{body}\n', encoding="utf-8")
+    return VaultManager(cfg)
+
+
+def test_note_links_lists_inbound_references(linked):
+    result = linked.note_links("Reference/hub.md")
+    assert {n["title"] for n in result["inbound"]} == {"a", "b", "shell"}
+    assert result["inbound_count"] == 3
+
+
+def test_note_links_marks_a_dead_target_broken_instead_of_dropping_it(linked):
+    """63 broken links exist in the real vault; omitting them would make a note
+    look better connected than it is."""
+    outbound = {o["target"]: o for o in linked.note_links("Reference/hub.md")["outbound"]}
+    assert outbound["leaf"]["broken"] is False
+    assert outbound["leaf"]["path"] == "Reference/leaf.md"
+    assert outbound["ghost"]["broken"] is True
+    assert outbound["ghost"]["path"] is None
+    assert linked.note_links("Reference/hub.md")["broken_count"] == 1
+
+
+def test_note_links_ignores_shell_syntax_inside_code_spans(linked):
+    """Uses _countable_wikilinks, the same filter vault_health uses — not
+    linker.existing_targets, whose bare regex counts `[[ -f x ]]` as a link.
+    On the real vault that difference is 606/176 versus 527/63."""
+    outbound = linked.note_links("Reference/shell.md")["outbound"]
+    assert [o["target"] for o in outbound] == ["hub"]
+
+
+def test_note_links_excludes_self_reference(linked):
+    assert all(n["title"] != "hub" for n in linked.note_links("Reference/hub.md")["inbound"])
+
+
+def test_note_links_note_with_no_links_is_empty_not_an_error(linked):
+    result = linked.note_links("Reference/leaf.md")
+    assert result["outbound"] == []
+    assert result["inbound_count"] == 1     # hub points at it
+
+
+def test_note_links_rejects_a_path_outside_the_vault(linked):
+    assert "error" in linked.note_links("../../etc/passwd")
+
+
+def test_note_links_rejects_a_directory(linked):
+    assert "error" in linked.note_links("Reference")

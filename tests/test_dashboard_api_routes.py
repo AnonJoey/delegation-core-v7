@@ -54,6 +54,13 @@ class FakeVault:
                 "notes": [{"title": "a", "path": f"{dir_rel}/a.md"},
                           {"title": "b", "path": f"{dir_rel}/b.md"}]}
 
+    def note_links(self, rel_path):
+        if rel_path == "bad":
+            return {"error": "Not a note: bad"}
+        return {"path": rel_path, "inbound": [{"title": "a", "path": "reference/a.md"}],
+                "outbound": [{"target": "ghost", "path": None, "broken": True}],
+                "inbound_count": 1, "broken_count": 1}
+
     def find_notes(self, query, limit=30):
         self.find_calls.append((query, limit))
         return [{"title": query, "path": f"reference/{query}.md", "match_rank": 0}]
@@ -295,3 +302,24 @@ def test_vault_search_non_numeric_limit_returns_clean_500_not_a_crash(server):
     status, body = _get(port, "/api/vault/search?q=x&limit=notanumber")
     assert status == 500
     assert "error" in body
+
+
+def test_vault_backlinks_returns_the_relation(server):
+    port, _, _ = server
+    status, body = _get(port, "/api/vault/backlinks?path=reference/hub.md")
+    assert status == 200
+    assert body["inbound_count"] == 1
+    assert body["outbound"][0]["broken"] is True
+
+
+def test_vault_backlinks_requires_a_path(server):
+    port, _, _ = server
+    status, body = _get(port, "/api/vault/backlinks")
+    assert status == 400
+    assert "error" in body
+
+
+def test_vault_backlinks_propagates_a_bad_path_as_400(server):
+    port, _, _ = server
+    status, _ = _get(port, "/api/vault/backlinks?path=bad")
+    assert status == 400

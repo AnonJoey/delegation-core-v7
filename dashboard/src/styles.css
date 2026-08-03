@@ -1734,3 +1734,35 @@ body {
   cursor: pointer;
 }
 .list-more:hover { opacity: 1; }
+
+/* Backlinks panel. The relation existed server-side from the start; only the
+   view was missing. Broken targets are rendered, not hidden — 63 of them exist
+   in this vault and omitting them would misreport how connected a note is. */
+.note-links {
+  margin-top: 1.5rem;
+  padding-top: 1rem;
+  border-top: 1px solid currentColor;
+  border-color: color-mix(in srgb, currentColor 15%, transparent);
+  display: flex;
+  gap: 2rem;
+  flex-wrap: wrap;
+}
+.note-links-group { min-width: 12rem; flex: 1 1 12rem; }
+.note-links-group h4 {
+  margin: 0 0 0.5rem;
+  font-size: 0.7rem;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  opacity: 0.6;
+}
+.note-link-row {
+  display: block;
+  padding: 0.2rem 0;
+  font-size: 0.8rem;
+  cursor: pointer;
+  text-decoration: none;
+  color: inherit;
+}
+.note-link-row:hover { text-decoration: underline; }
+.note-link-row.broken { opacity: 0.5; cursor: default; font-style: italic; }
+.note-link-row.broken:hover { text-decoration: none; }

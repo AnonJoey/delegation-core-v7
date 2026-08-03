@@ -567,6 +567,18 @@ async def vault_find_notes(query: str, limit: int = 30) -> str:
 
 
 @mcp.tool()
+async def vault_note_links(path: str) -> str:
+    """Inbound and outbound wikilinks for one note, by vault-relative path.
+
+    Answers "what references this note" without reading every candidate. Broken
+    outbound links are returned with broken=true rather than dropped, so a note
+    pointing at something that no longer exists is visible instead of silently
+    looking well-connected.
+    """
+    return json.dumps(_vault.note_links(path))
+
+
+@mcp.tool()
 async def vault_inbox_status() -> str:
     """Check what files are waiting in _inbox. Call BEFORE run_maintenance."""
     return json.dumps(_vault.inbox_status())

@@ -17,6 +17,7 @@ Endpoints:
   GET  /api/vault/tree               directory shape (path, depth, note count)
   GET  /api/vault/notes?dir=&offset= notes inside one directory, paginated
   GET  /api/vault/find?q=            literal title/path lookup (no embeddings)
+  GET  /api/vault/backlinks?path=    inbound + outbound wikilinks for one note
   GET  /api/vault/note?path=...      one note's raw content
   GET  /api/vault/search?q=...       BGE similarity search
   GET  /api/vault/graph              {nodes, edges} from [[wikilinks]] across the vault
@@ -340,6 +341,8 @@ class _Handler(BaseHTTPRequestHandler):
                 self._send_json(list_windows())
             elif parsed.path == "/api/vault/notes":
                 self._handle_vault_notes(parse_qs(parsed.query))
+            elif parsed.path == "/api/vault/backlinks":
+                self._handle_vault_backlinks(parse_qs(parsed.query))
             elif parsed.path == "/api/vault/find":
                 self._handle_vault_find(parse_qs(parsed.query))
             elif parsed.path == "/api/vault/tree":
@@ -679,6 +682,20 @@ class _Handler(BaseHTTPRequestHandler):
             self._send_json({"error": "offset and limit must be integers"}, status=400)
             return
         result = _vault.list_notes_in(dir_rel, offset=offset, limit=limit)
+        self._send_json(result, status=400 if "error" in result else 200)
+
+    def _handle_vault_backlinks(self, query) -> None:
+        """Which notes point at this one, and where this one points.
+
+        The relation was always computed (linker.inject_backlinks writes it into
+        note bodies on every write) but never exposed, so a reader saw only
+        whatever text happened to be in the note.
+        """
+        rel = (query.get("path") or [""])[0]
+        if not rel:
+            self._send_json({"error": "path is required"}, status=400)
+            return
+        result = _vault.note_links(rel)
         self._send_json(result, status=400 if "error" in result else 200)
 
     def _handle_vault_find(self, query) -> None:
