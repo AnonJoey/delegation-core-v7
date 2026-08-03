@@ -110,6 +110,34 @@ desktop dashboard. 31 public MCP tools (32 `@mcp.tool()` registrations; one,
 - **No real dpkg/rpm install test yet** — needs an actual Debian/Fedora box or VM.
 - **No auto-update** (Tauri updater plugin) — deliberate deferral.
 
+### Open items from the 2026-08-03 graph/vault fixes
+
+Found while ingesting a 7.7k-file repository (115.756 graph nodes). Diagnosed and
+recorded, deliberately **not** fixed in that change — see CHANGELOG "Unreleased".
+
+- **`remap_communities_to_previous()` has no caller.** Same class as the bug fixed
+  in that change (`label_communities_by_hub` was dead code for months). It exists to
+  keep community IDs stable across rebuilds; instead `graphbridge` works around the
+  instability by deleting and re-filing every vault article on every rebuild — the
+  code comments say so explicitly. Wiring it changes rebuild behaviour, so it wants
+  its own change and its own test.
+- **Five more "fabricating" fallbacks unaudited.** `x = x or <default>` appears 14
+  times in `src/`; most degrade to empty and are harmless, but seven invent a
+  plausible value the consumer cannot distinguish from a real one (the two fixed were
+  `graph/wiki.py:269` and `config.py:160`). The rest are unreviewed.
+- **`Config.load()` still degrades silently.** It falls back to `cls()` on any read
+  error, so a corrupt `config.json` yields empty `vault_path`/`llama_binary`/
+  `llama_model`. `VaultManager._init()` now refuses the empty vault case; the llama
+  fields have no equivalent guard.
+- **`community_labels` is still an optional parameter** on the four graph exporters,
+  which is what let the caller omit it unnoticed. Left optional on purpose: `graph/`
+  is a vendored copy of Graphify and changing upstream signatures makes re-vendoring
+  harder. The seam test (`test_build_graph_labels_communities_by_hub_in_every_artifact`)
+  is what prevents recurrence instead.
+- **Vault index vs note count.** `heartbeat()` reported `indexed_notes: 6707` against
+  `total_notes: 3877`; the gap is larger than the 727 externally-ingested files, so it
+  is either note chunking or stale ChromaDB rows. Not investigated.
+
 ## How to do things
 
 ```bash

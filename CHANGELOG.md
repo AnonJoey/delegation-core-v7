@@ -1,5 +1,66 @@
 # Changelog
 
+## Unreleased — 2026-08-03
+
+Found while ingesting the `hermes-agent` repository (7.7k files, 115.756 graph
+nodes) into the vault. The corpus was large enough to surface failures that a
+small graph hides: every one of these produced *plausible* output rather than an
+error, which is why they survived unnoticed.
+
+### Fixed
+
+1. **`label_communities_by_hub()` was never called — every graph artifact fell
+   back to "Community {cid}".** The function existed in `graph/cluster.py`,
+   correct and testable, with no caller anywhere in the repository.
+   `graphbridge.build_graph()` passed a literal `{}` as `render_report`'s
+   `community_labels` argument and omitted it entirely for `to_json`, `to_html`
+   and `to_wiki` — all four already accepted the parameter, and all four
+   silently used their fallback. A 2693-community build filed 2693 vault notes
+   titled `Community 0`..`Community 2692`: bodies searchable by embedding, but
+   titles and Obsidian graph node labels carrying no information at all.
+   Wiring the labeler in dropped generic names from 2693 to 0.
+
+2. **Hub selection named communities after imports.** With labels wired, the
+   first real build produced communities called `Any`, `Path` and `ValueError`.
+   Imported and builtin symbols accumulate high degree across a codebase and won
+   an unrestricted hub search. Nodes referenced but not defined in the corpus
+   carry an empty `source_file`, so hub selection is now restricted to
+   locally-defined symbols, falling back to the full set for communities that
+   contain none.
+
+3. **Hub selection named communities after docstrings.** Extractors attach
+   docstrings and test descriptions as node labels (`file_type == "rationale"`),
+   which produced 86 wiki articles — and therefore 86 vault filenames — like
+   `1000_comments_on_a_single_task_—_build_worker_context_should_....md`. Hub
+   candidates now require an identifier-shaped label. A community with no such
+   node (typically a single rationale node) is named after its dominant source
+   file's stem, plus a bounded excerpt to keep same-file communities distinct —
+   39 separate communities out of `tui_gateway/methods_session.py` had otherwise
+   collapsed to `methods_session` with `_2`..`_39` suffixes.
+
+4. **`safe_filename()` truncated mid-token.** The 50-character slice ran after
+   the trailing-punctuation strip, not before, so a real `write_note` call
+   produced the stem `"...dissecação da arquitetura ("` — a dangling opening
+   paren in the filename and in the note's graph node label. Truncation now cuts
+   on a word boundary when that keeps the stem recognisable, then strips
+   punctuation the cut can strand.
+
+5. **`VaultManager` silently indexed into the current working directory.** An
+   unset `vault_path` resolves to `Path(".")` — an existing directory, so no
+   existence check catches it — and `chroma_path.mkdir()` then created a
+   complete ChromaDB wherever the process happened to be running, reporting
+   success. `Config.load()` degrades to defaults on any read error, so a corrupt
+   `config.json` reaches this state in production, not just from a hand-written
+   script. `_init()` now refuses to start with an unconfigured `vault_path`.
+
+### Notes
+
+Items 1 and 5 share a shape worth naming: a fallback that *fabricates* a
+plausible value rather than degrading to empty. `test_graphbridge.py` documented
+that it did not exercise `build_graph()` because the extraction stages are heavy
+— and that is exactly where item 1 lived. The new seam test fakes those stages
+and runs the labeler for real, in 0.1s.
+
 ## v0.6.4 — 2026-07-09
 
 Found during the v6.3 install on Abner's Windows machine (workarounds applied manually
