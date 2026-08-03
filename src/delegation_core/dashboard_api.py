@@ -128,7 +128,7 @@ def _find_llama_process():
 _VAULT_GRAPH_MAX_NODES = 1500
 
 
-def _build_vault_graph(cfg, include_generated: bool = True,
+def _build_vault_graph(cfg, include_generated: bool = False,
                        max_nodes: int = _VAULT_GRAPH_MAX_NODES) -> dict:
     """Parse every vault note for [[wikilinks]] and return {nodes, edges}.
 
@@ -137,20 +137,26 @@ def _build_vault_graph(cfg, include_generated: bool = True,
     Reuses linker.py's own wikilink regex (existing_targets) rather than
     re-deriving the [[stem|Display]]/[[stem#section]] parsing rules.
 
-    Two bounds, both reported in the response rather than applied silently:
+    This is the *knowledge* graph. Code graphs are a separate thing with their
+    own artifacts (graph.json/graph.html/callflow.html under
+    ``~/.delegation_core/graphs/<name>/``), their own API (``/api/graphs``) and
+    their own pane behind the dashboard's Vault/Code toggle — so their wiki
+    articles are excluded here by default rather than mixed in. They were mixed
+    in only because graph_build files them into a vault folder to make them
+    searchable: on this vault that meant 3661 generated articles against 216
+    hand-written notes, i.e. the "vault" view was 94% one codebase.
 
-    - ``include_generated=False`` drops graph_build's wiki articles. A single
-      code-graph build files thousands of them (one run put 2711 into a vault
-      that held 1166 hand-written notes), so the unfiltered view stops being a
-      picture of the user's own knowledge and becomes a picture of one codebase.
-    - ``max_nodes`` caps what is sent to the canvas, keeping the newest notes.
-      The renderer is force-directed and every node costs per frame.
+    Membership uses ``VaultManager.classify_path`` — the same rule that already
+    backs ``search_vault(scope=...)`` — rather than a second, parallel
+    definition of what counts as generated.
 
-    Callers get ``total_nodes``/``truncated``/``generated_excluded`` so "3877
-    notes, showing 1500" is never mistaken for "1500 notes".
+    ``max_nodes`` additionally caps what reaches the canvas, keeping the newest
+    notes; the renderer is force-directed and every node costs per frame.
+    ``total_nodes``/``truncated``/``generated_excluded`` are reported so a
+    bounded answer is never mistaken for a complete one.
     """
     from .linker import existing_targets
-    from .vault import yaml_unquote_scalar
+    from .vault import VaultManager, yaml_unquote_scalar
 
     vault = cfg.vault
     notes: dict[str, dict] = {}   # lowercase stem -> {id, title, folder, path}
@@ -175,7 +181,7 @@ def _build_vault_graph(cfg, include_generated: bool = True,
                             title = yaml_unquote_scalar(line.split(":", 1)[1])
                             break
             rel = str(f.relative_to(vault))
-            if not include_generated and "source: graph_build" in content[:400]:
+            if not include_generated and VaultManager.classify_path(rel)[0] == "generated":
                 generated_skipped += 1
                 continue
             key = f.stem.lower()

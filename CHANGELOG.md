@@ -83,16 +83,22 @@ error, which is why they survived unnoticed.
   them. `VaultManager.count_notes()` is new; the MCP tool now returns
   `total`/`truncated` and the route returns per-folder `counts`.
 
-- **`/api/vault/graph` is bounded and can hide generated articles.** It had no
-  cap at all: a code-graph build took the payload from ~1100 nodes to 3552 and
-  the force-directed canvas rendered every one. Nodes are now capped at 1500
-  (newest first, edges built after the cut so none can dangle) with
-  `total_nodes`/`truncated`/`max_nodes` in the response, and `?generated=0`
-  drops graph_build's articles. On this vault that is the difference between
-  3552 nodes and the 216 notes actually written by hand — the dashboard graph
-  had become a picture of one codebase rather than of the user's knowledge. The
-  dashboard exposes the filter as a checkbox and states the bounds under the
-  legend.
+- **`/api/vault/graph` is the knowledge graph again, and is bounded.** Code
+  graphs were already a separate thing — their own artifacts under
+  `~/.delegation_core/graphs/<name>/`, their own `/api/graphs` endpoints, their
+  own pane behind the dashboard's Vault/Code toggle, and their own
+  `search_vault(scope="generated")` filter via `VaultManager.classify_path`.
+  They leaked into the vault view only because graph_build files their articles
+  into a vault folder to make them searchable, and this endpoint re-derived
+  membership from the filesystem instead of using that existing classification.
+  On this vault the Vault pane was 3552 nodes of which 216 were hand-written —
+  94% of the "knowledge graph" was one codebase. Generated articles are now
+  excluded by default (`?generated=1` opts back in), using `classify_path`
+  rather than a second definition of what counts as generated. The result is
+  221 nodes / 421 edges / 82 KB instead of 3552 nodes / 600 KB. Nodes are also
+  capped at 1500 (newest first, edges built after the cut so none can dangle)
+  with `total_nodes`/`truncated`/`max_nodes` reported, and the pane states its
+  own scope under the legend.
 
 ### Notes
 

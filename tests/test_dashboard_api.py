@@ -105,8 +105,10 @@ def _note(vault, folder, name, body="body"):
     (d / f"{name}.md").write_text(f"---\ntitle: \"{name}\"\n---\n\n{body}\n", encoding="utf-8")
 
 
-def _generated_note(vault, folder, name):
-    d = vault / folder
+def _generated_note(vault, folder, name, graph="somerepo"):
+    """Generated articles are identified by their path — the same rule
+    search_vault(scope=...) uses — not by sniffing their frontmatter."""
+    d = vault / folder / "graphs" / graph
     d.mkdir(parents=True, exist_ok=True)
     (d / f"{name}.md").write_text(
         f'---\ntitle: "{name}"\nai_generated: false\nsource: graph_build\n---\n\nbody\n',
@@ -157,13 +159,15 @@ def test_graph_can_exclude_generated_articles(tmp_path):
     for i in range(4):
         _generated_note(tmp_path, "reference", f"gen{i}")
 
-    full = _build_vault_graph(cfg)
-    assert len(full["nodes"]) == 5
-    assert full["generated_excluded"] == 0
+    # Default is the knowledge graph: code-graph articles live behind the
+    # dashboard's Code view and its own /api/graphs, not mixed in here.
+    knowledge = _build_vault_graph(cfg)
+    assert [n["title"] for n in knowledge["nodes"]] == ["hand-written"]
+    assert knowledge["generated_excluded"] == 4
 
-    filtered = _build_vault_graph(cfg, include_generated=False)
-    assert [n["title"] for n in filtered["nodes"]] == ["hand-written"]
-    assert filtered["generated_excluded"] == 4
+    combined = _build_vault_graph(cfg, include_generated=True)
+    assert len(combined["nodes"]) == 5
+    assert combined["generated_excluded"] == 0
 
 
 def test_graph_nodes_carry_no_internal_sort_key(tmp_path):

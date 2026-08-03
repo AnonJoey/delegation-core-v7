@@ -1160,31 +1160,23 @@ class ForceGraph {
   }
 }
 
-// The vault graph is capped and can hide generated articles; both bounds are
-// reported by the API so the view never passes off a subset as the whole vault.
-function graphIncludeGenerated() {
-  const el = document.getElementById("graph-generated-toggle");
-  return el ? el.checked : true;
-}
-
+// This pane is the knowledge graph; code-graph articles belong to the Code view
+// next to it. The API states its own bounds so a capped or filtered answer is
+// never rendered as if it were the whole vault.
 function renderGraphScope(data) {
   const wrap = document.getElementById("graph-scope");
   const note = document.getElementById("graph-scope-note");
-  const toggle = document.getElementById("graph-generated-toggle");
   if (!wrap || !note) return;
   wrap.hidden = false;
-  const parts = [];
-  if (data.truncated) {
-    parts.push(`showing the ${data.nodes.length} most recent of ${data.total_nodes} notes`);
-  } else {
-    parts.push(`${data.nodes.length} notes`);
+  const parts = [
+    data.truncated
+      ? `showing the ${data.nodes.length} most recent of ${data.total_nodes} notes`
+      : `${data.nodes.length} notes`,
+  ];
+  if (data.generated_excluded) {
+    parts.push(`${data.generated_excluded} code-graph articles are under Code`);
   }
-  if (data.generated_excluded) parts.push(`${data.generated_excluded} generated hidden`);
   note.textContent = parts.join(" · ");
-  if (toggle && !toggle.dataset.bound) {
-    toggle.dataset.bound = "1";
-    toggle.addEventListener("change", () => initVaultGraph());
-  }
 }
 
 async function initVaultGraph() {
@@ -1193,8 +1185,7 @@ async function initVaultGraph() {
   const legendEl = document.getElementById("graph-legend");
 
   try {
-    const includeGenerated = graphIncludeGenerated();
-    const data = await apiGet(`/api/vault/graph?generated=${includeGenerated ? "1" : "0"}`);
+    const data = await apiGet("/api/vault/graph");
     stateEl.hidden = true;
     renderGraphScope(data);
 
