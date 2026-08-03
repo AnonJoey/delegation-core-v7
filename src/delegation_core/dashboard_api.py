@@ -26,6 +26,7 @@ Endpoints:
   GET  /api/processes/get?id=...     full detail of one process
   POST /api/vault/note/create        {folder, title, content} -> new dated note
   POST /api/vault/note/save          {path, content} -> overwrite + reindex
+  POST /api/vault/note/rename        {path, new_title} -> rename + repoint links
   POST /api/processes/create         {name, description, steps: [str]}
   POST /api/processes/update         {process_id, note, step_done, status}
 
@@ -405,7 +406,9 @@ class _Handler(BaseHTTPRequestHandler):
     def do_POST(self):
         parsed = urlparse(self.path)
         try:
-            if parsed.path == "/api/vault/note/create":
+            if parsed.path == "/api/vault/note/rename":
+                self._handle_note_rename()
+            elif parsed.path == "/api/vault/note/create":
                 self._handle_note_create()
             elif parsed.path == "/api/vault/note/save":
                 self._handle_note_save()
@@ -609,6 +612,23 @@ class _Handler(BaseHTTPRequestHandler):
         )
         self._send_json(result, status=400 if "error" in result else 200)
 
+    def _handle_note_rename(self) -> None:
+        """Rename a note and repoint every wikilink aimed at it.
+
+        Renaming without the rewrite is silent corruption — this branch broke
+        two of its own links that way before the operation existed.
+        """
+        data = self._read_json_body()
+        if data is None:
+            return
+        rel = str(data.get("path", "")).strip()
+        title = str(data.get("new_title", "")).strip()
+        if not rel or not title:
+            self._send_json({"error": "path and new_title are required"}, status=400)
+            return
+        result = _notewriter.rename_note(_vault, rel, title)
+        self._send_json(result, status=400 if "error" in result else 200)
+
     def _handle_note_save(self) -> None:
         """Overwrite an existing note's raw text and reindex it."""
         data = self._read_json_body()
@@ -787,7 +807,11 @@ class _Handler(BaseHTTPRequestHandler):
         if not q:
             self._send_json({"error": "missing q parameter"}, status=400)
             return
-        self._send_json({"query": q, "results": _vault.search(q, limit=limit)})
+        # Same default as the MCP tool: this vault is 95% generated articles,
+        # so an unscoped search buries the user's own notes.
+        scope = (query.get("scope") or ["notes"])[0]
+        self._send_json({"query": q, "scope": scope,
+                         "results": _vault.search(q, limit=limit, scope=scope)})
 
 
 def _start_parent_watchdog(parent_pid: int, server: ThreadingHTTPServer) -> None:

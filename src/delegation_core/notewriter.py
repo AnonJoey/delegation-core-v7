@@ -15,11 +15,18 @@ their own VaultManager.
 from __future__ import annotations
 
 import logging
+import re
 from datetime import datetime
 from pathlib import Path
 
 from .linker import inject_backlinks, wikilinks
-from .vault import compose_note, resolve_in_vault, safe_filename, unique_note_path
+from .vault import (
+    compose_note,
+    resolve_in_vault,
+    safe_filename,
+    unique_note_path,
+    yaml_quote_scalar,
+)
 
 logger = logging.getLogger("notewriter")
 
@@ -113,3 +120,115 @@ def save_note(vault, rel_path: str, content: str) -> dict:
     # Deliberately no post_write_links here: appending a "## Related" block to
     # text the user just typed would edit their note behind them on every save.
     return {"status": "ok", "path": rel, "bytes": len(content.encode("utf-8"))}
+
+
+# `[[target]]`, `[[target#section]]`, `[[target|display]]`, `[[target#s|d]]`.
+# 71 links in this vault carry a section or display part, so a rewriter that
+# replaced whole links would silently discard them.
+_LINK_RE = re.compile(r"\[\[([^\]|#]+)((?:#[^\]|]+)?(?:\|[^\]]+)?)\]\]")
+
+
+def _retarget(content: str, old_stem: str, new_stem: str) -> str:
+    """Point every `[[old_stem…]]` at new_stem, keeping section and display parts."""
+    def sub(m):
+        if m.group(1).strip().lower() != old_stem.lower():
+            return m.group(0)
+        return f"[[{new_stem}{m.group(2)}]]"
+    return _LINK_RE.sub(sub, content)
+
+
+def rename_note(vault, rel_path: str, new_title: str) -> dict:
+    """Rename a note and repoint every wikilink that referenced it.
+
+    Renaming without this is silent corruption: a stem is a note's link
+    identity, so moving it breaks every `[[stem]]` aimed at it and nothing
+    reports the break until someone clicks. It happened during this branch's own
+    work — a note renamed by hand left two links dangling — and the blast radius
+    here reaches 33 files for the most-referenced note.
+
+    Writes are staged and applied together; if any write fails the files already
+    written are restored, so a half-renamed vault is not a reachable state.
+    """
+    cfg = vault.cfg
+    src = resolve_in_vault(cfg.vault, rel_path)
+    if src is None:
+        return {"error": f"Path outside the vault: {rel_path}"}
+    if not src.is_file() or src.suffix != ".md":
+        return {"error": f"Not a note: {rel_path}"}
+    new_title = (new_title or "").strip()
+    if not new_title:
+        return {"error": "new_title is required"}
+
+    old_stem = src.stem
+    # Keep a leading YYYY-MM-DD-: the note's creation date does not change
+    # because its title did.
+    date_prefix = ""
+    m = re.match(r"^(\d{4}-\d{2}-\d{2}-)(.*)$", old_stem)
+    if m:
+        date_prefix = m.group(1)
+    new_stem = f"{date_prefix}{safe_filename(new_title)}"
+    if new_stem == old_stem:
+        return {"error": "New title resolves to the same filename"}
+    dest = src.with_name(f"{new_stem}.md")
+    if dest.exists():
+        return {"error": f"A note named {dest.name} already exists"}
+
+    # Stage every file this touches before writing any of them.
+    staged: list[tuple[Path, str, str]] = []          # (path, before, after)
+    try:
+        own = src.read_text(encoding="utf-8")
+    except OSError as e:
+        return {"error": f"Could not read {rel_path}: {e}"}
+    # The frontmatter title is what readers see; leaving the old one would show
+    # a note whose displayed name disagrees with its filename.
+    own_new = re.sub(r'^title:.*$', f"title: {yaml_quote_scalar(new_title)}",
+                     own, count=1, flags=re.MULTILINE)
+    staged.append((src, own, own_new))
+
+    referrers = []
+    for folder in cfg.vault_folders:
+        root = cfg.vault / folder
+        if not root.exists():
+            continue
+        for f in root.rglob("*.md"):
+            if f == src:
+                continue
+            try:
+                text = f.read_text(encoding="utf-8")
+            except OSError:
+                continue
+            retargeted = _retarget(text, old_stem, new_stem)
+            if retargeted != text:
+                staged.append((f, text, retargeted))
+                referrers.append(str(f.relative_to(cfg.vault)))
+
+    written: list[tuple[Path, str]] = []
+    try:
+        for path, before, after in staged:
+            path.write_text(after, encoding="utf-8")
+            written.append((path, before))
+        src.rename(dest)
+    except OSError as e:
+        for path, before in written:
+            try:
+                path.write_text(before, encoding="utf-8")
+            except OSError:
+                logger.error("Rollback failed for %s — vault may be inconsistent", path)
+        return {"error": f"Rename failed, changes rolled back: {e}"}
+
+    new_rel = str(dest.relative_to(cfg.vault))
+    folder = new_rel.split("/")[0]
+    vault.delete_notes([rel_path])
+    vault.index_note(dest.read_text(encoding="utf-8"),
+                     {"title": new_title, "path": new_rel, "folder": folder})
+    for path, _, after in staged[1:]:
+        rel = str(path.relative_to(cfg.vault))
+        vault.index_note(after, {"title": path.stem, "path": rel,
+                                 "folder": rel.split("/")[0]})
+    try:
+        (Path.home() / ".delegation_core" / "vault_health.json").unlink(missing_ok=True)
+    except Exception:
+        pass
+
+    return {"status": "ok", "path": new_rel, "previous_path": rel_path,
+            "links_rewritten": len(referrers), "referrers": referrers}

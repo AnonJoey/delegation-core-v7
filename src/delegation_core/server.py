@@ -158,7 +158,7 @@ def _confidence(top_sim: float, model_name: str) -> str:
 
 @mcp.tool()
 async def search_vault(query: str, limit: int = 5, use_local: bool = False,
-                        scope: str = "all", graph: str = "", snippet_chars: int = 0) -> str:
+                        scope: str = "notes", graph: str = "", snippet_chars: int = 0) -> str:
     """
     CALL THIS FIRST before answering any question that could have prior context.
     Semantic search the Obsidian vault using BGE embeddings.
@@ -167,18 +167,31 @@ async def search_vault(query: str, limit: int = 5, use_local: bool = False,
     force the local model to write the summary (hybrid mode).
     Cite 'sources' titles when referencing notes. Flat token cost regardless of vault size.
 
-    scope narrows what is searched — 'notes' (hand-written only), 'generated'
-    (graph_build wiki articles), 'external' (ingest_folder'd files), 'all' (default).
-    graph='<name>' restricts to one built code graph. Each hit carries its 'kind'.
+    scope narrows what is searched — 'notes' (hand-written only, THE DEFAULT),
+    'generated' (graph_build wiki articles), 'external' (ingest_folder'd files),
+    'all' (everything). graph='<name>' restricts to one built code graph.
+    Each hit carries its 'kind'.
+
+    The default is 'notes' because a vault carrying code graphs is mostly not the
+    user's writing: this one holds 3692 generated articles against 187
+    hand-written notes, and under scope='all' a search for the exact title of a
+    note written minutes earlier returned two unrelated generated articles
+    instead. Widen deliberately — use 'generated' or graph='<name>' for questions
+    about a codebase, 'external' for ingested files, 'all' to sweep everything.
+    Every response names the scope it used.
     snippet_chars caps snippet length (0 = default); lower it when you only need
     titles and paths, since in agent mode every snippet is spent from your context.
     """
     hits = _vault.search(query, limit=limit, scope=scope, graph=graph,
                          snippet_chars=snippet_chars or 800)
+    # Stating the scope on every response, not only on a miss: a caller reading
+    # three results has no way to tell a narrow search from an exhaustive one.
+    scope_used = "generated" if graph else scope
     if not hits:
-        empty = {"query": query, "summary": "No results above similarity threshold.", "sources": []}
-        if scope != "all" or graph:
-            empty["note"] = (f"Searched scope={scope!r}"
+        empty = {"query": query, "summary": "No results above similarity threshold.",
+                 "sources": [], "scope": scope_used}
+        if scope_used != "all":
+            empty["note"] = (f"Searched scope={scope_used!r}"
                              + (f", graph={graph!r}" if graph else "")
                              + " — retry with scope='all' to widen.")
         return json.dumps(empty)
@@ -197,6 +210,7 @@ async def search_vault(query: str, limit: int = 5, use_local: bool = False,
     if route in ("agent", "offer"):
         payload = {
             "query": query, "summary": None, "sources": hits, "mode": route,
+            "scope": scope_used,
             "instruction": "No server-side summary — read the 'sources' snippets and "
                            "synthesize the answer yourself.",
             "quality": {"confidence": confidence, "top_similarity": top_sim,
@@ -220,6 +234,7 @@ async def search_vault(query: str, limit: int = 5, use_local: bool = False,
         logger.warning("search_vault: llama.cpp summarization failed (%s) — returning raw hits", e)
         return json.dumps({
             "query": query, "summary": None, "sources": hits, "degraded": True,
+            "scope": scope_used,
             "note": "llama.cpp offline — returning raw snippets without summarization.",
             "quality": {"confidence": confidence, "top_similarity": top_sim,
                         "sources_found": len(hits), "output_empty": True},
@@ -227,7 +242,7 @@ async def search_vault(query: str, limit: int = 5, use_local: bool = False,
 
     output_empty = not summary or len(summary.strip()) < 20
     return json.dumps({
-        "query": query, "summary": summary, "sources": hits,
+        "query": query, "summary": summary, "sources": hits, "scope": scope_used,
         "quality": {"confidence": confidence, "top_similarity": top_sim,
                     "sources_found": len(hits), "output_empty": output_empty},
     })
@@ -526,6 +541,19 @@ async def vault_find_notes(query: str, limit: int = 30) -> str:
     """
     results = _vault.find_notes(query, limit=limit)
     return json.dumps({"query": query, "count": len(results), "results": results})
+
+
+@mcp.tool()
+async def vault_rename_note(path: str, new_title: str) -> str:
+    """Rename a note and repoint every [[wikilink]] that referenced it.
+
+    Renaming a note by any other means breaks its inbound links silently — a
+    stem is the note's link identity. Section anchors and display text
+    (`[[stem#Summary|label]]`) are preserved. Returns how many notes were
+    rewritten. Staged and rolled back on failure, so a half-renamed vault is not
+    a reachable state.
+    """
+    return json.dumps(_notewriter.rename_note(_vault, path, new_title))
 
 
 @mcp.tool()

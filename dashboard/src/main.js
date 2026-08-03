@@ -782,6 +782,7 @@ function setupNoteActions() {
   document.getElementById("btn-cancel-edit").addEventListener("click", () => exitEditMode());
   document.getElementById("btn-save-note").addEventListener("click", () => saveCurrentNote());
   document.getElementById("btn-new-note").addEventListener("click", () => createNoteHere());
+  document.getElementById("btn-rename-note").addEventListener("click", () => renameCurrentNote());
 }
 
 // ── Editing ───────────────────────────────────────────────────────────────────
@@ -836,6 +837,28 @@ async function saveCurrentNote() {
     await selectNote(currentNotePath, null);   // re-read from disk, re-render, refresh links
   } catch (e) {
     editorStatus(`Save failed: ${e.message}`, true);
+  }
+}
+
+async function renameCurrentNote() {
+  if (!currentNotePath) return;
+  const current = currentNotePath.split("/").pop().replace(/\.md$/, "");
+  const title = prompt("Rename note to:", current);
+  if (!title || !title.trim() || title.trim() === current) return;
+  editorStatus("Renaming…");
+  try {
+    const res = await apiPost("/api/vault/note/rename", {
+      path: currentNotePath,
+      new_title: title.trim(),
+    });
+    if (res.error) throw new Error(res.error);
+    // The server repoints every [[wikilink]] aimed at the old stem; say how
+    // many, since that is the part a user cannot verify by looking.
+    editorStatus(`Renamed — ${res.links_rewritten} note(s) repointed`);
+    await loadNotes(selectedFolder);
+    await selectNote(res.path, null);
+  } catch (e) {
+    editorStatus(`Rename failed: ${e.message}`, true);
   }
 }
 
