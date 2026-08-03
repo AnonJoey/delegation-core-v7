@@ -146,3 +146,60 @@ def test_health_summary_is_cached_between_calls(vault, tmp_path):
 
     assert cache.exists()
     assert json.loads(cache.read_text(encoding="utf-8"))["orphans"] == first["orphans"]
+
+
+def test_folder_name_markers_are_not_counted_as_broken_links(tmp_path):
+    """This vault ends notes with `[[reference]] #digest #pdf` — a categorisation
+    marker naming a folder, not a link to a note. 12 of 26 reported broken links
+    were these, and no note will ever exist to satisfy them."""
+    from delegation_core.config import Config
+    from delegation_core.vault import VaultManager
+
+    cfg = Config(vault_path=str(tmp_path), vault_folders=["Reference", "Tools"])
+    ref = tmp_path / "Reference"
+    ref.mkdir(parents=True)
+    (tmp_path / "Tools").mkdir()
+    (ref / "marked.md").write_text(
+        "---\ntitle: marked\n---\n\nbody\n\n[[reference]] #digest\n", encoding="utf-8")
+    (ref / "genuinely-broken.md").write_text(
+        "---\ntitle: gb\n---\n\nSee [[note-that-never-existed]].\n", encoding="utf-8")
+
+    health = VaultManager(cfg).get_health_summary()
+    assert health["broken_links"] == 1     # the real one only
+
+
+def test_the_vault_directory_name_is_also_a_marker(tmp_path):
+    from delegation_core.config import Config
+    from delegation_core.vault import VaultManager
+
+    vault = tmp_path / "Claude Vault"
+    (vault / "Reference").mkdir(parents=True)
+    cfg = Config(vault_path=str(vault), vault_folders=["Reference"])
+    (vault / "Reference" / "n.md").write_text(
+        "---\ntitle: n\n---\n\nx\n\n[[Claude Vault]] #decision\n", encoding="utf-8")
+
+    assert VaultManager(cfg).get_health_summary()["broken_links"] == 0
+
+
+def test_health_cache_is_keyed_by_vault(tmp_path):
+    """The cache path is fixed at ~/.delegation_core/vault_health.json, so
+    without a vault key a second vault — another profile, or a dashboard sidecar
+    pointed elsewhere — is served the first one's numbers for five minutes.
+    Found when two tests over different temp vaults returned identical health:
+    the second never ran."""
+    from delegation_core.config import Config
+    from delegation_core.vault import VaultManager
+
+    def build(name, broken_links):
+        vault = tmp_path / name
+        (vault / "Reference").mkdir(parents=True)
+        body = "".join(f"See [[missing-{i}]].\n" for i in range(broken_links))
+        (vault / "Reference" / "n.md").write_text(
+            f"---\ntitle: n\n---\n\n{body}", encoding="utf-8")
+        return Config(vault_path=str(vault), vault_folders=["Reference"])
+
+    first = VaultManager(build("vault-a", 1)).get_health_summary()
+    second = VaultManager(build("vault-b", 3)).get_health_summary()
+
+    assert first["broken_links"] == 1
+    assert second["broken_links"] == 3

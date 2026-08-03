@@ -830,8 +830,15 @@ class VaultManager:
         if cache_path.exists():
             try:
                 cached = json.loads(cache_path.read_text(encoding="utf-8"))
-                if now - cached.get("computed_at_ts", 0) < 300:
+                # Keyed by vault: the cache path is fixed, so without this a
+                # second vault — another profile, or a dashboard sidecar pointed
+                # elsewhere — is served the first one's numbers for five minutes.
+                # Found when two tests over different temp vaults returned
+                # identical health: the second never ran.
+                same_vault = cached.get("vault_path") == str(self.cfg.vault)
+                if same_vault and now - cached.get("computed_at_ts", 0) < 300:
                     cached.pop("computed_at_ts", None)
+                    cached.pop("vault_path", None)
                     return cached
             except Exception:
                 pass
@@ -881,6 +888,9 @@ class VaultManager:
             if stem not in resolvable:
                 resolvable.add(stem)
 
+        # Folder names (and the vault's own name) used as markers, lowercased.
+        folder_markers = {f.lower() for f in self.cfg.vault_folders}
+        folder_markers.add(self.cfg.vault.name.lower())
         total = needs_repair = truncated = orphans = broken_links = 0
         linked_to: set[str] = set()       # stems that are the target of a resolvable link
 
@@ -931,6 +941,12 @@ class VaultManager:
                     key = link.lower()
                     if key in resolvable:
                         linked_to.add(key)
+                    elif key in folder_markers:
+                        # This vault ends notes with `[[reference]] #digest #pdf`
+                        # — a categorisation marker naming a folder, not a link
+                        # to a note. 12 of the 26 "broken links" were these, and
+                        # no note will ever exist to satisfy them.
+                        continue
                     else:
                         broken_links += 1
             except Exception:
@@ -959,7 +975,8 @@ class VaultManager:
         }
         try:
             cache_path.write_text(
-                json.dumps({**result, "computed_at_ts": now}, indent=2), encoding="utf-8"
+                json.dumps({**result, "computed_at_ts": now,
+                        "vault_path": str(self.cfg.vault)}, indent=2), encoding="utf-8"
             )
         except Exception:
             pass
