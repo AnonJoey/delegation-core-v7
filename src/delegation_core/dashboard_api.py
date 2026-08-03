@@ -125,13 +125,29 @@ def _find_llama_process():
     return None
 
 
-def _build_vault_graph(cfg) -> dict:
+_VAULT_GRAPH_MAX_NODES = 1500
+
+
+def _build_vault_graph(cfg, include_generated: bool = True,
+                       max_nodes: int = _VAULT_GRAPH_MAX_NODES) -> dict:
     """Parse every vault note for [[wikilinks]] and return {nodes, edges}.
 
     Dependency-free on purpose (no networkx) — the vault graph view shouldn't
     require the [graph] extra, which is for the separate *code* graph pipeline.
     Reuses linker.py's own wikilink regex (existing_targets) rather than
     re-deriving the [[stem|Display]]/[[stem#section]] parsing rules.
+
+    Two bounds, both reported in the response rather than applied silently:
+
+    - ``include_generated=False`` drops graph_build's wiki articles. A single
+      code-graph build files thousands of them (one run put 2711 into a vault
+      that held 1166 hand-written notes), so the unfiltered view stops being a
+      picture of the user's own knowledge and becomes a picture of one codebase.
+    - ``max_nodes`` caps what is sent to the canvas, keeping the newest notes.
+      The renderer is force-directed and every node costs per frame.
+
+    Callers get ``total_nodes``/``truncated``/``generated_excluded`` so "3877
+    notes, showing 1500" is never mistaken for "1500 notes".
     """
     from .linker import existing_targets
     from .vault import yaml_unquote_scalar
@@ -139,6 +155,7 @@ def _build_vault_graph(cfg) -> dict:
     vault = cfg.vault
     notes: dict[str, dict] = {}   # lowercase stem -> {id, title, folder, path}
     contents: dict[str, str] = {}  # lowercase stem -> raw content (for link extraction)
+    generated_skipped = 0
 
     for folder in cfg.vault_folders:
         folder_path = vault / folder
@@ -158,9 +175,24 @@ def _build_vault_graph(cfg) -> dict:
                             title = yaml_unquote_scalar(line.split(":", 1)[1])
                             break
             rel = str(f.relative_to(vault))
+            if not include_generated and "source: graph_build" in content[:400]:
+                generated_skipped += 1
+                continue
             key = f.stem.lower()
-            notes[key] = {"id": key, "title": title, "folder": folder, "path": rel}
+            notes[key] = {"id": key, "title": title, "folder": folder, "path": rel,
+                          "mtime": f.stat().st_mtime}
             contents[key] = content
+
+    total_nodes = len(notes)
+    if total_nodes > max_nodes:
+        # Keep the newest — an over-cap vault is one where recent work matters
+        # more than a note filed months ago. Edges are built after the cut so
+        # no edge can point at a node the client never received.
+        keep = sorted(notes.items(), key=lambda kv: kv[1]["mtime"], reverse=True)[:max_nodes]
+        notes = dict(keep)
+        contents = {k: contents[k] for k in notes}
+    for node in notes.values():
+        node.pop("mtime", None)
 
     edges = []
     seen_edges = set()
@@ -175,7 +207,14 @@ def _build_vault_graph(cfg) -> dict:
             seen_edges.add(edge)
             edges.append({"source": key, "target": target_key})
 
-    return {"nodes": list(notes.values()), "edges": edges}
+    return {
+        "nodes": list(notes.values()),
+        "edges": edges,
+        "total_nodes": total_nodes,
+        "truncated": total_nodes > len(notes),
+        "max_nodes": max_nodes,
+        "generated_excluded": generated_skipped,
+    }
 
 
 def _status(cfg, vault) -> dict:
@@ -298,7 +337,9 @@ class _Handler(BaseHTTPRequestHandler):
             elif parsed.path == "/api/vault/search":
                 self._handle_vault_search(query)
             elif parsed.path == "/api/vault/graph":
-                self._send_json(_build_vault_graph(_cfg))
+                q = parse_qs(parsed.query)
+                include_generated = (q.get("generated") or ["1"])[0] != "0"
+                self._send_json(_build_vault_graph(_cfg, include_generated=include_generated))
             elif parsed.path == "/api/graphs":
                 from . import graphbridge
                 self._send_json(graphbridge.list_graphs(_cfg))
@@ -604,8 +645,17 @@ class _Handler(BaseHTTPRequestHandler):
         self._send_json({"status": "stopped"})
 
     def _handle_vault_tree(self) -> None:
-        tree = {folder: _vault.list_notes(folder, limit=1000) for folder in _cfg.vault_folders}
-        self._send_json({"folders": tree})
+        limit = 1000
+        tree, counts = {}, {}
+        for folder in _cfg.vault_folders:
+            notes = _vault.list_notes(folder, limit=limit)
+            total = _vault.count_notes(folder)
+            tree[folder] = notes
+            # A folder can hold thousands of generated articles; without this the
+            # browser silently showed its newest 1000 as if that were all of them.
+            counts[folder] = {"shown": len(notes), "total": total,
+                              "truncated": total > len(notes)}
+        self._send_json({"folders": tree, "counts": counts, "limit": limit})
 
     def _handle_vault_note(self, query) -> None:
         rel_path = (query.get("path") or [""])[0]

@@ -1671,3 +1671,26 @@ body {
   grid-template-columns: 1fr 1fr;
   gap: 16px;
 }
+
+/* Vault graph scope controls — the graph is capped and can hide generated
+   articles, so the view states its own bounds instead of implying it is whole. */
+.graph-scope {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  flex-wrap: wrap;
+  font-size: 0.75rem;
+  padding: 0.25rem 0 0;
+}
+.graph-scope label {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  cursor: pointer;
+}
+/* A truncated folder count reads "1000 of 3715" — flagged so it is not
+   mistaken for a plain total. */
+.count-truncated {
+  opacity: 0.85;
+  font-variant-numeric: tabular-nums;
+}

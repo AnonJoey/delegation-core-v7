@@ -75,6 +75,25 @@ error, which is why they survived unnoticed.
   4268 files). Passing the same patterns to `graph_preview` sizes the build
   before committing to it.
 
+- **Every listing surface now reports what it is hiding.** The same shape as
+  items 1 and 5, on the read side: `vault_list_notes` truncated with a bare
+  slice and `/api/vault/tree` capped each folder at 1000, both returning a short
+  list that looked exactly like a short folder. With `Reference` holding 3715
+  notes the dashboard's browser showed its newest 1000 as if that were all of
+  them. `VaultManager.count_notes()` is new; the MCP tool now returns
+  `total`/`truncated` and the route returns per-folder `counts`.
+
+- **`/api/vault/graph` is bounded and can hide generated articles.** It had no
+  cap at all: a code-graph build took the payload from ~1100 nodes to 3552 and
+  the force-directed canvas rendered every one. Nodes are now capped at 1500
+  (newest first, edges built after the cut so none can dangle) with
+  `total_nodes`/`truncated`/`max_nodes` in the response, and `?generated=0`
+  drops graph_build's articles. On this vault that is the difference between
+  3552 nodes and the 216 notes actually written by hand — the dashboard graph
+  had become a picture of one codebase rather than of the user's knowledge. The
+  dashboard exposes the filter as a checkbox and states the bounds under the
+  legend.
+
 ### Notes
 
 Items 1 and 5 share a shape worth naming: a fallback that *fabricates* a

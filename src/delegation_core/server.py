@@ -537,11 +537,18 @@ async def run_maintenance() -> str:
 
 @mcp.tool()
 async def vault_list_notes(folder: str, limit: int = 20) -> str:
-    """List notes in a vault folder sorted newest-first. Returns title, date, path, size."""
+    """List notes in a vault folder sorted newest-first. Returns title, date, path, size.
+
+    `count` is how many were returned; `total` is how many the folder holds.
+    When `truncated` is true you are seeing only the newest `limit` — raise the
+    limit or narrow with search_vault rather than concluding the folder is small.
+    """
     if folder not in _vault.cfg.vault_folders:
         return json.dumps({"error": f"Invalid folder '{folder}'. Valid: {_vault.cfg.vault_folders}"})
     notes = _vault.list_notes(folder, limit=limit)
-    return json.dumps({"folder": folder, "count": len(notes), "notes": notes})
+    total = _vault.count_notes(folder)
+    return json.dumps({"folder": folder, "count": len(notes), "total": total,
+                       "truncated": total > len(notes), "notes": notes})
 
 
 @mcp.tool()

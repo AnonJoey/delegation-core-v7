@@ -477,6 +477,18 @@ class VaultManager:
 
     # ── maintenance helpers ───────────────────────────────────────────────────
 
+    def count_notes(self, folder: str) -> int:
+        """Total notes in a folder, ignoring any list limit.
+
+        list_notes() truncates with a bare slice, so its caller cannot tell a
+        folder of 20 notes from a folder of 3715 showing its newest 20. Every
+        surface that lists notes reports this alongside the truncated list.
+        """
+        folder_path = self.cfg.vault / folder
+        if not folder_path.exists():
+            return 0
+        return sum(1 for _ in folder_path.rglob("*.md"))
+
     def list_notes(self, folder: str, limit: int = 20) -> list[dict]:
         """List notes in a folder (including subfolders) sorted newest-first by mtime.
 

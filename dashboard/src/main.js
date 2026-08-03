@@ -458,8 +458,16 @@ function renderFolderList() {
   folderList.innerHTML = folders
     .map((f) => {
       const count = vaultTree.folders[f].filter(noteMatchesFilter).length;
+      // The API caps each folder; without the total, a folder of 3715 notes
+      // showing its newest 1000 looked exactly like a folder of 1000.
+      const info = (vaultTree.counts || {})[f];
+      const truncated = info && info.truncated;
+      const label = truncated ? `${count} of ${info.total}` : `${count}`;
+      const title = truncated
+        ? `Showing the newest ${info.shown} of ${info.total} notes — use search to reach the rest`
+        : "";
       return `<div class="list-item ${f === selectedFolder ? "active" : ""}" data-folder="${escapeHtml(f)}" tabindex="0">
-        ${escapeHtml(f)} <span class="count">${count}</span>
+        ${escapeHtml(f)} <span class="count${truncated ? " count-truncated" : ""}" title="${escapeHtml(title)}">${label}</span>
       </div>`;
     })
     .join("");
@@ -1152,14 +1160,43 @@ class ForceGraph {
   }
 }
 
+// The vault graph is capped and can hide generated articles; both bounds are
+// reported by the API so the view never passes off a subset as the whole vault.
+function graphIncludeGenerated() {
+  const el = document.getElementById("graph-generated-toggle");
+  return el ? el.checked : true;
+}
+
+function renderGraphScope(data) {
+  const wrap = document.getElementById("graph-scope");
+  const note = document.getElementById("graph-scope-note");
+  const toggle = document.getElementById("graph-generated-toggle");
+  if (!wrap || !note) return;
+  wrap.hidden = false;
+  const parts = [];
+  if (data.truncated) {
+    parts.push(`showing the ${data.nodes.length} most recent of ${data.total_nodes} notes`);
+  } else {
+    parts.push(`${data.nodes.length} notes`);
+  }
+  if (data.generated_excluded) parts.push(`${data.generated_excluded} generated hidden`);
+  note.textContent = parts.join(" · ");
+  if (toggle && !toggle.dataset.bound) {
+    toggle.dataset.bound = "1";
+    toggle.addEventListener("change", () => initVaultGraph());
+  }
+}
+
 async function initVaultGraph() {
   const canvas = document.getElementById("graph-canvas");
   const stateEl = document.getElementById("graph-state");
   const legendEl = document.getElementById("graph-legend");
 
   try {
-    const data = await apiGet("/api/vault/graph");
+    const includeGenerated = graphIncludeGenerated();
+    const data = await apiGet(`/api/vault/graph?generated=${includeGenerated ? "1" : "0"}`);
     stateEl.hidden = true;
+    renderGraphScope(data);
 
     const folders = Array.from(new Set(data.nodes.map((n) => n.folder))).sort();
     const folderIndex = {};

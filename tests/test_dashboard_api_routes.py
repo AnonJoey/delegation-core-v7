@@ -32,6 +32,11 @@ class FakeVault:
         self.list_notes_calls.append((folder, limit))
         return [{"title": f"note-in-{folder}", "path": f"{folder}/x.md"}]
 
+    def count_notes(self, folder):
+        # Deliberately larger than list_notes returns, so the tree route's
+        # truncation reporting is exercised rather than trivially satisfied.
+        return 5
+
     def search(self, query, limit=5):
         self.search_calls.append((query, limit))
         return [{"title": "hit", "path": "reference/hit.md", "similarity": 0.9}]
@@ -218,3 +223,19 @@ def test_vault_search_non_numeric_limit_returns_clean_500_not_a_crash(server):
     status, body = _get(port, "/api/vault/search?q=x&limit=notanumber")
     assert status == 500
     assert "error" in body
+
+
+def test_vault_tree_reports_per_folder_totals_and_truncation(server):
+    """The route caps each folder at 1000 notes. Reference held 3715 and the
+    browser showed its newest 1000 with nothing saying so."""
+    port, cfg, fake = server
+    status, body = _get(port, "/api/vault/tree")
+
+    assert status == 200
+    assert set(body["folders"]) == set(cfg.vault_folders)
+    assert body["limit"] == 1000
+    for folder in cfg.vault_folders:
+        counts = body["counts"][folder]
+        assert counts["shown"] == len(body["folders"][folder])
+        assert counts["total"] == 5          # FakeVault.count_notes
+        assert counts["truncated"] is True   # 1 shown of 5
