@@ -48,6 +48,28 @@ CONFIG_DIR = Path.home() / ".delegation_core"
 CONFIG_FILE = CONFIG_DIR / "config.json"
 
 
+def resolve_folder(name: str, folders: list) -> str | None:
+    """Return the canonically-cased entry of `folders` matching `name`, else None.
+
+    Vault folder names are user-defined: the shipped defaults are lowercase
+    ("decisions", "research", ...), but a vault configured through the wizard or
+    edited by hand commonly uses Capitalized names ("Decisions", "Reference").
+    Code that hardcoded a lowercase name and tested `"sessions" in folders`
+    silently did the wrong thing on such a vault — export_session wrote to
+    folders[0], the classifier's folder hints and its own returned label never
+    matched, and orphan accounting skipped nothing. Matching is case-insensitive
+    but the *caller* always gets back the real folder name, so the value is safe
+    to use directly as a path segment.
+    """
+    if not name:
+        return None
+    target = name.strip().lower()
+    for f in folders:
+        if str(f).strip().lower() == target:
+            return f
+    return None
+
+
 @dataclass
 class Config:
     # ── vault ────────────────────────────────────────────────────────────────
@@ -140,6 +162,18 @@ class Config:
     @property
     def chroma_path(self) -> Path:
         return self.vault / ".chroma_bge"
+
+    @property
+    def collection_name(self) -> str:
+        """ChromaDB collection for the configured embedding model.
+
+        Derived rather than fixed so two models can be indexed side by side in the
+        same store: their vector dimensions differ (768 vs 1024), so a shared
+        collection would reject the second one outright. With one collection each,
+        switching models is a config edit — the other index is still there.
+        """
+        from .embeddings import collection_name_for
+        return collection_name_for(self.bge_model)
 
     @property
     def log_path(self) -> Path:

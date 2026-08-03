@@ -74,8 +74,9 @@ def cmd_run(args):
         cfg.save()
         sys.stderr.write("Calibration reset — will recalibrate on startup.\n")
 
-    # Use cached model weights only — suppress HuggingFace Hub network checks
-    os.environ.setdefault("HF_HUB_OFFLINE", "1")
+    # Prefer cached model weights, but only when they exist — see prefer_offline().
+    from .embeddings import prefer_offline
+    prefer_offline(cfg.bge_model)
     # Suppress FastMCP update check on startup
     os.environ.setdefault("FASTMCP_DISABLE_UPDATE_CHECK", "1")
 
@@ -140,16 +141,26 @@ def cmd_status(_args):
     table.add_row("Model",   f"{ok if model_ok  else fail}  {cfg.llama_model}")
     table.add_row("Folders", ", ".join(cfg.vault_folders))
 
-    import requests
-    try:
-        r = requests.get(f"{cfg.llama_url}/health", timeout=3)
-        llama_str = (
-            f"[green]online[/green]  ({cfg.llama_url})"
-            if r.status_code == 200
-            else f"[yellow]unhealthy[/yellow]  ({cfg.llama_url})"
-        )
-    except Exception:
-        llama_str = f"[dim]offline — will start on first tool call[/dim]  ({cfg.llama_url})"
+    table.add_row("engine_mode", cfg.engine_mode)
+
+    # In agent mode ensure_running() refuses to spawn llama at all (engine.py),
+    # so probing /health and reporting "will start on first tool call" was
+    # actively misleading — it never will.
+    if cfg.is_agent_mode:
+        llama_str = "[dim]not used — generation delegated to the calling agent[/dim]"
+    else:
+        import requests
+        on_demand = "will start on first big/bulk task" if cfg.is_hybrid_mode \
+            else "will start on first tool call"
+        try:
+            r = requests.get(f"{cfg.llama_url}/health", timeout=3)
+            llama_str = (
+                f"[green]online[/green]  ({cfg.llama_url})"
+                if r.status_code == 200
+                else f"[yellow]unhealthy[/yellow]  ({cfg.llama_url})"
+            )
+        except Exception:
+            llama_str = f"[dim]offline — {on_demand}[/dim]  ({cfg.llama_url})"
     table.add_row("llama.cpp", llama_str)
 
     try:
@@ -170,7 +181,7 @@ def cmd_status(_args):
     console.print()
 
 
-def cmd_reindex(_args):
+def cmd_reindex(args):
     from rich.console import Console
     from .config import Config
     from .vault import VaultManager
@@ -181,9 +192,10 @@ def cmd_reindex(_args):
         console.print("[yellow]Not configured.[/yellow] Run: delegation-core setup")
         sys.exit(1)
 
-    console.print(f"Reindexing [bold]{cfg.vault_path}[/bold] ...")
+    force = getattr(args, "force", False)
+    console.print(f"Reindexing [bold]{cfg.vault_path}[/bold]{' (full)' if force else ''} ...")
     vault = VaultManager(cfg)
-    count = vault.reindex_vault()
+    count = vault.reindex_vault(force=force)
     console.print(f"[green]✓[/green]  {count} notes indexed.")
 
 
@@ -517,6 +529,221 @@ def cmd_graph_build(args):
         console.print(f"  wiki articles: {result['wiki_articles']}")
 
 
+def cmd_graph_preview(args):
+    from rich.console import Console
+    from rich.table import Table
+    from . import graphbridge
+
+    console = Console()
+    cfg = _graph_config()
+    if cfg is None:
+        console.print("[yellow]Not configured.[/yellow] Run: delegation-core setup")
+        sys.exit(1)
+
+    try:
+        result = graphbridge.preview_graph(cfg, args.path, args.name or None)
+    except ModuleNotFoundError as e:
+        console.print(f"[red]Code-graph pipeline not installed:[/red] {e}\n"
+                      'Run: pip install "delegation-core[graph]"')
+        sys.exit(1)
+
+    if "error" in result:
+        console.print(f"[red]{result['error']}[/red]")
+        sys.exit(1)
+
+    console.print(f"\n[bold]{result['name']}[/bold]  {result['source_path']}")
+    counts = result.get("counts") or {}
+    console.print("  " + " · ".join(f"{k}: {v}" for k, v in counts.items() if v))
+    console.print(f"  {result.get('total_files')} arquivos · ~{result.get('total_words'):,} palavras"
+                  .replace(",", "."))
+    by_ext = result.get("code_by_extension") or {}
+    if by_ext:
+        console.print("  código: " + ", ".join(f"{e} {n}" for e, n in by_ext.items()))
+    console.print(f"  gravaria em: [cyan]{result['would_write_to']}[/cyan]")
+
+    if result.get("previous_build"):
+        pb = result["previous_build"]
+        console.print(f"  [yellow]já construído[/yellow] em {pb['built_at']} — "
+                      f"{pb['node_count']} nós, {pb['community_count']} comunidades, "
+                      f"{pb['vault_notes_filed']} notas no vault")
+
+    scale = result.get("scale_reference") or []
+    if scale:
+        t = Table(title="grafos já construídos nesta máquina (referência de escala)")
+        for c in ("grafo", "nós", "arestas", "comunidades", "notas no vault"):
+            t.add_column(c)
+        for s in scale:
+            t.add_row(s["name"], str(s["node_count"]), str(s["edge_count"]),
+                      str(s["community_count"]), str(s["vault_notes_filed"]))
+        console.print(t)
+
+    if result.get("source_map_hint"):
+        console.print(f"\n[yellow]{result['source_map_hint']}[/yellow]")
+        for m in result.get("source_maps", []):
+            console.print(f"  {m['reconstructable_sources']} fontes em {m['map']}")
+    if result.get("status") == "empty":
+        console.print(f"\n[yellow]{result.get('message')}[/yellow]")
+
+
+def cmd_graph_extract_sources(args):
+    from rich.console import Console
+    from . import graphbridge
+
+    console = Console()
+    result = graphbridge.extract_source_maps(args.path, args.out_dir)
+    if "error" in result:
+        console.print(f"[red]{result['error']}[/red]")
+        sys.exit(1)
+    if result.get("status") == "empty":
+        console.print(f"[yellow]{result['message']}[/yellow]")
+        return
+    console.print(f"[green]✓[/green]  {result['files_written']} arquivos de "
+                  f"{result['maps_used']} source map(s) → {result['out_dir']}")
+    for root, n in (result.get("top_level") or {}).items():
+        console.print(f"  {n:5d}  {root}/")
+    console.print(f"\nAgora: delegation-core graph build {result['out_dir']}")
+
+
+def cmd_embed_model(args):
+    """List the calibrated embedding models, or switch to one."""
+    from rich.console import Console
+    from rich.table import Table
+    from .config import Config
+    from .embeddings import MODEL_PROFILES, collection_name_for, profile_for
+
+    console = Console()
+    cfg = Config.load()
+    if not cfg.is_configured():
+        console.print("[yellow]Not configured.[/yellow] Run: delegation-core setup")
+        sys.exit(1)
+
+    if not args.model:
+        import chromadb
+        counts = {}
+        try:
+            client = chromadb.PersistentClient(path=str(cfg.chroma_path))
+            counts = {c.name: c.count() for c in client.list_collections()}
+        except Exception:
+            pass
+
+        table = Table(title="Modelos de embedding calibrados")
+        for col in ("", "modelo", "dim", "ctx", "limiar", "idiomas", "indexado"):
+            table.add_column(col)
+        for name, p in MODEL_PROFILES.items():
+            n = counts.get(p["collection"])
+            table.add_row(
+                "→" if name == cfg.bge_model else "",
+                name, str(p["dim"]), str(p["max_seq"]), str(p["search_threshold"]),
+                p["languages"],
+                f"{n} linhas" if n else "[dim]não indexado[/dim]",
+            )
+        console.print(table)
+        for name, p in MODEL_PROFILES.items():
+            console.print(f"  [dim]{name}: {p['summary']}[/dim]")
+        console.print("\nTrocar:  delegation-core embed-model <modelo> [--reindex]")
+        return
+
+    target = args.model
+    profile = profile_for(target)
+    collection = collection_name_for(target)
+    if target == cfg.bge_model:
+        console.print(f"[yellow]Já em uso:[/yellow] {target}")
+        return
+
+    previous, previous_threshold = cfg.bge_model, cfg.search_threshold
+    cfg.bge_model = target
+    cfg.search_threshold = profile["search_threshold"]
+    cfg.save()
+    console.print(f"[green]✓[/green]  {previous} → [bold]{target}[/bold]")
+    console.print(f"  coleção: {collection}  ·  search_threshold: "
+                  f"{previous_threshold} → {cfg.search_threshold}")
+
+    import chromadb
+    existing = 0
+    try:
+        client = chromadb.PersistentClient(path=str(cfg.chroma_path))
+        existing = client.get_collection(collection).count()
+    except Exception:
+        pass
+
+    if existing and not args.reindex:
+        console.print(f"  [green]{existing} linhas já indexadas nessa coleção — pronto para usar.[/green]")
+    elif not args.reindex:
+        console.print("  [yellow]Coleção vazia.[/yellow] Rode: delegation-core embed-model "
+                      f"{target} --reindex")
+    if args.reindex:
+        _reindex_everything(console, cfg)
+
+    console.print("  [dim]Reinicie o servidor MCP para o cliente pegar a troca.[/dim]")
+
+
+def _reindex_everything(console, cfg):
+    """Rebuild the vault index AND replay every ingested external folder.
+
+    reindex_vault only walks cfg.vault_folders, so a model switch that only
+    reindexed the vault silently dropped every ingest_folder'd file — 76 of them
+    on this machine, from seven registered sources. The registry is what makes
+    them recoverable, so it is replayed here rather than left to be noticed later.
+    """
+    import json
+    from .config import CONFIG_DIR
+    from .ingest import IngestManager
+    from .vault import VaultManager
+
+    vault = VaultManager(cfg)
+    console.print(f"  reindexando {cfg.vault_path} ...")
+    count = vault.reindex_vault(force=True)
+    console.print(f"  [green]✓[/green]  {count} notas indexadas")
+
+    registry_path = CONFIG_DIR / "ingested_sources.json"
+    if not registry_path.exists():
+        return
+    try:
+        registry = json.loads(registry_path.read_text(encoding="utf-8"))
+    except Exception as e:
+        console.print(f"  [yellow]registry de ingestão ilegível: {e}[/yellow]")
+        return
+
+    ingest = IngestManager(vault)
+    total = 0
+    for source, meta in registry.items():
+        result = ingest.ingest(source, recursive=meta.get("recursive", True))
+        total += result.get("indexed", 0)
+    if registry:
+        console.print(f"  [green]✓[/green]  {total} arquivos externos reingeridos "
+                      f"de {len(registry)} fonte(s)")
+
+
+def cmd_doctor(_args):
+    from rich.console import Console
+    from rich.table import Table
+    from . import doctor
+
+    console = Console()
+    cfg = _graph_config()
+    if cfg is None:
+        console.print("[yellow]Not configured.[/yellow] Run: delegation-core setup")
+        sys.exit(1)
+
+    result = doctor.run_all(cfg)
+    icon = {"ok": "[green]✓[/green]", "warn": "[yellow]![/yellow]",
+            "error": "[red]✗[/red]", "skip": "[dim]-[/dim]"}
+
+    table = Table(show_header=False, box=None, padding=(0, 1))
+    for check in result["checks"]:
+        table.add_row(icon[check["status"]], check["check"], check["detail"])
+        if check.get("fix"):
+            table.add_row("", "", f"[dim]→ {check['fix']}[/dim]")
+    console.print(table)
+
+    c = result["counts"]
+    console.print(f"\n{c['ok']} ok · {c['warn']} avisos · {c['error']} erros"
+                  + (f" · {c['skip']} pulados" if c["skip"] else ""))
+    # Non-zero exit on error only: warnings are informational, and a CI/cron
+    # caller should not fail a run over a stale registry entry.
+    sys.exit(1 if result["status"] == "error" else 0)
+
+
 def cmd_graph_list(_args):
     from rich.console import Console
     from . import graphbridge
@@ -695,8 +922,22 @@ def main():
         help="Reset and rerun tok/sec auto-calibration before starting (use after swapping models)",
     )
     sub.add_parser("status",   help="Check vault, model, binary, llama.cpp, and feature config")
-    sub.add_parser("reindex",  help="Rebuild ChromaDB search index from vault folders")
+    sub.add_parser("doctor",   help="Diagnose installation drift and vault hygiene problems")
+    p_reindex = sub.add_parser("reindex", help="Rebuild ChromaDB search index from vault folders")
+    p_reindex.add_argument("--force", action="store_true",
+                           help="Reindex every note, not just those changed since last run "
+                                "(needed to backfill new metadata fields)")
     sub.add_parser("maintain", help="Run inbox maintenance once and exit")
+
+    # cmd_embed_model existed and was never registered, while cmd_status told
+    # users to run `delegation-core embed-model ...` — the command it named did
+    # not exist. Same shape as the graph labeler nothing called.
+    p_embed = sub.add_parser("embed-model",
+                             help="List calibrated embedding models, or switch to one")
+    p_embed.add_argument("model", nargs="?", default=None,
+                         help="Model to switch to; omit to list what is available")
+    p_embed.add_argument("--reindex", action="store_true",
+                         help="Reindex the vault into the new model's collection")
 
     p_dashboard_api = sub.add_parser(
         "dashboard-api", help="Run the local JSON API used by the Tauri dashboard (standalone/debug)"
@@ -759,6 +1000,16 @@ def main():
     p_graph_build.add_argument("--name", default="", help="Graph name (default: directory basename)")
     p_graph_build.add_argument("--force", action="store_true", help="Rebuild even if already built")
 
+    p_graph_preview = graph_sub.add_parser(
+        "preview", help="Show what a build would cover, without building or writing anything")
+    p_graph_preview.add_argument("path")
+    p_graph_preview.add_argument("--name", default="", help="Graph name (default: directory basename)")
+
+    p_graph_extract = graph_sub.add_parser(
+        "extract-sources", help="Reconstruct original sources from .js.map sidecars, then graph those")
+    p_graph_extract.add_argument("path")
+    p_graph_extract.add_argument("out_dir", help="Destination directory (must be empty or absent)")
+
     graph_sub.add_parser("list", help="List previously built graphs")
 
     p_graph_report = graph_sub.add_parser("report", help="Print a graph's full GRAPH_REPORT.md")
@@ -810,6 +1061,7 @@ def main():
         "setup":    cmd_setup,
         "run":      cmd_run,
         "status":   cmd_status,
+        "doctor":   cmd_doctor,
         "reindex":  cmd_reindex,
         "maintain": cmd_maintain,
         "dashboard-api": cmd_dashboard_api,
@@ -817,6 +1069,7 @@ def main():
         "relink":   cmd_relink,
         "search":   cmd_search,
         "compress": cmd_compress,
+        "embed-model": cmd_embed_model,
     }
 
     note_dispatch = {
@@ -829,6 +1082,8 @@ def main():
 
     graph_dispatch = {
         "build":    cmd_graph_build,
+        "preview":  cmd_graph_preview,
+        "extract-sources": cmd_graph_extract_sources,
         "list":     cmd_graph_list,
         "report":   cmd_graph_report,
         "affected": cmd_graph_affected,

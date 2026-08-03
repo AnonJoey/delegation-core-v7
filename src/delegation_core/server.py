@@ -2,17 +2,12 @@
 server.py — FastMCP tool definitions for delegation-core v0.4.
 Called by run_server(); never run directly.
 
-31 tools across seven groups:
-  Core (8):            search_vault, read_note, write_note, compress,
-                       vault_stats, heartbeat, run_maintenance, export_session
-  Maintenance (6):     vault_list_notes, vault_inbox_status,
-                       vault_find_similar, vault_update_note, relink_folder,
-                       search_web
-  Fire-and-forget (3): run_maintenance_bg, vault_reindex_bg, task_status
-  External ingestion (3): ingest_folder, ingest_folder_bg, ingest_status
-  Code graph (7):      graph_build, graph_list, graph_report, graph_affected,
-                       graph_hook_install, graph_hook_uninstall, graph_hook_status
-  Process tracking (4):   process_create, process_list, process_update, process_get
+The tool surface is deliberately NOT listed here. This header used to carry a
+hand-maintained inventory ("32 tools across seven groups") that read 32 while
+the server served 47 — the same drift that made a comparable project's guide
+wrong on four of four constants. Ask the running server instead: the
+`capabilities()` tool reports the live list from `mcp.list_tools()`, plus which
+graph exporters are wired and which are deliberately not.
 
 v0.4 changes:
   - engine.invoke() is now async (httpx.AsyncClient); all run_in_executor
@@ -71,6 +66,12 @@ v0.8.0 changes:
     Code, Claude Desktop, Codex, etc.), since delegation-core runs over stdio
     and there's no single shared connection to introspect otherwise.
 
+v0.8.2 changes:
+  - list_mcp_clients tool added: exposes client_tracking.list_connected_clients()
+    (previously dashboard-only, via dashboard_api.py's /api/clients) directly as
+    an MCP tool, so "what's connected right now" can be answered from within a
+    session instead of only from the Tauri dashboard.
+
 v0.8.1: relink_folder's path-containment check was `str(target).startswith(
 str(vault_root))` — a plain string-prefix comparison, bypassable whenever a
 sibling directory's name happens to start with the vault root's own name
@@ -91,47 +92,32 @@ from pathlib import Path
 from fastmcp import FastMCP
 
 from . import graph_hook
+from . import capabilities as _capabilities
 from . import graphbridge
 from . import jobs
+from . import notewriter as _notewriter
 from .client_tracking import ClientTrackingMiddleware as _ClientTrackingMiddleware
 from .client_tracking import cleanup_own_session_file as _cleanup_own_session_file
+from .client_tracking import list_connected_clients as _list_connected_clients
 from . import session as _session
+from . import windows as _windows
 from .config import Config
 from .engine import DelegationEngine
 from .ingest import IngestManager
-from .linker import inject_backlinks as _inject_backlinks
-from .linker import wikilinks as _wikilinks
 from .organizer import heal as _heal_notes
 from .organizer import relink_folder as _relink_folder
 from .organizer import run as _run_maintenance
 from .tracker import ProcessTracker
-from .vault import VaultManager, safe_filename, unique_note_path, yaml_quote_scalar
+from .vault import VaultManager
 
 
 def _post_write_links(note_path: Path, rel_path: str, folder: str, stem: str) -> None:
-    """Inject forward wikilinks + backlinks after any direct vault write.
+    """Thin binding of notewriter.post_write_links to this module's vault.
 
-    Uses BGE search only — no llama.cpp call, fast enough to run inline.
-    Also invalidates the vault_health.json cache so heartbeat() stays current.
+    The body moved to notewriter.py when the dashboard gained editing, so both
+    surfaces share one write path instead of two that can drift.
     """
-    try:
-        content = note_path.read_text(encoding="utf-8")
-        hits = [h for h in _vault.search(content[:600], limit=6)
-                if h.get("path") != rel_path][:5]
-        links = _wikilinks(hits, _vault.cfg.merge_threshold)
-        if links:
-            updated = content.rstrip() + f"\n\n## Related\n{links}\n"
-            note_path.write_text(updated, encoding="utf-8")
-            _vault.index_note(updated, {"title": stem, "path": rel_path, "folder": folder})
-            _inject_backlinks(_vault, stem,
-                              [h["path"] for h in hits
-                               if h.get("similarity", 0) >= _vault.cfg.merge_threshold])
-    except Exception as e:
-        logger.warning("post_write_links failed for %s: %s", rel_path, e)
-    try:
-        (Path.home() / ".delegation_core" / "vault_health.json").unlink(missing_ok=True)
-    except Exception:
-        pass
+    _notewriter.post_write_links(_vault, note_path, rel_path, folder, stem)
 
 
 async def _full_maintenance_cycle(engine, vault) -> dict:
@@ -159,8 +145,20 @@ mcp = FastMCP("delegation-core")
 
 # ── core ─────────────────────────────────────────────────────────────────────
 
+def _confidence(top_sim: float, model_name: str) -> str:
+    """Grade a top similarity against the calibration of the model that produced it.
+
+    Cosine bands are model calibration, not universal constants — see
+    embeddings.MODEL_PROFILES for the measurements behind each one.
+    """
+    from .embeddings import profile_for
+    high, medium = profile_for(model_name)["confidence"]
+    return "high" if top_sim >= high else "medium" if top_sim >= medium else "low"
+
+
 @mcp.tool()
-async def search_vault(query: str, limit: int = 5, use_local: bool = False) -> str:
+async def search_vault(query: str, limit: int = 5, use_local: bool = False,
+                        scope: str = "all", graph: str = "", snippet_chars: int = 0) -> str:
     """
     CALL THIS FIRST before answering any question that could have prior context.
     Semantic search the Obsidian vault using BGE embeddings.
@@ -168,17 +166,29 @@ async def search_vault(query: str, limit: int = 5, use_local: bool = False) -> s
     receive the ranked 'sources' and synthesize yourself. Set use_local=true to
     force the local model to write the summary (hybrid mode).
     Cite 'sources' titles when referencing notes. Flat token cost regardless of vault size.
+
+    scope narrows what is searched — 'notes' (hand-written only), 'generated'
+    (graph_build wiki articles), 'external' (ingest_folder'd files), 'all' (default).
+    graph='<name>' restricts to one built code graph. Each hit carries its 'kind'.
+    snippet_chars caps snippet length (0 = default); lower it when you only need
+    titles and paths, since in agent mode every snippet is spent from your context.
     """
-    hits = _vault.search(query, limit=limit)
+    hits = _vault.search(query, limit=limit, scope=scope, graph=graph,
+                         snippet_chars=snippet_chars or 800)
     if not hits:
-        return json.dumps({"query": query, "summary": "No results above similarity threshold.", "sources": []})
+        empty = {"query": query, "summary": "No results above similarity threshold.", "sources": []}
+        if scope != "all" or graph:
+            empty["note"] = (f"Searched scope={scope!r}"
+                             + (f", graph={graph!r}" if graph else "")
+                             + " — retry with scope='all' to widen.")
+        return json.dumps(empty)
     if "error" in hits[0]:
         return json.dumps(hits[0])
 
     top_sim    = max(h["similarity"] for h in hits)
-    confidence = "high" if top_sim >= 0.80 else "medium" if top_sim >= 0.65 else "low"
+    confidence = _confidence(top_sim, _vault.cfg.bge_model)
 
-    snippet_len = 300 if _engine.cfg.is_cpu_budget else 800
+    snippet_len = snippet_chars or (300 if _engine.cfg.is_cpu_budget else 800)
     combined = "\n\n".join(f"[{h['title']}]\n{h['snippet'][:snippet_len]}" for h in hits[:5])
 
     # Route the summarization. agent/hybrid delegate to the calling Claude
@@ -248,25 +258,11 @@ async def write_note(folder: str, title: str, content: str) -> str:
     Use vault_update_note when adding to an existing topic.
     folder must be one of the configured vault_folders.
     """
-    cfg = _vault.cfg
-    if folder not in cfg.vault_folders:
-        return json.dumps({"error": f"Invalid folder '{folder}'. Valid: {cfg.vault_folders}"})
-    safe = safe_filename(title)
-    dest = cfg.vault / folder / f"{datetime.now().strftime('%Y-%m-%d')}-{safe}.md"
-    dest.parent.mkdir(parents=True, exist_ok=True)
-    dest = unique_note_path(dest)
-    full = (
-        f"---\ntitle: {yaml_quote_scalar(title)}\ndate: {datetime.now().strftime('%Y-%m-%d')}\n"
-        f"ai_generated: true\n---\n\n{content}"
-    )
-    try:
-        dest.write_text(full, encoding="utf-8")
-    except OSError as e:
-        return json.dumps({"error": f"Write failed: {e}"})
-    rel = str(dest.relative_to(cfg.vault))
-    _vault.index_note(full, {"title": title, "path": rel, "folder": folder})
-    _post_write_links(dest, rel, folder, dest.stem)
-    return json.dumps({"status": "ok", "path": str(dest.name), "folder": folder})
+    result = _notewriter.create_note(_vault, folder, title, content)
+    if "error" in result:
+        return json.dumps(result)
+    # Historic response shape: bare filename, not the vault-relative path.
+    return json.dumps({"status": "ok", "path": result["name"], "folder": result["folder"]})
 
 
 @mcp.tool()
@@ -379,6 +375,90 @@ async def heartbeat() -> str:
 
 
 @mcp.tool()
+async def window_list() -> str:
+    """
+    List MCP servers registered as windows, which are currently mounted in the
+    client, and the active workspace.
+
+    delegation-core does not connect to these servers or call their tools — it only
+    curates which ones the client has mounted. A registered-but-unmounted server is
+    configured and dormant: its tool schemas cost no context until reopened.
+    Changes take effect when the client reconnects.
+    """
+    return json.dumps(_windows.list_windows())
+
+
+@mcp.tool()
+async def window_open(name: str) -> str:
+    """
+    Mount a registered MCP server into the client configuration.
+
+    Use when the user needs a server's tools available. The server must already be
+    known — servers are catalogued automatically from whatever the client has
+    mounted, so anything used before can be reopened by name.
+    Requires a client reconnect to take effect.
+    """
+    return json.dumps(_windows.open_window(name))
+
+
+@mcp.tool()
+async def window_close(name: str) -> str:
+    """
+    Unmount an MCP server from the client configuration, freeing the context its
+    tool schemas occupy. The server's definition is kept, so window_open restores it
+    exactly. delegation-core itself cannot be closed.
+    Requires a client reconnect to take effect.
+    """
+    return json.dumps(_windows.close_window(name))
+
+
+@mcp.tool()
+async def workspace_list() -> str:
+    """
+    List saved workspaces — named sets of MCP servers — and which one is active.
+    """
+    return json.dumps(_windows.list_workspaces())
+
+
+@mcp.tool()
+async def workspace_save(name: str) -> str:
+    """
+    Save the currently mounted set of servers as a named workspace.
+
+    Use after arranging the servers needed for a kind of work, so the arrangement
+    can be restored later in one step (e.g. "soteria" = clickup; "dev" = github).
+    """
+    return json.dumps(_windows.save_workspace(name))
+
+
+@mcp.tool()
+async def workspace_apply(name: str) -> str:
+    """
+    Make the client's mounted servers match a named workspace.
+
+    Servers outside the workspace are unmounted but keep their definitions and can
+    be reopened. Only the top-level server set is rewritten; per-project definitions
+    are never touched. Requires a client reconnect to take effect.
+    """
+    return json.dumps(_windows.apply_workspace(name))
+
+
+@mcp.tool()
+async def list_mcp_clients() -> str:
+    """
+    List MCP client surfaces currently connected to this delegation-core process
+    (Claude Code, Claude Desktop, Codex, etc. — whichever has delegation-core
+    configured and has been active in the last two minutes). Each running
+    `delegation-core run` instance is its own connection with its own client
+    name/version, first/last-active timestamps, and tool-call count — there is
+    no single shared session to introspect since delegation-core runs over
+    stdio per-client. Use this to answer "what's connected right now" instead
+    of guessing from config files.
+    """
+    return json.dumps({"clients": _list_connected_clients()})
+
+
+@mcp.tool()
 async def export_session(title: str, summary: str, key_decisions: str = "") -> str:
     """
     Save a curated summary of this conversation to the vault's sessions/ folder.
@@ -420,11 +500,44 @@ async def run_maintenance() -> str:
 
 @mcp.tool()
 async def vault_list_notes(folder: str, limit: int = 20) -> str:
-    """List notes in a vault folder sorted newest-first. Returns title, date, path, size."""
+    """List notes in a vault folder sorted newest-first. Returns title, date, path, size.
+
+    `count` is how many were returned; `total` is how many the folder holds.
+    When `truncated` is true you are seeing only the newest `limit` — raise the
+    limit or narrow with search_vault rather than concluding the folder is small.
+    """
     if folder not in _vault.cfg.vault_folders:
         return json.dumps({"error": f"Invalid folder '{folder}'. Valid: {_vault.cfg.vault_folders}"})
     notes = _vault.list_notes(folder, limit=limit)
-    return json.dumps({"folder": folder, "count": len(notes), "notes": notes})
+    total = _vault.count_notes(folder)
+    return json.dumps({"folder": folder, "count": len(notes), "total": total,
+                       "truncated": total > len(notes), "notes": notes})
+
+
+@mcp.tool()
+async def vault_find_notes(query: str, limit: int = 30) -> str:
+    """Find notes by literal title or path match — no embeddings, no threshold.
+
+    Use this when you know what a note is CALLED. search_vault is semantic and
+    answers "what is about X"; it cannot reliably answer "open the note named X"
+    — searching this vault for the exact title of a note written minutes earlier
+    did not return it in the top 3. Results are ranked: exact stem, prefix,
+    substring, then anywhere in the path.
+    """
+    results = _vault.find_notes(query, limit=limit)
+    return json.dumps({"query": query, "count": len(results), "results": results})
+
+
+@mcp.tool()
+async def vault_note_links(path: str) -> str:
+    """Inbound and outbound wikilinks for one note, by vault-relative path.
+
+    Answers "what references this note" without reading every candidate. Broken
+    outbound links are returned with broken=true rather than dropped, so a note
+    pointing at something that no longer exists is visible instead of silently
+    looking well-connected.
+    """
+    return json.dumps(_vault.note_links(path))
 
 
 @mcp.tool()
@@ -598,13 +711,28 @@ async def vault_reindex_bg(force: bool = False) -> str:
 
 @mcp.tool()
 async def task_status(job_id: str) -> str:
-    """Check the status of a background job. Returns status, elapsed time, and result."""
+    """Check the status of a background job.
+
+    While running, also reports how long this kind of job usually takes
+    (`typical_seconds`, median of the last completed runs) and when it is worth
+    checking again (`check_again_in_seconds`). Without those, elapsed time alone
+    cannot distinguish a job that is nearly done from one with minutes to go.
+    Both are absent the first time a given task runs on this machine.
+    """
     job = jobs.get(job_id)
     if not job:
         return json.dumps({"error": f"Job '{job_id}' not found."})
     if job["status"] == "running":
         from datetime import datetime as dt
-        job["elapsed_seconds"] = (dt.now() - dt.fromisoformat(job["started"])).seconds
+        elapsed = (dt.now() - dt.fromisoformat(job["started"])).total_seconds()
+        job["elapsed_seconds"] = int(elapsed)
+        typical = jobs.typical_seconds(job["task"])
+        if typical:
+            job["typical_seconds"] = typical
+            # Aim the next poll just past the expected finish; once a job is
+            # already overdue, fall back to a slow steady beat rather than
+            # suggesting a poll in the past.
+            job["check_again_in_seconds"] = max(int(typical - elapsed) + 5, 30)
     return json.dumps(job)
 
 
@@ -637,10 +765,109 @@ async def ingest_status() -> str:
     return json.dumps(_ingest.status())
 
 
+@mcp.tool()
+async def ingest_forget(source_path: str) -> str:
+    """
+    Drop everything previously indexed from an external path (the inverse of ingest_folder).
+    Use when an ingested folder was moved, deleted, or should no longer answer searches —
+    otherwise its rows keep surfacing with paths that no longer resolve.
+    Original files are never touched.
+    """
+    loop = asyncio.get_running_loop()
+    result = await loop.run_in_executor(None, lambda: _ingest.forget(source_path))
+    return json.dumps(result)
+
+
 # ── code graph ─────────────────────────────────────────────────────────────────
 
 @mcp.tool()
-async def graph_build(path: str, name: str = "", force: bool = False) -> str:
+async def graph_preview(path: str, name: str = "", exclude: list[str] | None = None) -> str:
+    """
+    CALL THIS BEFORE graph_build on an unfamiliar directory.
+    Reports what a build would cover — file counts by type, code files by extension,
+    the vault folder it would write into, and whether a graph of that name already
+    exists — without building or writing anything. Takes seconds.
+    Also flags JS bundles whose .js.map can be reconstructed into real sources
+    (see extract_source_maps); graphing a bundle directly yields one useless module.
+    'scale_reference' lists graphs already built on this machine so article counts
+    can be judged against real measurements.
+    """
+    try:
+        result = await asyncio.to_thread(graphbridge.preview_graph, _vault.cfg, path, name or None, exclude)
+    except ModuleNotFoundError as e:
+        return json.dumps({"error": f"code-graph pipeline not installed: {e}. "
+                                    'Run: pip install "delegation-core[graph]"'})
+    return json.dumps(result)
+
+
+@mcp.tool()
+async def extract_source_maps(source_path: str, out_dir: str) -> str:
+    """
+    Reconstruct original sources from .js.map sidecars into out_dir, then graph THAT.
+    npm-installed tools ship a single bundle whose map usually carries every original
+    file verbatim; the reconstructed tree graphs into real package structure while the
+    bundle would collapse into one node. out_dir must be empty or nonexistent.
+    """
+    loop = asyncio.get_running_loop()
+    result = await loop.run_in_executor(
+        None, lambda: graphbridge.extract_source_maps(source_path, out_dir))
+    return json.dumps(result)
+
+
+@mcp.tool()
+async def capabilities() -> str:
+    """CALL THIS FIRST on connecting — what this server can actually do.
+
+    Returns the live tool list (asked of the running server, so it cannot drift
+    from what is actually served), the graph exporters and which tool reaches
+    each, the ones deliberately left unexposed and why, capabilities that exist
+    in the code but are still unwired, and the search scopes.
+
+    Prefer this over any prose description of this server, AGENT_GUIDE.md
+    included: prose has no guard against drifting from the code, and this
+    report is generated plus test-enforced.
+    """
+    tools = await mcp.list_tools()
+    listed = [{"name": t.name,
+               "summary": (t.description or "").strip().split("\n")[0]}
+              for t in sorted(tools, key=lambda t: t.name)]
+    return json.dumps(_capabilities.describe(listed))
+
+
+@mcp.tool()
+async def graph_export(name: str, format: str) -> str:
+    """Re-export an already-built graph into another format.
+
+    format: "graphml" (Gephi, yEd, Cytoscape), "svg" (static image, embeds
+    anywhere), or "cypher" (replay script for Neo4j). Reads the existing
+    graph.json, so it costs seconds — no re-extraction. Run graph_build first.
+    """
+    result = await asyncio.to_thread(graphbridge.export_graph, _vault.cfg, name, format)
+    return json.dumps(result)
+
+
+@mcp.tool()
+async def graph_build_bg(path: str, name: str = "", force: bool = False,
+                         exclude: list[str] | None = None) -> str:
+    """
+    Build a code knowledge graph in the background. Returns a job_id immediately.
+    Prefer this over graph_build for anything sizeable: a real codebase takes minutes,
+    which exceeds most MCP client timeouts.
+    exclude: gitignore-syntax patterns to leave out (see graph_build).
+    """
+    def _run():
+        return asyncio.run(
+            graphbridge.build_graph(_vault.cfg, _vault, path, name=name or None,
+                                    force=force, exclude=exclude))
+
+    job_id = jobs.submit("graph_build", _run)
+    return json.dumps({"job_id": job_id, "path": path, "status": "running",
+                       "message": "Graph build started. Call task_status(job_id) to check progress."})
+
+
+@mcp.tool()
+async def graph_build(path: str, name: str = "", force: bool = False,
+                      exclude: list[str] | None = None) -> str:
     """
     Build a code knowledge graph for a local directory: detect -> AST extract
     (tree-sitter, code files only) -> build -> cluster -> analyze -> report -> export.
@@ -650,6 +877,13 @@ async def graph_build(path: str, name: str = "", force: bool = False) -> str:
     searchable through search_vault.
     name defaults to the directory's basename. Re-running the same name is a no-op
     unless force=true (rebuilds and overwrites).
+    exclude: gitignore-syntax patterns to leave out of the scan, e.g.
+    ["tests/", "website/", "vendor/"]. Worth setting on any large repository —
+    one real build spent 40% of its 2704 wiki articles on communities made
+    entirely of test files, which then had to be pruned out of the vault by
+    hand. Pass the same patterns to graph_preview() to size the build first.
+    Blocks until done — call graph_preview() first to see the scale, and prefer
+    graph_build_bg() for anything that might outlast the client's timeout.
     Requires the [graph] extra: pip install "delegation-core[graph]".
     """
     try:

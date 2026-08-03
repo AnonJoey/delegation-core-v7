@@ -1,5 +1,208 @@
 # Changelog
 
+## Unreleased — 2026-08-03
+
+Found while ingesting the `hermes-agent` repository (7.7k files, 115.756 graph
+nodes) into the vault. The corpus was large enough to surface failures that a
+small graph hides: every one of these produced *plausible* output rather than an
+error, which is why they survived unnoticed.
+
+### Fixed
+
+1. **`label_communities_by_hub()` was never called — every graph artifact fell
+   back to "Community {cid}".** The function existed in `graph/cluster.py`,
+   correct and testable, with no caller anywhere in the repository.
+   `graphbridge.build_graph()` passed a literal `{}` as `render_report`'s
+   `community_labels` argument and omitted it entirely for `to_json`, `to_html`
+   and `to_wiki` — all four already accepted the parameter, and all four
+   silently used their fallback. A 2693-community build filed 2693 vault notes
+   titled `Community 0`..`Community 2692`: bodies searchable by embedding, but
+   titles and Obsidian graph node labels carrying no information at all.
+   Wiring the labeler in dropped generic names from 2693 to 0.
+
+2. **Hub selection named communities after imports.** With labels wired, the
+   first real build produced communities called `Any`, `Path` and `ValueError`.
+   Imported and builtin symbols accumulate high degree across a codebase and won
+   an unrestricted hub search. Nodes referenced but not defined in the corpus
+   carry an empty `source_file`, so hub selection is now restricted to
+   locally-defined symbols, falling back to the full set for communities that
+   contain none.
+
+3. **Hub selection named communities after docstrings.** Extractors attach
+   docstrings and test descriptions as node labels (`file_type == "rationale"`),
+   which produced 86 wiki articles — and therefore 86 vault filenames — like
+   `1000_comments_on_a_single_task_—_build_worker_context_should_....md`. Hub
+   candidates now require an identifier-shaped label. A community with no such
+   node (typically a single rationale node) is named after its dominant source
+   file's stem, plus a bounded excerpt to keep same-file communities distinct —
+   39 separate communities out of `tui_gateway/methods_session.py` had otherwise
+   collapsed to `methods_session` with `_2`..`_39` suffixes.
+
+4. **`safe_filename()` truncated mid-token.** The 50-character slice ran after
+   the trailing-punctuation strip, not before, so a real `write_note` call
+   produced the stem `"...dissecação da arquitetura ("` — a dangling opening
+   paren in the filename and in the note's graph node label. Truncation now cuts
+   on a word boundary when that keeps the stem recognisable, then strips
+   punctuation the cut can strand.
+
+5. **`VaultManager` silently indexed into the current working directory.** An
+   unset `vault_path` resolves to `Path(".")` — an existing directory, so no
+   existence check catches it — and `chroma_path.mkdir()` then created a
+   complete ChromaDB wherever the process happened to be running, reporting
+   success. `Config.load()` degrades to defaults on any read error, so a corrupt
+   `config.json` reaches this state in production, not just from a hand-written
+   script. `_init()` now refuses to start with an unconfigured `vault_path`.
+
+### Added
+
+- **`task_status()` reports pacing, not just elapsed time.** While a job runs it
+  now also returns `typical_seconds` (median of the last 10 successful runs of
+  that task, persisted to `~/.delegation_core/job_durations.json`) and
+  `check_again_in_seconds`. Elapsed time alone cannot distinguish "20s in, 8
+  minutes to go" from "nearly done", so a caller polling a 7-minute graph build
+  had to either poll every 30s or abandon the tool and watch the output
+  directory from a shell — which is what happened in practice. Both fields are
+  absent on a task's first run, when there is no history to reason from.
+
+- **`graph_build` / `graph_build_bg` / `graph_preview` accept `exclude`.**
+  Gitignore-syntax patterns, forwarded to `detect()`'s existing
+  `extra_excludes` parameter — available all along, never wired to the caller,
+  the same shape as the `community_labels` bug above. Without it the only way
+  to keep a repository's test tree out of a graph was to build everything and
+  prune afterwards: one real build filed 1071 vault articles for communities
+  made entirely of test files, removed by hand. On `hermes-agent`,
+  `exclude=["tests/", "tests-js/", "website/"]` cuts the scan by 45% (7719 →
+  4268 files). Passing the same patterns to `graph_preview` sizes the build
+  before committing to it.
+
+- **Every listing surface now reports what it is hiding.** The same shape as
+  items 1 and 5, on the read side: `vault_list_notes` truncated with a bare
+  slice and `/api/vault/tree` capped each folder at 1000, both returning a short
+  list that looked exactly like a short folder. With `Reference` holding 3715
+  notes the dashboard's browser showed its newest 1000 as if that were all of
+  them. `VaultManager.count_notes()` is new; the MCP tool now returns
+  `total`/`truncated` and the route returns per-folder `counts`.
+
+- **`/api/vault/graph` is the knowledge graph again, and is bounded.** Code
+  graphs were already a separate thing — their own artifacts under
+  `~/.delegation_core/graphs/<name>/`, their own `/api/graphs` endpoints, their
+  own pane behind the dashboard's Vault/Code toggle, and their own
+  `search_vault(scope="generated")` filter via `VaultManager.classify_path`.
+  They leaked into the vault view only because graph_build files their articles
+  into a vault folder to make them searchable, and this endpoint re-derived
+  membership from the filesystem instead of using that existing classification.
+  On this vault the Vault pane was 3552 nodes of which 216 were hand-written —
+  94% of the "knowledge graph" was one codebase. Generated articles are now
+  excluded by default (`?generated=1` opts back in), using `classify_path`
+  rather than a second definition of what counts as generated. The result is
+  221 nodes / 421 edges / 82 KB instead of 3552 nodes / 600 KB. Nodes are also
+  capped at 1500 (newest first, edges built after the cut so none can dangle)
+  with `total_nodes`/`truncated`/`max_nodes` reported, and the pane states its
+  own scope under the legend.
+
+- **`capabilities()` — a connecting client can now ask what this server does.**
+  Returns the live tool list (asked of the running server via `mcp.list_tools()`,
+  so it cannot drift from what is served), every graph exporter with the tool
+  that reaches it, the ones deliberately unexposed with reasons, capabilities
+  that exist but are still unwired, and the search scopes. `AGENT_GUIDE.md` now
+  says outright that it is not authoritative and this report is — the guide's
+  numeric claims are copies with no test comparing them to source, which is how
+  a comparable project's guide ended up wrong on four of four constants.
+
+- **`tests/test_capability_registry.py` makes unwired capability a written
+  decision.** It scans the vendored pipeline for artifact-producing functions
+  and fails when one is not classified in `capabilities.GRAPH_CAPABILITIES` as
+  either wired to a named tool or deliberately unexposed with a reason. Verified
+  by adding a `to_parquet()` stub: the suite fails until it is classified. This
+  is the structural answer to the three bugs above — each was a working,
+  reachable function that nothing pointed at.
+
+- **`graph_export(name, format)` exposes three exporters that had no caller.**
+  `graphml` (Gephi, yEd, Cytoscape), `svg`, and `cypher` (Neo4j replay script).
+  They read the existing `graph.json` rather than re-extracting, so they cost
+  seconds. `to_obsidian`/`to_canvas` stay unexposed by decision, now recorded:
+  Obsidian is no longer the target reader.
+
+- **Phase 1 of replacing Obsidian: the note browser has a real tree and a
+  literal search.** Measured first: 3661 of 3878 notes sit three levels down,
+  the browser listed only the 9 configured top-level folders, and the largest
+  single directory holds 2711 notes. `/api/vault/tree` now returns directory
+  shape (25 entries here, with depth and per-directory counts) and
+  `/api/vault/notes?dir=&offset=` pages one directory at a time, so a 2711-note
+  folder is browsable instead of capped. `graphs/` subtrees start folded.
+
+  `/api/vault/find?q=` and the `vault_find_notes` MCP tool do literal
+  title/path matching with no embeddings and no similarity cutoff, ranked exact
+  stem → prefix → substring → path. This is not a nicety: searching the vault
+  semantically for the exact title of a note written minutes earlier did not
+  return it in the top 3, and the one-word title "AIAgent" matched at 0.57
+  against a 0.55 threshold. The filter box now hits this endpoint, so it can
+  see the whole vault rather than whichever page was already loaded.
+
+- **Phase 2: a backlinks panel, and a corrected broken-link count.** The
+  relation was always computed — `linker.inject_backlinks` writes it into note
+  bodies on every write — but nothing exposed it, so a reader saw only whatever
+  text happened to be present. `VaultManager.note_links()`,
+  `/api/vault/backlinks?path=` and the `vault_note_links` MCP tool return
+  inbound references and outbound targets, with dead targets marked
+  `broken: true` rather than dropped. Half the hand-written notes here have
+  inbound links, so this is not a corner case: the most-referenced note has 33.
+  Costs 0.14s on a 3878-note vault.
+
+  While implementing it, the earlier "248 broken links / 31%" figure was found
+  to be wrong. It came from an ad-hoc naive regex; the codebase has two wikilink
+  parsers and the strict one (`_countable_wikilinks`, which strips code spans
+  and shell `[[ -f ]]` syntax) is what `vault_health` uses. Measured properly:
+  527 links, **63 broken across 42 notes**, not 248. The panel uses the strict
+  parser so it cannot disagree with the health count. Note that `heartbeat()`
+  still reports 31, since `vault_health.json` is a cache.
+
+- **Phase 3: the dashboard can create and edit notes, through the server.**
+  `notewriter.py` is new and is now the only path a note takes into the vault:
+  `create_note` (dated filename, collision-safe, single frontmatter block,
+  wikilinks injected) and `save_note` (verbatim overwrite plus reindex).
+  `server.py`'s `write_note` delegates to it, and `POST /api/vault/note/create`
+  and `/save` call the same functions.
+
+  Writing straight to disk from Tauri would have been faster and would have left
+  the note unindexed until something else noticed — a second write path free to
+  drift from the first, which is the failure this release spent its length
+  removing. `save_note` deliberately does *not* inject a `## Related` block:
+  create does, but doing it on save would edit the user's text behind them every
+  time they hit save.
+
+- **`delegation-core embed-model` did not exist.** `cmd_embed_model` was
+  written, complete, and never registered on the argument parser — while
+  `cmd_status` printed "Rode: `delegation-core embed-model <modelo>`", so the
+  CLI instructed users to run a command that answered "invalid choice". Now
+  registered, with `tests/test_cli_commands.py` asserting that every top-level
+  subcommand is reachable and that every registered one still has a handler.
+  Running it revealed 1608 rows still indexed under the previous embedding
+  model's collection, which is worth reviewing separately.
+
+- **Path containment is one function.** `resolve_in_vault()` replaces three
+  copies of the resolve-then-`relative_to` dance. The check exists because a
+  string-prefix test passes for `.../vault-old` when the root is `.../vault`;
+  that bug was found and fixed twice independently in this codebase before it
+  had a single home.
+
+- **graph_build's report was graded as a hand-written note.** It is filed at
+  the top of its folder on purpose — graphbridge calls it the "discoverable
+  entry point" — so it does not live under `graphs/<name>/` and `classify_path`
+  returned `("note", "")` for it. Five reports were therefore rendered in the
+  dashboard's *knowledge* graph, immediately after that view was separated from
+  code graphs. `classify_path` now recognises the report by its generated
+  filename rather than moving it, so the entry point stays where it was designed
+  to be. Reports in the knowledge graph: 5 → 0.
+
+### Notes
+
+Items 1 and 5 share a shape worth naming: a fallback that *fabricates* a
+plausible value rather than degrading to empty. `test_graphbridge.py` documented
+that it did not exercise `build_graph()` because the extraction stages are heavy
+— and that is exactly where item 1 lived. The new seam test fakes those stages
+and runs the labeler for real, in 0.1s.
+
 ## v0.6.4 — 2026-07-09
 
 Found during the v6.3 install on Abner's Windows machine (workarounds applied manually

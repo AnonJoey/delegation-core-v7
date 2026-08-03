@@ -26,11 +26,44 @@ from delegation_core.tracker import ProcessTracker
 class FakeVault:
     def __init__(self):
         self.list_notes_calls = []
+        self.list_notes_in_calls = []
+        self.find_calls = []
         self.search_calls = []
 
     def list_notes(self, folder, limit=20):
         self.list_notes_calls.append((folder, limit))
         return [{"title": f"note-in-{folder}", "path": f"{folder}/x.md"}]
+
+    def count_notes(self, folder):
+        return 5
+
+    def list_directories(self):
+        # Nested on purpose: the flat-list bug this replaced hid exactly this shape.
+        return [
+            {"path": "reference", "name": "reference", "depth": 0, "count": 2},
+            {"path": "reference/graphs", "name": "graphs", "depth": 1, "count": 0},
+            {"path": "reference/graphs/repo", "name": "repo", "depth": 2, "count": 900},
+        ]
+
+    def list_notes_in(self, dir_rel, offset=0, limit=200):
+        self.list_notes_in_calls.append((dir_rel, offset, limit))
+        if dir_rel == "nope":
+            return {"error": "Not a directory: nope"}
+        return {"dir": dir_rel, "total": 900, "offset": offset, "limit": limit,
+                "has_more": offset + 2 < 900,
+                "notes": [{"title": "a", "path": f"{dir_rel}/a.md"},
+                          {"title": "b", "path": f"{dir_rel}/b.md"}]}
+
+    def note_links(self, rel_path):
+        if rel_path == "bad":
+            return {"error": "Not a note: bad"}
+        return {"path": rel_path, "inbound": [{"title": "a", "path": "reference/a.md"}],
+                "outbound": [{"target": "ghost", "path": None, "broken": True}],
+                "inbound_count": 1, "broken_count": 1}
+
+    def find_notes(self, query, limit=30):
+        self.find_calls.append((query, limit))
+        return [{"title": query, "path": f"reference/{query}.md", "match_rank": 0}]
 
     def search(self, query, limit=5):
         self.search_calls.append((query, limit))
@@ -42,6 +75,9 @@ class FakeVault:
 
 @pytest.fixture
 def server(monkeypatch, tmp_path):
+    import delegation_core.config as config_mod
+    monkeypatch.setattr(config_mod, "CONFIG_DIR", tmp_path)
+    monkeypatch.setattr(config_mod, "CONFIG_FILE", tmp_path / "config.json")
     vault_path = tmp_path / "vault"
     vault_path.mkdir()
     cfg = Config(vault_path=str(vault_path), vault_folders=["reference", "decisions"])
@@ -111,13 +147,64 @@ def test_clients_endpoint_returns_empty_list_with_no_sessions(server, monkeypatc
     assert body == {"clients": []}
 
 
-def test_vault_tree_lists_every_configured_folder(server):
-    port, cfg, fake_vault = server
+def test_vault_tree_returns_directory_shape_including_nested_ones(server):
+    """The route used to return the newest 1000 notes per top-level folder and
+    no hierarchy, so 3661 notes three levels down were unreachable."""
+    port, _, _ = server
     status, body = _get(port, "/api/vault/tree")
     assert status == 200
-    assert set(body["folders"].keys()) == {"reference", "decisions"}
-    assert body["folders"]["reference"][0]["title"] == "note-in-reference"
-    assert set(fake_vault.list_notes_calls) == {("reference", 1000), ("decisions", 1000)}
+    paths = [d["path"] for d in body["directories"]]
+    assert paths == ["reference", "reference/graphs", "reference/graphs/repo"]
+    assert body["directories"][2]["depth"] == 2
+    assert body["directories"][2]["count"] == 900
+
+
+def test_vault_notes_pages_one_directory(server):
+    port, _, fake_vault = server
+    status, body = _get(port, "/api/vault/notes?dir=reference/graphs/repo&offset=0&limit=2")
+    assert status == 200
+    assert body["total"] == 900
+    assert body["has_more"] is True
+    assert fake_vault.list_notes_in_calls == [("reference/graphs/repo", 0, 2)]
+
+
+def test_vault_notes_requires_a_dir(server):
+    port, _, _ = server
+    status, body = _get(port, "/api/vault/notes")
+    assert status == 400
+    assert "error" in body
+
+
+def test_vault_notes_propagates_a_bad_directory_as_400(server):
+    port, _, _ = server
+    status, body = _get(port, "/api/vault/notes?dir=nope")
+    assert status == 400
+    assert "error" in body
+
+
+def test_vault_notes_rejects_non_integer_paging(server):
+    port, _, _ = server
+    status, _ = _get(port, "/api/vault/notes?dir=reference&offset=abc")
+    assert status == 400
+
+
+def test_vault_find_does_a_literal_lookup(server):
+    """Distinct from /api/vault/search: no embeddings, no similarity cutoff.
+    The semantic endpoint did not return the exact title of a note written
+    minutes earlier in its top 3."""
+    port, _, fake_vault = server
+    status, body = _get(port, "/api/vault/find?q=AIAgent&limit=5")
+    assert status == 200
+    assert body["count"] == 1
+    assert body["results"][0]["match_rank"] == 0
+    assert fake_vault.find_calls == [("AIAgent", 5)]
+
+
+def test_vault_find_requires_a_query(server):
+    port, _, _ = server
+    status, body = _get(port, "/api/vault/find?q=%20")
+    assert status == 400
+    assert "error" in body
 
 
 def test_vault_search_passes_query_and_limit_through(server):
@@ -158,6 +245,54 @@ def test_unknown_get_route_returns_404(server):
     assert "error" in body
 
 
+def test_graphs_get_missing_name_returns_400(server):
+    port, _, _ = server
+    status, body = _get(port, "/api/graphs/get")
+    assert status == 400
+    assert "error" in body
+
+
+def test_graphs_affected_missing_name_or_query_returns_400(server):
+    port, _, _ = server
+    status, body = _get(port, "/api/graphs/affected?name=foo")
+    assert status == 400
+    assert "error" in body
+
+
+def test_config_get_returns_config_dict(server):
+    port, cfg, _ = server
+    status, body = _get(port, "/api/config")
+    assert status == 200
+    assert "config" in body
+    assert body["config"]["engine_mode"] == cfg.engine_mode
+
+
+def test_config_update_saves_new_settings(server):
+    port, cfg, _ = server
+    conn = http.client.HTTPConnection("127.0.0.1", port, timeout=5)
+    payload = json.dumps({"engine_mode": "hybrid", "search_threshold": 0.65})
+    conn.request("POST", "/api/config/update", body=payload, headers={"Content-Type": "application/json"})
+    res = conn.getresponse()
+    body = json.loads(res.read())
+    conn.close()
+    assert res.status == 200
+    assert body["ok"] is True
+    assert cfg.engine_mode == "hybrid"
+    assert cfg.search_threshold == 0.65
+
+
+def test_purge_orphans_endpoint(server):
+    port, _, _ = server
+    conn = http.client.HTTPConnection("127.0.0.1", port, timeout=5)
+    conn.request("POST", "/api/system/purge_orphans", body="{}", headers={"Content-Type": "application/json"})
+    res = conn.getresponse()
+    body = json.loads(res.read())
+    conn.close()
+    assert res.status == 200
+    assert body["ok"] is True
+    assert "purged_sessions" in body
+
+
 def test_vault_search_non_numeric_limit_returns_clean_500_not_a_crash(server):
     """`int((query.get("limit") or ["5"])[0])` raises ValueError for a
     non-numeric limit; do_GET's blanket try/except must turn that into a
@@ -167,3 +302,83 @@ def test_vault_search_non_numeric_limit_returns_clean_500_not_a_crash(server):
     status, body = _get(port, "/api/vault/search?q=x&limit=notanumber")
     assert status == 500
     assert "error" in body
+
+
+def test_vault_backlinks_returns_the_relation(server):
+    port, _, _ = server
+    status, body = _get(port, "/api/vault/backlinks?path=reference/hub.md")
+    assert status == 200
+    assert body["inbound_count"] == 1
+    assert body["outbound"][0]["broken"] is True
+
+
+def test_vault_backlinks_requires_a_path(server):
+    port, _, _ = server
+    status, body = _get(port, "/api/vault/backlinks")
+    assert status == 400
+    assert "error" in body
+
+
+def test_vault_backlinks_propagates_a_bad_path_as_400(server):
+    port, _, _ = server
+    status, _ = _get(port, "/api/vault/backlinks?path=bad")
+    assert status == 400
+
+
+def _post(port, path, payload):
+    conn = http.client.HTTPConnection("127.0.0.1", port, timeout=5)
+    conn.request("POST", path, body=json.dumps(payload),
+                 headers={"Content-Type": "application/json"})
+    res = conn.getresponse()
+    body = json.loads(res.read())
+    conn.close()
+    return res.status, body
+
+
+def test_note_create_route_goes_through_notewriter(server, monkeypatch):
+    """The dashboard must not grow its own write path — both surfaces call
+    notewriter.create_note so they cannot drift."""
+    seen = {}
+
+    def fake_create(vault, folder, title, content):
+        seen.update(folder=folder, title=title, content=content)
+        return {"status": "ok", "path": f"{folder}/x.md", "folder": folder, "name": "x.md"}
+
+    monkeypatch.setattr(dashboard_api._notewriter, "create_note", fake_create)
+    port, _, _ = server
+    status, body = _post(port, "/api/vault/note/create",
+                         {"folder": "reference", "title": "T", "content": "C"})
+    assert status == 200
+    assert body["path"] == "reference/x.md"
+    assert seen == {"folder": "reference", "title": "T", "content": "C"}
+
+
+def test_note_create_route_surfaces_a_writer_error_as_400(server, monkeypatch):
+    monkeypatch.setattr(dashboard_api._notewriter, "create_note",
+                        lambda *a, **k: {"error": "Invalid folder 'Nope'"})
+    port, _, _ = server
+    status, body = _post(port, "/api/vault/note/create", {"folder": "Nope", "title": "T"})
+    assert status == 400
+    assert "error" in body
+
+
+def test_note_save_route_requires_path_and_content(server):
+    port, _, _ = server
+    assert _post(port, "/api/vault/note/save", {"content": "x"})[0] == 400
+    assert _post(port, "/api/vault/note/save", {"path": "a.md"})[0] == 400
+
+
+def test_note_save_route_goes_through_notewriter(server, monkeypatch):
+    seen = {}
+
+    def fake_save(vault, rel, content):
+        seen.update(rel=rel, content=content)
+        return {"status": "ok", "path": rel, "bytes": len(content)}
+
+    monkeypatch.setattr(dashboard_api._notewriter, "save_note", fake_save)
+    port, _, _ = server
+    status, body = _post(port, "/api/vault/note/save",
+                         {"path": "reference/a.md", "content": "new text"})
+    assert status == 200
+    assert body["bytes"] == 8
+    assert seen == {"rel": "reference/a.md", "content": "new text"}

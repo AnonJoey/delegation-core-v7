@@ -19,7 +19,10 @@ def export(vault, title: str, summary: str, key_decisions: str = "") -> dict:
     key_decisions: comma-separated decisions, artifacts created, or next steps
     """
     cfg = vault.cfg
-    folder = "sessions" if "sessions" in cfg.vault_folders else cfg.vault_folders[0]
+    # Case-insensitive: a vault with a "Sessions" folder must not fall through to
+    # vault_folders[0], which silently filed every session digest under Projects/.
+    from .config import resolve_folder
+    folder = resolve_folder("sessions", cfg.vault_folders) or cfg.vault_folders[0]
 
     from .vault import safe_filename, unique_note_path, yaml_quote_scalar
     safe = safe_filename(title)

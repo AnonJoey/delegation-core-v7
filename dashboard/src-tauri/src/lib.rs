@@ -186,6 +186,27 @@ fn get_api_port(state: State<SidecarState>) -> u16 {
     state.port
 }
 
+#[tauri::command]
+fn minimize_window(window: tauri::Window) {
+    let _ = window.minimize();
+}
+
+#[tauri::command]
+fn toggle_maximize_window(window: tauri::Window) {
+    if let Ok(is_maximized) = window.is_maximized() {
+        if is_maximized {
+            let _ = window.unmaximize();
+        } else {
+            let _ = window.maximize();
+        }
+    }
+}
+
+#[tauri::command]
+fn close_window(window: tauri::Window) {
+    let _ = window.close();
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     // Works around a WebKitGTK + NVIDIA + Wayland crash observed directly on
@@ -207,7 +228,12 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
-        .invoke_handler(tauri::generate_handler![get_api_port])
+        .invoke_handler(tauri::generate_handler![
+            get_api_port,
+            minimize_window,
+            toggle_maximize_window,
+            close_window
+        ])
         .setup(|app| {
             match spawn_dashboard_api() {
                 Ok((port, child)) => {

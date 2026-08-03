@@ -14,13 +14,18 @@ meant to be reached exclusively by the local Tauri webview.
 Endpoints:
   GET  /api/status                  vault/binary/model/llama.cpp health
   GET  /api/clients                 currently-connected MCP client surfaces
-  GET  /api/vault/tree               folder -> notes listing
+  GET  /api/vault/tree               directory shape (path, depth, note count)
+  GET  /api/vault/notes?dir=&offset= notes inside one directory, paginated
+  GET  /api/vault/find?q=            literal title/path lookup (no embeddings)
+  GET  /api/vault/backlinks?path=    inbound + outbound wikilinks for one note
   GET  /api/vault/note?path=...      one note's raw content
   GET  /api/vault/search?q=...       BGE similarity search
   GET  /api/vault/graph              {nodes, edges} from [[wikilinks]] across the vault
   GET  /api/graphs                   previously built code graphs (graphbridge registry)
   GET  /api/processes?status=&query= tracked processes (ProcessTracker.list_processes)
   GET  /api/processes/get?id=...     full detail of one process
+  POST /api/vault/note/create        {folder, title, content} -> new dated note
+  POST /api/vault/note/save          {path, content} -> overwrite + reindex
   POST /api/processes/create         {name, description, steps: [str]}
   POST /api/processes/update         {process_id, note, step_done, status}
 
@@ -66,6 +71,8 @@ import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
+
+from . import notewriter as _notewriter
 
 logger = logging.getLogger("dashboard_api")
 
@@ -125,20 +132,43 @@ def _find_llama_process():
     return None
 
 
-def _build_vault_graph(cfg) -> dict:
+_VAULT_GRAPH_MAX_NODES = 1500
+
+
+def _build_vault_graph(cfg, include_generated: bool = False,
+                       max_nodes: int = _VAULT_GRAPH_MAX_NODES) -> dict:
     """Parse every vault note for [[wikilinks]] and return {nodes, edges}.
 
     Dependency-free on purpose (no networkx) — the vault graph view shouldn't
     require the [graph] extra, which is for the separate *code* graph pipeline.
     Reuses linker.py's own wikilink regex (existing_targets) rather than
     re-deriving the [[stem|Display]]/[[stem#section]] parsing rules.
+
+    This is the *knowledge* graph. Code graphs are a separate thing with their
+    own artifacts (graph.json/graph.html/callflow.html under
+    ``~/.delegation_core/graphs/<name>/``), their own API (``/api/graphs``) and
+    their own pane behind the dashboard's Vault/Code toggle — so their wiki
+    articles are excluded here by default rather than mixed in. They were mixed
+    in only because graph_build files them into a vault folder to make them
+    searchable: on this vault that meant 3661 generated articles against 216
+    hand-written notes, i.e. the "vault" view was 94% one codebase.
+
+    Membership uses ``VaultManager.classify_path`` — the same rule that already
+    backs ``search_vault(scope=...)`` — rather than a second, parallel
+    definition of what counts as generated.
+
+    ``max_nodes`` additionally caps what reaches the canvas, keeping the newest
+    notes; the renderer is force-directed and every node costs per frame.
+    ``total_nodes``/``truncated``/``generated_excluded`` are reported so a
+    bounded answer is never mistaken for a complete one.
     """
     from .linker import existing_targets
-    from .vault import yaml_unquote_scalar
+    from .vault import VaultManager, yaml_unquote_scalar
 
     vault = cfg.vault
     notes: dict[str, dict] = {}   # lowercase stem -> {id, title, folder, path}
     contents: dict[str, str] = {}  # lowercase stem -> raw content (for link extraction)
+    generated_skipped = 0
 
     for folder in cfg.vault_folders:
         folder_path = vault / folder
@@ -158,9 +188,24 @@ def _build_vault_graph(cfg) -> dict:
                             title = yaml_unquote_scalar(line.split(":", 1)[1])
                             break
             rel = str(f.relative_to(vault))
+            if not include_generated and VaultManager.classify_path(rel)[0] == "generated":
+                generated_skipped += 1
+                continue
             key = f.stem.lower()
-            notes[key] = {"id": key, "title": title, "folder": folder, "path": rel}
+            notes[key] = {"id": key, "title": title, "folder": folder, "path": rel,
+                          "mtime": f.stat().st_mtime}
             contents[key] = content
+
+    total_nodes = len(notes)
+    if total_nodes > max_nodes:
+        # Keep the newest — an over-cap vault is one where recent work matters
+        # more than a note filed months ago. Edges are built after the cut so
+        # no edge can point at a node the client never received.
+        keep = sorted(notes.items(), key=lambda kv: kv[1]["mtime"], reverse=True)[:max_nodes]
+        notes = dict(keep)
+        contents = {k: contents[k] for k in notes}
+    for node in notes.values():
+        node.pop("mtime", None)
 
     edges = []
     seen_edges = set()
@@ -175,7 +220,14 @@ def _build_vault_graph(cfg) -> dict:
             seen_edges.add(edge)
             edges.append({"source": key, "target": target_key})
 
-    return {"nodes": list(notes.values()), "edges": edges}
+    return {
+        "nodes": list(notes.values()),
+        "edges": edges,
+        "total_nodes": total_nodes,
+        "truncated": total_nodes > len(notes),
+        "max_nodes": max_nodes,
+        "generated_excluded": generated_skipped,
+    }
 
 
 def _status(cfg, vault) -> dict:
@@ -284,6 +336,19 @@ class _Handler(BaseHTTPRequestHandler):
             elif parsed.path == "/api/clients":
                 from .client_tracking import list_connected_clients
                 self._send_json({"clients": list_connected_clients()})
+            elif parsed.path == "/api/mcp/windows":
+                # The MCP servers the *LLM provider's* client has mounted — i.e. what
+                # Claude can reach. Distinct from /api/clients, which lists the client
+                # surfaces attached to this delegation-core process. Both are "MCP
+                # connections"; they point in opposite directions.
+                from .windows import list_windows
+                self._send_json(list_windows())
+            elif parsed.path == "/api/vault/notes":
+                self._handle_vault_notes(parse_qs(parsed.query))
+            elif parsed.path == "/api/vault/backlinks":
+                self._handle_vault_backlinks(parse_qs(parsed.query))
+            elif parsed.path == "/api/vault/find":
+                self._handle_vault_find(parse_qs(parsed.query))
             elif parsed.path == "/api/vault/tree":
                 self._handle_vault_tree()
             elif parsed.path == "/api/vault/note":
@@ -291,14 +356,22 @@ class _Handler(BaseHTTPRequestHandler):
             elif parsed.path == "/api/vault/search":
                 self._handle_vault_search(query)
             elif parsed.path == "/api/vault/graph":
-                self._send_json(_build_vault_graph(_cfg))
+                q = parse_qs(parsed.query)
+                include_generated = (q.get("generated") or ["1"])[0] != "0"
+                self._send_json(_build_vault_graph(_cfg, include_generated=include_generated))
             elif parsed.path == "/api/graphs":
                 from . import graphbridge
                 self._send_json(graphbridge.list_graphs(_cfg))
+            elif parsed.path == "/api/graphs/get":
+                self._handle_graphs_get(query)
+            elif parsed.path == "/api/graphs/affected":
+                self._handle_graphs_affected(query)
             elif parsed.path == "/api/processes":
                 self._handle_processes_list(query)
             elif parsed.path == "/api/processes/get":
                 self._handle_processes_get(query)
+            elif parsed.path == "/api/config":
+                self._handle_config_get()
             else:
                 self._send_json({"error": f"not found: {parsed.path}"}, status=404)
         except Exception as e:
@@ -332,7 +405,11 @@ class _Handler(BaseHTTPRequestHandler):
     def do_POST(self):
         parsed = urlparse(self.path)
         try:
-            if parsed.path == "/api/processes/create":
+            if parsed.path == "/api/vault/note/create":
+                self._handle_note_create()
+            elif parsed.path == "/api/vault/note/save":
+                self._handle_note_save()
+            elif parsed.path == "/api/processes/create":
                 self._handle_processes_create()
             elif parsed.path == "/api/processes/update":
                 self._handle_processes_update()
@@ -340,6 +417,10 @@ class _Handler(BaseHTTPRequestHandler):
                 self._handle_llama_start()
             elif parsed.path == "/api/llama/stop":
                 self._handle_llama_stop()
+            elif parsed.path == "/api/config/update":
+                self._handle_config_update()
+            elif parsed.path == "/api/system/purge_orphans":
+                self._handle_purge_orphans()
             else:
                 self._send_json({"error": f"not found: {parsed.path}"}, status=404)
         except Exception as e:
@@ -362,6 +443,186 @@ class _Handler(BaseHTTPRequestHandler):
             self._send_json({"error": f"not found: {process_id}"}, status=404)
             return
         self._send_json(proc)
+
+    def _handle_graphs_get(self, query) -> None:
+        name = (query.get("name") or [""])[0]
+        if not name:
+            self._send_json({"error": "missing name parameter"}, status=400)
+            return
+        from . import graphbridge
+        res = graphbridge.get_report(_cfg, name)
+        status_code = 404 if "error" in res else 200
+        self._send_json(res, status=status_code)
+
+    def _handle_graphs_affected(self, query) -> None:
+        name = (query.get("name") or [""])[0]
+        q = (query.get("query") or [""])[0]
+        depth_str = (query.get("depth") or ["2"])[0]
+        try:
+            depth = int(depth_str)
+        except ValueError:
+            depth = 2
+        if not name or not q:
+            self._send_json({"error": "missing name or query parameter"}, status=400)
+            return
+        from . import graphbridge
+        res = graphbridge.get_affected(_cfg, name, query=q, depth=depth)
+        status_code = 404 if "error" in res else 200
+        self._send_json(res, status=status_code)
+
+    def _handle_config_get(self) -> None:
+        from dataclasses import asdict
+        config_dict = asdict(_cfg)
+        models_dir = _cfg.models_dir
+        available_models = []
+        if models_dir.exists():
+            for f in sorted(models_dir.glob("*.gguf")):
+                available_models.append(str(f))
+        self._send_json({
+            "config": config_dict,
+            "available_models": available_models
+        })
+
+    def _handle_config_update(self) -> None:
+        data = self._read_json_body()
+        if data is None:
+            return
+
+        if "engine_mode" in data:
+            mode = str(data["engine_mode"]).strip().lower()
+            if mode in ("local", "agent", "hybrid"):
+                _cfg.engine_mode = mode
+
+        if "budget_mode" in data:
+            b_mode = str(data["budget_mode"]).strip().lower()
+            if b_mode in ("normal", "cpu", "auto"):
+                _cfg.budget_mode = b_mode
+
+        if "llama_model" in data:
+            _cfg.llama_model = str(data["llama_model"]).strip()
+
+        if "llama_binary" in data:
+            _cfg.llama_binary = str(data["llama_binary"]).strip()
+
+        if "bge_model" in data:
+            _cfg.bge_model = str(data["bge_model"]).strip()
+
+        if "search_threshold" in data:
+            try:
+                _cfg.search_threshold = float(data["search_threshold"])
+            except (ValueError, TypeError):
+                pass
+
+        if "merge_threshold" in data:
+            try:
+                _cfg.merge_threshold = float(data["merge_threshold"])
+            except (ValueError, TypeError):
+                pass
+
+        if "max_tokens" in data:
+            try:
+                _cfg.max_tokens = int(data["max_tokens"])
+            except (ValueError, TypeError):
+                pass
+
+        if "synthesis_enabled" in data:
+            _cfg.synthesis_enabled = bool(data["synthesis_enabled"])
+
+        if "synthesis_lang" in data:
+            lang = str(data["synthesis_lang"]).strip().lower()
+            if lang in ("en", "pt"):
+                _cfg.synthesis_lang = lang
+
+        if "web_search_enabled" in data:
+            _cfg.web_search_enabled = bool(data["web_search_enabled"])
+
+        if "llama_ctx" in data:
+            try:
+                _cfg.llama_ctx = int(data["llama_ctx"])
+            except (ValueError, TypeError):
+                pass
+
+        if "llama_ngl" in data:
+            try:
+                _cfg.llama_ngl = int(data["llama_ngl"])
+            except (ValueError, TypeError):
+                pass
+
+        _cfg.save()
+        from dataclasses import asdict
+        self._send_json({"ok": True, "config": asdict(_cfg)})
+
+    def _handle_purge_orphans(self) -> None:
+        import os
+        import psutil
+        from .client_tracking import SESSIONS_DIR
+
+        purged_sessions = 0
+        if SESSIONS_DIR.exists():
+            for f in SESSIONS_DIR.glob("*.json"):
+                try:
+                    data = json.loads(f.read_text(encoding="utf-8"))
+                    pid = data.get("pid")
+                    if pid and not psutil.pid_exists(pid):
+                        f.unlink(missing_ok=True)
+                        purged_sessions += 1
+                except Exception:
+                    pass
+
+        killed_orphans = 0
+        my_pid = os.getpid()
+        for proc in psutil.process_iter(["pid", "ppid", "cmdline"]):
+            try:
+                if proc.info["pid"] == my_pid:
+                    continue
+                cmdline = proc.info["cmdline"] or []
+                if any("dashboard_api" in arg for arg in cmdline):
+                    ppid = proc.info["ppid"]
+                    if ppid == 1 or not psutil.pid_exists(ppid):
+                        proc.kill()
+                        killed_orphans += 1
+            except (psutil.NoSuchProcess, psutil.AccessDenied):
+                pass
+
+        self._send_json({
+            "ok": True,
+            "purged_sessions": purged_sessions,
+            "killed_orphans": killed_orphans,
+            "message": f"Purged {purged_sessions} dead session files and killed {killed_orphans} orphaned sidecar processes."
+        })
+
+    def _handle_note_create(self) -> None:
+        """Create a note through the same code path the MCP write_note uses.
+
+        Both call notewriter.create_note rather than each writing files and
+        indexing on their own — a second write path would be free to drift from
+        the first, which is the failure mode this codebase has been removing.
+        """
+        data = self._read_json_body()
+        if data is None:
+            return
+        result = _notewriter.create_note(
+            _vault,
+            str(data.get("folder", "")).strip(),
+            str(data.get("title", "")).strip(),
+            str(data.get("content", "")),
+        )
+        self._send_json(result, status=400 if "error" in result else 200)
+
+    def _handle_note_save(self) -> None:
+        """Overwrite an existing note's raw text and reindex it."""
+        data = self._read_json_body()
+        if data is None:
+            return
+        rel = str(data.get("path", "")).strip()
+        if not rel:
+            self._send_json({"error": "path is required"}, status=400)
+            return
+        if "content" not in data:
+            self._send_json({"error": "content is required"}, status=400)
+            return
+        result = _notewriter.save_note(_vault, rel, str(data["content"]))
+        self._send_json(result, status=400 if "error" in result else 200)
 
     def _handle_processes_create(self) -> None:
         data = self._read_json_body()
@@ -440,8 +701,62 @@ class _Handler(BaseHTTPRequestHandler):
         self._send_json({"status": "stopped"})
 
     def _handle_vault_tree(self) -> None:
-        tree = {folder: _vault.list_notes(folder, limit=1000) for folder in _cfg.vault_folders}
-        self._send_json({"folders": tree})
+        """Directory shape only — notes come from /api/vault/notes per directory.
+
+        The old version returned the newest 1000 notes of every top-level folder
+        in one payload and no hierarchy at all, so 3661 notes sitting three
+        levels down were unreachable. Directories are cheap to enumerate (25 in
+        this vault), and paging notes per directory is what makes a 2711-note
+        folder browsable.
+        """
+        self._send_json({"directories": _vault.list_directories()})
+
+    def _handle_vault_notes(self, query) -> None:
+        dir_rel = (query.get("dir") or [""])[0]
+        if not dir_rel:
+            self._send_json({"error": "dir is required"}, status=400)
+            return
+        try:
+            offset = max(int((query.get("offset") or ["0"])[0]), 0)
+            limit = min(max(int((query.get("limit") or ["200"])[0]), 1), 500)
+        except ValueError:
+            self._send_json({"error": "offset and limit must be integers"}, status=400)
+            return
+        result = _vault.list_notes_in(dir_rel, offset=offset, limit=limit)
+        self._send_json(result, status=400 if "error" in result else 200)
+
+    def _handle_vault_backlinks(self, query) -> None:
+        """Which notes point at this one, and where this one points.
+
+        The relation was always computed (linker.inject_backlinks writes it into
+        note bodies on every write) but never exposed, so a reader saw only
+        whatever text happened to be in the note.
+        """
+        rel = (query.get("path") or [""])[0]
+        if not rel:
+            self._send_json({"error": "path is required"}, status=400)
+            return
+        result = _vault.note_links(rel)
+        self._send_json(result, status=400 if "error" in result else 200)
+
+    def _handle_vault_find(self, query) -> None:
+        """Literal title/path lookup — deliberately not the semantic search.
+
+        /api/vault/search is BGE with a similarity cutoff, which cannot reliably
+        answer "open the note called X": the exact title of a note written
+        minutes earlier did not come back in its top 3.
+        """
+        q = (query.get("q") or [""])[0].strip()
+        if not q:
+            self._send_json({"error": "q is required"}, status=400)
+            return
+        try:
+            limit = min(max(int((query.get("limit") or ["30"])[0]), 1), 100)
+        except ValueError:
+            self._send_json({"error": "limit must be an integer"}, status=400)
+            return
+        results = _vault.find_notes(q, limit=limit)
+        self._send_json({"query": q, "count": len(results), "results": results})
 
     def _handle_vault_note(self, query) -> None:
         rel_path = (query.get("path") or [""])[0]
@@ -520,15 +835,18 @@ def run(port: int = 0, host: str = "127.0.0.1", parent_pid: int | None = None) -
     import os
     from .config import Config
 
-    # Matches cli.py's cmd_run(): use cached model weights only, no live HF Hub
-    # version-check chatter on every startup (the model is already on disk).
-    os.environ.setdefault("HF_HUB_OFFLINE", "1")
-
     logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s",
                         stream=sys.stderr)
 
     global _cfg, _vault, _tracker
     _cfg = Config.load()
+
+    # Matches cli.py's cmd_run(): skip the HF Hub round-trip once the weights are
+    # cached. Deliberately after Config.load(), because the decision depends on
+    # which model is configured — and it must stay conditional, or a machine that
+    # never downloaded the model can never start.
+    from .embeddings import prefer_offline
+    prefer_offline(getattr(_cfg, "bge_model", ""))
     if not _cfg.is_configured():
         sys.stderr.write("delegation-core is not configured.\nRun: delegation-core setup\n")
         sys.exit(1)
