@@ -66,10 +66,25 @@ def _countable_wikilinks(content: str) -> list[str]:
 
 
 def safe_filename(title: str, max_len: int = 50) -> str:
-    """Sanitize a title into a filesystem-safe filename stem."""
+    """Sanitize a title into a filesystem-safe filename stem.
+
+    Truncation cuts on a word boundary when one is available, then strips
+    punctuation the cut can strand. A raw slice used to leave stems like
+    "... da arquitetura (" — a dangling opening paren that reads as a broken
+    filename in Obsidian and labels the note's graph node with it.
+    """
     safe = _INVALID_FILENAME_CHARS.sub("_", title)
     safe = re.sub(r"_+", "_", safe).strip().rstrip(" .")
-    return safe[:max_len] or "untitled"
+    if len(safe) > max_len:
+        safe = safe[:max_len]
+        # Only back up to a word boundary if that keeps the stem recognisable;
+        # a title with no spaces in range (or a very late first space) keeps
+        # the hard slice rather than collapsing to a stub.
+        cut = safe.rfind(" ")
+        if cut >= max_len // 2:
+            safe = safe[:cut]
+        safe = safe.rstrip(" .,;:-_([{<\"'—–")
+    return safe or "untitled"
 
 
 def unique_note_path(dest: Path) -> Path:
@@ -178,6 +193,17 @@ class VaultManager:
         with self._init_lock:
             if self._initialized:
                 return
+            # An unset vault_path resolves to Path(".") — an existing directory —
+            # so no existence check catches it and the whole index materialises
+            # under whatever the process's cwd happens to be. Config.load()
+            # falls back to defaults on any read error, so this is reachable in
+            # production, not just from a hand-written script.
+            if not str(self.cfg.vault_path).strip():
+                raise ValueError(
+                    "vault_path is not configured — refusing to create the index "
+                    "in the current working directory. Run the setup wizard, or "
+                    "build the Config with Config.load()."
+                )
             try:
                 import chromadb
                 self.cfg.chroma_path.mkdir(parents=True, exist_ok=True)

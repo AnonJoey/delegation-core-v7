@@ -11,9 +11,18 @@ smoke script quoted in the commit message, never by the suite. It guards
 against write_note/export_session/maintenance silently overwriting an existing
 note's file AND its ChromaDB index row when two same-titled notes land on the
 same day — data loss, so the -2/-3 suffixing contract is pinned here.
+
+VaultManager._init's vault_path guard (2026-08-03): an unset vault_path
+resolves to Path(".") — an existing directory — so the index silently
+materialised under the process's cwd instead of failing. Config.load() degrades
+to defaults on any read error, so this is reachable in production.
 """
 
+import pytest
+
+from delegation_core.config import Config
 from delegation_core.vault import (
+    VaultManager,
     safe_filename,
     unique_note_path,
     yaml_quote_scalar,
@@ -36,6 +45,34 @@ def test_safe_filename_truncates_to_max_len():
 def test_safe_filename_empty_input_falls_back():
     assert safe_filename("") == "untitled"
     assert safe_filename("   ") == "untitled"
+
+
+def test_safe_filename_truncation_does_not_strand_open_bracket():
+    """Regression: a real write_note call produced the stem
+
+        "2026-08-02-Hermes Agent v0.19.1 — dissecação da arquitetura ("
+
+    — the 50-char slice landed just past an opening paren, so Obsidian showed
+    a note (and a graph node) labelled with a dangling bracket.
+    """
+    stem = safe_filename("Hermes Agent v0.19.1 — dissecação da arquitetura (NousResearch)")
+    assert not stem.endswith("(")
+    assert stem == "Hermes Agent v0.19.1 — dissecação da arquitetura"
+
+
+def test_safe_filename_truncation_cuts_on_word_boundary():
+    stem = safe_filename("the quick brown fox jumps over the lazy dog", max_len=20)
+    assert stem == "the quick brown fox"
+    assert len(stem) <= 20
+
+
+def test_safe_filename_truncation_keeps_hard_slice_without_word_boundary():
+    # No space in range → backing up would leave a stub, so the slice stands.
+    assert safe_filename("supercalifragilistic" + "x" * 40, max_len=10) == "supercalif"
+
+
+def test_safe_filename_truncation_never_returns_empty():
+    assert safe_filename("((((((((((((((((((((", max_len=10) == "untitled"
 
 
 def test_yaml_quote_scalar_wraps_in_quotes():
@@ -90,3 +127,20 @@ def test_unique_note_path_keeps_suffix_after_counter(tmp_path):
     result = unique_note_path(dest)
     assert result.suffix == ".md"
     assert result.name == "note-2.md"
+
+
+def test_vault_manager_refuses_to_index_into_cwd_when_vault_path_unset(tmp_path, monkeypatch):
+    """Regression: Config() with no vault_path yields Path(".") — an existing
+    directory — so chroma_path.mkdir() silently created a full ChromaDB under
+    the process's cwd and 2709 notes were "filed" nowhere near the vault.
+
+    Config.load() degrades to cls() on any read error, so an unreadable or
+    corrupt config.json reaches this same state in production.
+    """
+    monkeypatch.chdir(tmp_path)
+    vm = VaultManager(Config())
+
+    with pytest.raises(ValueError, match="vault_path is not configured"):
+        vm._init()
+
+    assert not (tmp_path / ".chroma_bge").exists()
