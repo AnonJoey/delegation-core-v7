@@ -715,13 +715,28 @@ async def vault_reindex_bg(force: bool = False) -> str:
 
 @mcp.tool()
 async def task_status(job_id: str) -> str:
-    """Check the status of a background job. Returns status, elapsed time, and result."""
+    """Check the status of a background job.
+
+    While running, also reports how long this kind of job usually takes
+    (`typical_seconds`, median of the last completed runs) and when it is worth
+    checking again (`check_again_in_seconds`). Without those, elapsed time alone
+    cannot distinguish a job that is nearly done from one with minutes to go.
+    Both are absent the first time a given task runs on this machine.
+    """
     job = jobs.get(job_id)
     if not job:
         return json.dumps({"error": f"Job '{job_id}' not found."})
     if job["status"] == "running":
         from datetime import datetime as dt
-        job["elapsed_seconds"] = (dt.now() - dt.fromisoformat(job["started"])).seconds
+        elapsed = (dt.now() - dt.fromisoformat(job["started"])).total_seconds()
+        job["elapsed_seconds"] = int(elapsed)
+        typical = jobs.typical_seconds(job["task"])
+        if typical:
+            job["typical_seconds"] = typical
+            # Aim the next poll just past the expected finish; once a job is
+            # already overdue, fall back to a slow steady beat rather than
+            # suggesting a poll in the past.
+            job["check_again_in_seconds"] = max(int(typical - elapsed) + 5, 30)
     return json.dumps(job)
 
 
@@ -770,7 +785,7 @@ async def ingest_forget(source_path: str) -> str:
 # ── code graph ─────────────────────────────────────────────────────────────────
 
 @mcp.tool()
-async def graph_preview(path: str, name: str = "") -> str:
+async def graph_preview(path: str, name: str = "", exclude: list[str] | None = None) -> str:
     """
     CALL THIS BEFORE graph_build on an unfamiliar directory.
     Reports what a build would cover — file counts by type, code files by extension,
@@ -782,7 +797,7 @@ async def graph_preview(path: str, name: str = "") -> str:
     can be judged against real measurements.
     """
     try:
-        result = await asyncio.to_thread(graphbridge.preview_graph, _vault.cfg, path, name or None)
+        result = await asyncio.to_thread(graphbridge.preview_graph, _vault.cfg, path, name or None, exclude)
     except ModuleNotFoundError as e:
         return json.dumps({"error": f"code-graph pipeline not installed: {e}. "
                                     'Run: pip install "delegation-core[graph]"'})
@@ -804,15 +819,18 @@ async def extract_source_maps(source_path: str, out_dir: str) -> str:
 
 
 @mcp.tool()
-async def graph_build_bg(path: str, name: str = "", force: bool = False) -> str:
+async def graph_build_bg(path: str, name: str = "", force: bool = False,
+                         exclude: list[str] | None = None) -> str:
     """
     Build a code knowledge graph in the background. Returns a job_id immediately.
     Prefer this over graph_build for anything sizeable: a real codebase takes minutes,
     which exceeds most MCP client timeouts.
+    exclude: gitignore-syntax patterns to leave out (see graph_build).
     """
     def _run():
         return asyncio.run(
-            graphbridge.build_graph(_vault.cfg, _vault, path, name=name or None, force=force))
+            graphbridge.build_graph(_vault.cfg, _vault, path, name=name or None,
+                                    force=force, exclude=exclude))
 
     job_id = jobs.submit("graph_build", _run)
     return json.dumps({"job_id": job_id, "path": path, "status": "running",
@@ -820,7 +838,8 @@ async def graph_build_bg(path: str, name: str = "", force: bool = False) -> str:
 
 
 @mcp.tool()
-async def graph_build(path: str, name: str = "", force: bool = False) -> str:
+async def graph_build(path: str, name: str = "", force: bool = False,
+                      exclude: list[str] | None = None) -> str:
     """
     Build a code knowledge graph for a local directory: detect -> AST extract
     (tree-sitter, code files only) -> build -> cluster -> analyze -> report -> export.
@@ -830,6 +849,11 @@ async def graph_build(path: str, name: str = "", force: bool = False) -> str:
     searchable through search_vault.
     name defaults to the directory's basename. Re-running the same name is a no-op
     unless force=true (rebuilds and overwrites).
+    exclude: gitignore-syntax patterns to leave out of the scan, e.g.
+    ["tests/", "website/", "vendor/"]. Worth setting on any large repository —
+    one real build spent 40% of its 2704 wiki articles on communities made
+    entirely of test files, which then had to be pruned out of the vault by
+    hand. Pass the same patterns to graph_preview() to size the build first.
     Blocks until done — call graph_preview() first to see the scale, and prefer
     graph_build_bg() for anything that might outlast the client's timeout.
     Requires the [graph] extra: pip install "delegation-core[graph]".

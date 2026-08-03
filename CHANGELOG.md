@@ -53,6 +53,28 @@ error, which is why they survived unnoticed.
    `config.json` reaches this state in production, not just from a hand-written
    script. `_init()` now refuses to start with an unconfigured `vault_path`.
 
+### Added
+
+- **`task_status()` reports pacing, not just elapsed time.** While a job runs it
+  now also returns `typical_seconds` (median of the last 10 successful runs of
+  that task, persisted to `~/.delegation_core/job_durations.json`) and
+  `check_again_in_seconds`. Elapsed time alone cannot distinguish "20s in, 8
+  minutes to go" from "nearly done", so a caller polling a 7-minute graph build
+  had to either poll every 30s or abandon the tool and watch the output
+  directory from a shell — which is what happened in practice. Both fields are
+  absent on a task's first run, when there is no history to reason from.
+
+- **`graph_build` / `graph_build_bg` / `graph_preview` accept `exclude`.**
+  Gitignore-syntax patterns, forwarded to `detect()`'s existing
+  `extra_excludes` parameter — available all along, never wired to the caller,
+  the same shape as the `community_labels` bug above. Without it the only way
+  to keep a repository's test tree out of a graph was to build everything and
+  prune afterwards: one real build filed 1071 vault articles for communities
+  made entirely of test files, removed by hand. On `hermes-agent`,
+  `exclude=["tests/", "tests-js/", "website/"]` cuts the scan by 45% (7719 →
+  4268 files). Passing the same patterns to `graph_preview` sizes the build
+  before committing to it.
+
 ### Notes
 
 Items 1 and 5 share a shape worth naming: a fallback that *fabricates* a

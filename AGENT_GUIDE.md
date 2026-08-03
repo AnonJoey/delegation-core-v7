@@ -315,15 +315,27 @@ or after running `delegation-core reindex` from the terminal has been requested.
 Poll any background job by its ID. Returns current status, elapsed time while running,
 and the full result once done.
 
+While a job is running it also reports **how long this kind of job usually takes** and
+**when to check again**, both derived from the median of the last 10 successful runs of
+that task on this machine:
+
 ```json
 // While running:
-→ { "job_id": "a3f2b1c4", "task": "run_maintenance", "status": "running", "elapsed_seconds": 12 }
+→ { "job_id": "a3f2b1c4", "task": "graph_build", "status": "running",
+    "elapsed_seconds": 42, "typical_seconds": 463.0,
+    "check_again_in_seconds": 426 }
 
 // When complete:
 → { "job_id": "a3f2b1c4", "task": "run_maintenance", "status": "done",
     "result": { "classified": [...], "merged": [...], "errors": [] },
     "started": "2026-06-03T14:22:01", "finished": "2026-06-03T14:22:38" }
 ```
+
+**Wait `check_again_in_seconds` instead of polling on a fixed short interval.**
+Elapsed time alone cannot tell "20s in, 8 minutes to go" apart from "nearly done", and
+a graph build or full reindex on a real corpus runs for minutes — polling it every 30s
+spends turns to learn nothing. Both fields are absent the first time a given task runs
+on this machine (no history yet); fall back to a conservative wait in that case.
 
 ---
 
@@ -804,7 +816,8 @@ Check ingest status      → ingest_status()
 Search web               → search_web(<query>) → write_note if useful
 Cross-link a folder      → relink_folder(<folder>)
 Vault repair backlog     → vault_health.needs_repair > 5 → run_maintenance_bg()
-Check job progress       → task_status(<job_id>)
+Graph a codebase         → graph_preview(<path>, exclude=[...]) → graph_build_bg(same exclude)
+Check job progress       → task_status(<job_id>) → wait check_again_in_seconds
 Check vault size         → vault_stats()
 Check what's connected   → list_mcp_clients()
 ```

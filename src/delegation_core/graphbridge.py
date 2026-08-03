@@ -317,7 +317,8 @@ def extract_source_maps(source_path: str, out_dir: str, limit: int = 20) -> dict
             "top_level": dict(sorted(roots.items(), key=lambda kv: -kv[1]))}
 
 
-def preview_graph(cfg, source_path: str, name: str | None = None) -> dict:
+def preview_graph(cfg, source_path: str, name: str | None = None,
+                  exclude: list[str] | None = None) -> dict:
     """Report what a graph_build would cover, without building anything.
 
     Added because the first real build filed 598 wiki articles into the vault
@@ -339,7 +340,8 @@ def preview_graph(cfg, source_path: str, name: str | None = None) -> dict:
 
     graph_name = _slugify(name or root.name)
     try:
-        detection = detect(root, cache_root=cfg.graphs_dir / graph_name / "cache")
+        detection = detect(root, cache_root=cfg.graphs_dir / graph_name / "cache",
+                           extra_excludes=exclude)
     except Exception as e:
         return {"error": f"detect() failed: {e}"}
 
@@ -398,7 +400,8 @@ def preview_graph(cfg, source_path: str, name: str | None = None) -> dict:
 
 async def build_graph(cfg, vault_manager, source_path: str,
                        name: str | None = None, force: bool = False,
-                       file_to_vault: bool = True) -> dict:
+                       file_to_vault: bool = True,
+                       exclude: list[str] | None = None) -> dict:
     """Build a code knowledge graph for source_path using the vendored pipeline.
 
     Writes graph.json / graph.html / callflow.html / GRAPH_REPORT.md / wiki/*.md
@@ -447,7 +450,7 @@ async def build_graph(cfg, vault_manager, source_path: str,
     cache_root = out_dir / "cache"
 
     try:
-        detection = detect(root, cache_root=cache_root)
+        detection = detect(root, cache_root=cache_root, extra_excludes=exclude)
     except Exception as e:
         return {"error": f"detect() failed: {e}"}
 

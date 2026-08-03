@@ -24,6 +24,7 @@ otherwise they'd read/write the real ~/.delegation_core/graphs/.
 """
 
 import json
+from pathlib import Path
 
 import pytest
 
@@ -355,7 +356,8 @@ def test_build_graph_labels_communities_by_hub_in_every_artifact(cfg, monkeypatc
     (src / "mod.py").write_text("x = 1\n", encoding="utf-8")
 
     monkeypatch.setattr(detect_mod, "detect",
-                        lambda root, cache_root=None: {"files": {"code": [str(src / "mod.py")]}})
+                        lambda root, cache_root=None, extra_excludes=None: {
+                            "files": {"code": [str(src / "mod.py")]}})
     monkeypatch.setattr(extract_mod, "extract",
                         lambda files, cache_root=None, root=None: {"input_tokens": 0, "output_tokens": 0})
     monkeypatch.setattr(build_mod, "build", lambda results, directed=True, root=None: G)
@@ -397,3 +399,60 @@ def test_build_graph_labels_communities_by_hub_in_every_artifact(cfg, monkeypatc
     assert seen["json"] == expected
     assert seen["html"] == expected
     assert seen["wiki"] == expected
+
+
+def test_build_graph_forwards_exclude_patterns_to_detect(cfg, monkeypatch, tmp_path):
+    """detect() has always accepted extra_excludes; build_graph never passed it.
+
+    Without this the only way to keep a repository's test tree out of a graph
+    was to build everything and prune afterwards — one real build filed 1071
+    vault articles for communities made entirely of test files, removed by hand.
+    Same shape as the community_labels bug: an available parameter left unwired.
+    """
+    import asyncio
+
+    nx = pytest.importorskip("networkx")
+
+    seen = {}
+    G = nx.DiGraph()
+    G.add_edge("a", "b")
+
+    import delegation_core.graph.analyze as analyze_mod
+    import delegation_core.graph.build as build_mod
+    import delegation_core.graph.callflow_html as callflow_mod
+    import delegation_core.graph.cluster as cluster_mod
+    import delegation_core.graph.detect as detect_mod
+    import delegation_core.graph.export as export_mod
+    import delegation_core.graph.extract as extract_mod
+    import delegation_core.graph.report as report_mod
+    import delegation_core.graph.wiki as wiki_mod
+
+    src = tmp_path / "src"
+    src.mkdir()
+    (src / "mod.py").write_text("x = 1\n", encoding="utf-8")
+
+    def _fake_detect(root, cache_root=None, extra_excludes=None):
+        seen["extra_excludes"] = extra_excludes
+        return {"files": {"code": [str(src / "mod.py")]}}
+
+    monkeypatch.setattr(detect_mod, "detect", _fake_detect)
+    monkeypatch.setattr(extract_mod, "extract",
+                        lambda files, cache_root=None, root=None: {"input_tokens": 0, "output_tokens": 0})
+    monkeypatch.setattr(build_mod, "build", lambda results, directed=True, root=None: G)
+    monkeypatch.setattr(cluster_mod, "cluster", lambda g: {0: ["a", "b"]})
+    monkeypatch.setattr(cluster_mod, "score_all", lambda g, c: {0: 0.5})
+    monkeypatch.setattr(analyze_mod, "god_nodes", lambda g: [])
+    monkeypatch.setattr(analyze_mod, "surprising_connections", lambda g, c: [])
+    monkeypatch.setattr(analyze_mod, "suggest_questions", lambda g, c, d: [])
+    monkeypatch.setattr(report_mod, "generate", lambda *a, **kw: "# Report")
+    monkeypatch.setattr(export_mod, "to_json",
+                        lambda g, c, path, **kw: Path(path).write_text("{}", encoding="utf-8"))
+    monkeypatch.setattr(export_mod, "to_html", lambda *a, **kw: None)
+    monkeypatch.setattr(callflow_mod, "write_callflow_html", lambda **kw: None)
+    monkeypatch.setattr(wiki_mod, "to_wiki", lambda *a, **kw: 1)
+
+    asyncio.run(graphbridge.build_graph(
+        cfg, FakeVaultManager(cfg), str(src), name="ex", force=True,
+        file_to_vault=False, exclude=["tests/", "website/"]))
+
+    assert seen["extra_excludes"] == ["tests/", "website/"]
