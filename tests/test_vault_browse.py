@@ -203,3 +203,22 @@ def test_note_links_lists_an_aliased_referrer_once(tmp_path):
 
     inbound = VaultManager(cfg).note_links("Reference/target.md")["inbound"]
     assert [n["path"] for n in inbound] == ["Reference/many-names.md"]
+
+
+# ── classify_path: graph reports are generated too ───────────────────────────
+
+@pytest.mark.parametrize("rel,expected", [
+    ("Reference/graphs/hermes-agent/AIAgent.md", ("generated", "hermes-agent")),
+    ("Reference/2026-08-03-Code Graph Report — hermes-agent.md", ("generated", "hermes-agent")),
+    ("Decisions/2026-01-01-Code Graph Report — repo.md", ("generated", "repo")),
+    ("Reference/2026-08-03-An ordinary note.md", ("note", "")),
+    ("Reference/Code Graph Report — no date.md", ("note", "")),
+    ("Reference/sub/2026-08-03-Code Graph Report — x.md", ("note", "")),
+])
+def test_classify_path_recognises_graph_reports(rel, expected):
+    """graph_build files its report at the top of the folder on purpose — the
+    "discoverable entry point" — so it is not under graphs/ and was graded as a
+    hand-written note. That leaked 5 reports into the dashboard's knowledge graph
+    and counted their code-derived link artifacts as the user's broken links."""
+    from delegation_core.vault import VaultManager
+    assert VaultManager.classify_path(rel) == expected

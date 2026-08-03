@@ -254,6 +254,9 @@ class VaultManager:
 
     #: Vault-relative path segment under which graph_build files its wiki articles.
     GENERATED_SEGMENT = "graphs"
+    # "<date>-Code Graph Report — <graph>.md", written by graphbridge.
+    _REPORT_STEM_RE = re.compile(
+        r"^\d{4}-\d{2}-\d{2}-Code Graph Report — (?P<graph>.+)\.md$")
 
     @classmethod
     def classify_path(cls, rel_path: str) -> tuple[str, str]:
@@ -266,6 +269,17 @@ class VaultManager:
         parts = [p for p in str(rel_path).replace("\\", "/").split("/") if p]
         if len(parts) >= 3 and parts[1] == cls.GENERATED_SEGMENT:
             return "generated", parts[2]
+        # graph_build's report is machine-written too, but it is filed at the top
+        # of its folder on purpose — graphbridge calls it the "discoverable entry
+        # point" — so it does not sit under graphs/ and was being graded as a
+        # hand-written note. That put 5 reports into the dashboard's knowledge
+        # graph and counted their code-derived [[Foo alloc]]-style artifacts as
+        # the user's broken links. Recognised by name rather than moved, so the
+        # entry point stays where it was designed to be.
+        if len(parts) == 2:
+            m = cls._REPORT_STEM_RE.match(parts[1])
+            if m:
+                return "generated", m.group("graph")
         return "note", ""
 
     @classmethod
@@ -890,6 +904,12 @@ class VaultManager:
                 # Verbatim machine records — graph_build's wiki articles and the
                 # SessionEnd hook's raw transcripts — are a different kind of
                 # object from a curated note, and both distort these metrics.
+                #
+                # Deliberately NOT classify_path(): that answers "which graph
+                # does this belong to", for search scoping, and knows nothing
+                # about session transcripts. This answers "is this a verbatim
+                # machine record", which is a wider question. Two definitions
+                # because there are two questions — not an oversight to merge.
                 n["generated"] = (fm.get("source") == "graph_build"
                                   or fm.get("type") == "session-transcript")
 

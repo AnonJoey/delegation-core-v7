@@ -186,6 +186,15 @@ error, which is why they survived unnoticed.
   that bug was found and fixed twice independently in this codebase before it
   had a single home.
 
+- **graph_build's report was graded as a hand-written note.** It is filed at
+  the top of its folder on purpose — graphbridge calls it the "discoverable
+  entry point" — so it does not live under `graphs/<name>/` and `classify_path`
+  returned `("note", "")` for it. Five reports were therefore rendered in the
+  dashboard's *knowledge* graph, immediately after that view was separated from
+  code graphs. `classify_path` now recognises the report by its generated
+  filename rather than moving it, so the entry point stays where it was designed
+  to be. Reports in the knowledge graph: 5 → 0.
+
 ### Notes
 
 Items 1 and 5 share a shape worth naming: a fallback that *fabricates* a
