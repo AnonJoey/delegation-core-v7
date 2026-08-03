@@ -848,6 +848,7 @@ Check ingest status      → ingest_status()
 Search web               → search_web(<query>) → write_note if useful
 Cross-link a folder      → relink_folder(<folder>)
 Vault repair backlog     → vault_health.needs_repair > 5 → run_maintenance_bg()
+Which links are broken   → vault_health_detail()   [nunca conte por script]
 Graph a codebase         → graph_preview(<path>, exclude=[...]) → graph_build_bg(same exclude)
 Re-export a built graph  → graph_export(<name>, "graphml"|"svg"|"cypher")
 What can this server do  → capabilities()

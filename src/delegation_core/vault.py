@@ -892,6 +892,13 @@ class VaultManager:
         folder_markers = {f.lower() for f in self.cfg.vault_folders}
         folder_markers.add(self.cfg.vault.name.lower())
         total = needs_repair = truncated = orphans = broken_links = 0
+        # Collected alongside the counts, not by a second pass: the whole point
+        # is that the detail and the summary cannot disagree.
+        broken: list[dict] = []
+        markers: list[dict] = []
+        orphan_notes: list[dict] = []
+        repair_notes: list[dict] = []
+        truncated_notes: list[dict] = []
         linked_to: set[str] = set()       # stems that are the target of a resolvable link
 
         # ── Pass 2: grade quality + resolve only note-like, non-code wikilinks ──
@@ -909,8 +916,11 @@ class VaultManager:
                     q = 0.0
                 if nr or (q is not None and q < threshold):
                     needs_repair += 1
+                    repair_notes.append({"stem": n["stem"], "folder": n["folder"],
+                                         "reason": "needs_review" if nr else f"quality {q}"})
                 if fm.get("truncated", "").lower() == "true":
                     truncated += 1
+                    truncated_notes.append({"stem": n["stem"], "folder": n["folder"]})
                 # Verbatim machine records — graph_build's wiki articles and the
                 # SessionEnd hook's raw transcripts — are a different kind of
                 # object from a curated note, and both distort these metrics.
@@ -946,9 +956,11 @@ class VaultManager:
                         # — a categorisation marker naming a folder, not a link
                         # to a note. 12 of the 26 "broken links" were these, and
                         # no note will ever exist to satisfy them.
-                        continue
+                        markers.append({"source": n["stem"], "target": link})
                     else:
                         broken_links += 1
+                        broken.append({"source": n["stem"], "folder": n["folder"],
+                                       "target": link})
             except Exception:
                 pass
 
@@ -963,6 +975,7 @@ class VaultManager:
                 continue
             if n["stem"].lower() not in linked_to:
                 orphans += 1
+                orphan_notes.append({"stem": n["stem"], "folder": n["folder"]})
 
         result = {
             "total_notes": total,
@@ -973,6 +986,15 @@ class VaultManager:
             "broken_links": broken_links,
             "computed_at": datetime.now().isoformat(),
         }
+        self._last_health_detail = {
+            "_vault": str(self.cfg.vault),
+            **result,
+            "broken_link_items": broken,
+            "orphan_items": orphan_notes,
+            "needs_repair_items": repair_notes,
+            "truncated_items": truncated_notes,
+            "folder_marker_items": markers,
+        }
         try:
             cache_path.write_text(
                 json.dumps({**result, "computed_at_ts": now,
@@ -981,6 +1003,56 @@ class VaultManager:
         except Exception:
             pass
         return result
+
+    def health_detail(self, limit: int = 50) -> dict:
+        """The findings behind get_health_summary()'s counts, itemised.
+
+        Exists because the summary returns numbers and nothing else, so acting
+        on "broken_links: 26" meant writing a throwaway script to enumerate
+        them — and a throwaway script re-implements the definitions. Three such
+        scripts over two days reported 248, 63 and 5 against true values of 31,
+        31 and 0: one used a bare regex instead of `_countable_wikilinks`, one
+        built a narrower resolvable set than the health pass uses, one compared
+        an unstripped stem against a stripped link target.
+
+        The lists are collected during the same pass that produces the counts,
+        not by a second traversal, so the detail cannot drift from the summary.
+        `folder_marker_items` are reported separately: they are `[[reference]]`
+        style categorisation markers, deliberately not counted as broken, and
+        showing them is what stops the next reader from "fixing" them.
+
+        Always recomputed — the summary's five-minute cache holds counts only.
+        """
+        detail = getattr(self, "_last_health_detail", None)
+        if detail is None or detail.get("_vault") != str(self.cfg.vault):
+            self._force_health_recompute()
+            detail = self._last_health_detail
+        capped = {"limit": limit}
+        for key in ("broken_link_items", "orphan_items", "needs_repair_items",
+                    "truncated_items", "folder_marker_items"):
+            items = detail.get(key, [])
+            capped[key] = items[:limit]
+            capped[f"{key}_total"] = len(items)
+        for key in ("total_notes", "needs_repair", "truncated", "orphans",
+                    "generated_notes", "broken_links", "computed_at"):
+            capped[key] = detail.get(key)
+        return capped
+
+    def _force_health_recompute(self) -> None:
+        """Run the health pass ignoring the summary cache, to populate detail."""
+        cache = Path.home() / ".delegation_core" / "vault_health.json"
+        backup = None
+        try:
+            if cache.exists():
+                backup = cache.read_text(encoding="utf-8")
+                cache.unlink()
+            self.get_health_summary()
+        finally:
+            if backup is not None and not cache.exists():
+                try:
+                    cache.write_text(backup, encoding="utf-8")
+                except OSError:
+                    pass
 
     def get_notes_needing_repair(self, threshold: float | None = None) -> list[dict]:
         """Return [{path, content, quality_score}] sorted by score ascending (worst first).

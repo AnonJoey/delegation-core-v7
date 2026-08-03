@@ -336,6 +336,24 @@ async def compress(source: str, raw_content: str, use_local: bool = False) -> st
 
 
 @mcp.tool()
+async def vault_health_detail(limit: int = 50) -> str:
+    """The findings behind heartbeat's vault_health counts, itemised.
+
+    Use this instead of writing a script to enumerate broken links or orphans.
+    A script re-implements the definitions — which link syntax counts, what a
+    target may resolve to — and three such scripts here reported 248, 63 and 5
+    against true values of 31, 31 and 0. These lists are collected in the same
+    pass that produces the counts, so they cannot disagree with them.
+
+    Returns broken_link_items (source, folder, target), orphan_items,
+    needs_repair_items, truncated_items, and folder_marker_items — the last
+    being `[[reference]]`-style category markers that are deliberately NOT
+    counted as broken, listed so they are not "fixed" by mistake.
+    """
+    return json.dumps(await asyncio.to_thread(_vault.health_detail, limit))
+
+
+@mcp.tool()
 async def vault_stats() -> str:
     """Return note counts per vault folder, ChromaDB index size, and embedding model info."""
     return json.dumps(_vault.get_stats())

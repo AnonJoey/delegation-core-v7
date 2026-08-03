@@ -1,5 +1,24 @@
 # Changelog
 
+## Unreleased
+
+### Added
+
+- **`vault_health_detail()` — the findings behind the health counts.** The
+  summary returned numbers and nothing else, so acting on "broken_links: 26"
+  meant writing a throwaway script to enumerate them, and a throwaway script
+  re-implements the definitions. Three such scripts over two days reported 248,
+  63 and 5 against true values of 31, 31 and 0: one used a bare regex instead of
+  `_countable_wikilinks`, one built a narrower resolvable set than the health
+  pass uses, one compared an unstripped stem against a stripped link target.
+  Every time the correct function already existed.
+
+  The lists are collected during the same pass that produces the counts, so
+  `len(broken_link_items) == broken_links` holds by construction rather than by
+  care. `folder_marker_items` are reported separately — `[[reference]]`-style
+  category markers, deliberately uncounted — because listing them is what stops
+  the next reader from "fixing" a link that names a folder.
+
 ## v0.10.0 — 2026-08-03
 
 ### Added

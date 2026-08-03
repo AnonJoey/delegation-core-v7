@@ -203,3 +203,77 @@ def test_health_cache_is_keyed_by_vault(tmp_path):
 
     assert first["broken_links"] == 1
     assert second["broken_links"] == 3
+
+
+def _vault_with(tmp_path, name="v"):
+    from delegation_core.config import Config
+    vault = tmp_path / name
+    (vault / "Reference").mkdir(parents=True)
+    return Config(vault_path=str(vault), vault_folders=["Reference"])
+
+
+def test_health_detail_itemises_exactly_what_the_summary_counts(tmp_path):
+    """The invariant that makes this tool worth having: len(items) == count.
+    Three throwaway scripts written to enumerate these reported 248, 63 and 5
+    against true values of 31, 31 and 0, each because it re-implemented a
+    definition the health pass already owns."""
+    from delegation_core.vault import VaultManager
+
+    cfg = _vault_with(tmp_path)
+    ref = cfg.vault / "Reference"
+    (ref / "a.md").write_text(
+        "---\ntitle: a\n---\n\nSee [[ghost-one]] and [[ghost-two]].\n", encoding="utf-8")
+    (ref / "b.md").write_text(
+        "---\ntitle: b\n---\n\nSee [[a]] and [[ghost-three]].\n", encoding="utf-8")
+
+    vm = VaultManager(cfg)
+    detail = vm.health_detail()
+
+    assert detail["broken_links"] == 3
+    assert len(detail["broken_link_items"]) == 3
+    assert {i["target"] for i in detail["broken_link_items"]} == {
+        "ghost-one", "ghost-two", "ghost-three"}
+    assert all(i["source"] in {"a", "b"} for i in detail["broken_link_items"])
+
+
+def test_health_detail_lists_folder_markers_separately_from_broken(tmp_path):
+    """Markers are deliberately uncounted; listing them is what stops the next
+    reader from trying to 'fix' a link that names a folder."""
+    from delegation_core.vault import VaultManager
+
+    cfg = _vault_with(tmp_path, "v2")
+    (cfg.vault / "Reference" / "n.md").write_text(
+        "---\ntitle: n\n---\n\n[[reference]] #tag\n\nSee [[real-ghost]].\n", encoding="utf-8")
+
+    detail = VaultManager(cfg).health_detail()
+    assert detail["broken_links"] == 1
+    assert [i["target"] for i in detail["folder_marker_items"]] == ["reference"]
+
+
+def test_health_detail_caps_lists_but_reports_the_true_total(tmp_path):
+    from delegation_core.vault import VaultManager
+
+    cfg = _vault_with(tmp_path, "v3")
+    body = "".join(f"[[ghost-{i}]]\n" for i in range(10))
+    (cfg.vault / "Reference" / "n.md").write_text(
+        f"---\ntitle: n\n---\n\n{body}", encoding="utf-8")
+
+    detail = VaultManager(cfg).health_detail(limit=4)
+    assert len(detail["broken_link_items"]) == 4
+    assert detail["broken_link_items_total"] == 10
+    assert detail["broken_links"] == 10
+
+
+def test_health_detail_is_not_served_from_another_vaults_pass(tmp_path):
+    """The summary cache was unkeyed; detail must not inherit that."""
+    from delegation_core.vault import VaultManager
+
+    a = _vault_with(tmp_path, "va")
+    (a.vault / "Reference" / "n.md").write_text(
+        "---\ntitle: n\n---\n\n[[ghost-a]]\n", encoding="utf-8")
+    b = _vault_with(tmp_path, "vb")
+    (b.vault / "Reference" / "n.md").write_text(
+        "---\ntitle: n\n---\n\n[[ghost-b1]]\n[[ghost-b2]]\n", encoding="utf-8")
+
+    assert VaultManager(a).health_detail()["broken_links"] == 1
+    assert VaultManager(b).health_detail()["broken_links"] == 2
