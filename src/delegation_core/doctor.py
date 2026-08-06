@@ -26,6 +26,8 @@ error plus a one-line fix.
 from __future__ import annotations
 
 import json
+import subprocess
+import sys
 from pathlib import Path
 
 CONFIG_DIR = Path.home() / ".delegation_core"
@@ -180,6 +182,33 @@ def check_graph_registry(cfg) -> dict:
 _SCOPE_FILTERS = ({"kind": "note"}, {"kind": "generated"}, {"is_external": "true"})
 
 
+#: Probe body, run in a child process. See check_index_integrity for why.
+_PROBE_SOURCE = """
+import json, sys, warnings
+warnings.filterwarnings("ignore")
+import chromadb
+
+path, name, filters = sys.argv[1], sys.argv[2], json.loads(sys.argv[3])
+client = chromadb.PersistentClient(
+    path=path, settings=chromadb.Settings(anonymized_telemetry=False))
+# No embedding_function: this must not pull BGE into memory just to probe.
+collection = client.get_collection(name=name)
+dimension = collection._model.dimension or 0
+if not dimension:
+    print(json.dumps({"empty": True}))
+    raise SystemExit(0)
+
+probe = [1.0] + [0.0] * (dimension - 1)
+broken = []
+for where in filters:
+    try:
+        collection.query(query_embeddings=[probe], n_results=1, where=where)
+    except Exception as e:
+        broken.append(f"{where}: {type(e).__name__}: {e}")
+print(json.dumps({"broken": broken, "count": collection.count()}))
+"""
+
+
 def check_index_integrity(cfg) -> dict:
     """Ask the index the question that breaks, rather than inspecting its files.
 
@@ -190,60 +219,59 @@ def check_index_integrity(cfg) -> dict:
     obvious place to read ids from — is a legacy artifact that current Chroma does
     not create for new collections at all.
 
-    So: issue the same shape of query search_vault issues, once per scope, with a
-    constant vector so no embedding model has to load. The failure this exists to
-    catch ("Error finding id") surfaces on exactly this call and on no cheaper one.
+    **The probe runs in a child process because it can take the interpreter with
+    it.** Opening a PersistentClient and querying it segfaulted the whole CLI
+    (SIGSEGV, exit 139) after a bulk ingest left 879 uncompacted rows in Chroma's
+    ``embeddings_queue``: the Rust bindings replay that log recursively and blow
+    the stack. It reproduced on a copy of the index with no other process running,
+    so it is the pending write log, not contention. That is precisely when someone
+    runs doctor — right after loading data — and a diagnostic that dies on the
+    condition it was written to report is worse than no diagnostic. In a child, the
+    same crash is an answer.
     """
     if not (cfg.chroma_path / "chroma.sqlite3").exists():
         return {"check": "index_integrity", "status": "ok", "detail": "no index built yet"}
 
     try:
-        import chromadb
-    except Exception as e:
-        return {"check": "index_integrity", "status": "skip",
-                "detail": f"chromadb unavailable ({type(e).__name__})"}
-
-    try:
-        client = chromadb.PersistentClient(
-            path=str(cfg.chroma_path),
-            settings=chromadb.Settings(anonymized_telemetry=False),
+        completed = subprocess.run(
+            [sys.executable, "-c", _PROBE_SOURCE, str(cfg.chroma_path),
+             cfg.collection_name, json.dumps(list(_SCOPE_FILTERS))],
+            capture_output=True, text=True, timeout=120,
         )
-        # No embedding_function: this must not pull BGE into memory just to probe.
-        collection = client.get_collection(name=cfg.collection_name)
-    except Exception as e:
+    except subprocess.TimeoutExpired:
         return {"check": "index_integrity", "status": "warn",
-                "detail": f"index unreadable ({type(e).__name__}: {e})",
+                "detail": "index did not answer within 120s",
                 "fix": "delegation-core reindex --force"}
 
-    # Private attribute, and the only route to the width without embedding
-    # something. Degrade to skip if a Chroma upgrade moves it — an unprobeable
-    # index is unknown, not broken, and must not be reported as either.
-    try:
-        dimension = collection._model.dimension or 0
-    except Exception as e:
-        return {"check": "index_integrity", "status": "skip",
-                "detail": f"cannot read vector width from this chromadb ({type(e).__name__})"}
+    if completed.returncode < 0:
+        return {"check": "index_integrity", "status": "warn",
+                "detail": f"the index crashed the probe (signal {-completed.returncode}) — "
+                          "known Chroma failure when its pending write log is deep",
+                "fix": "let the server compact, or delegation-core reindex --force"}
+    if completed.returncode != 0:
+        tail = (completed.stderr or "").strip().splitlines()
+        return {"check": "index_integrity", "status": "warn",
+                "detail": f"index unreadable ({tail[-1] if tail else 'no output'})",
+                "fix": "delegation-core reindex --force"}
 
-    if not dimension:
+    try:
+        result = json.loads(completed.stdout.strip().splitlines()[-1])
+    except Exception:
+        return {"check": "index_integrity", "status": "skip",
+                "detail": "probe returned nothing parseable"}
+
+    if result.get("empty"):
         return {"check": "index_integrity", "status": "skip",
                 "detail": "collection has no vectors yet"}
 
-    probe = [1.0] + [0.0] * (dimension - 1)
-    broken = []
-    for where in _SCOPE_FILTERS:
-        try:
-            collection.query(query_embeddings=[probe], n_results=1, where=where)
-        except Exception as e:
-            broken.append(f"{where}: {type(e).__name__}: {e}")
-
-    if broken:
+    if result["broken"]:
         return {"check": "index_integrity", "status": "error",
-                "detail": "scope-filtered search fails — " + "; ".join(broken),
+                "detail": "scope-filtered search fails — " + "; ".join(result["broken"]),
                 "fix": "delegation-core reindex --force, then restart the MCP server "
                        "(it holds the old index in memory and will not re-read disk)"}
 
     return {"check": "index_integrity", "status": "ok",
-            "detail": f"{collection.count()} row(s), every search scope answers"}
+            "detail": f"{result['count']} row(s), every search scope answers"}
 
 
 def run_all(cfg) -> dict:
