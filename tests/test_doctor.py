@@ -15,6 +15,8 @@ None of them raise; each returns ok | warn | error plus a one-line fix.
 """
 
 import json
+import sys
+import types
 
 import pytest
 
@@ -166,6 +168,133 @@ def test_local_mode_with_a_missing_model_is_an_error(cfg):
     result = doctor.check_engine_mode(cfg)
 
     assert result["status"] == "error" and "llama_model" in result["detail"]
+
+
+# ── index integrity ──────────────────────────────────────────────────────────
+
+class _FakeCollection:
+    """Stands in for a Chroma collection: records the filters it was queried with."""
+
+    def __init__(self, dimension=4, fails_on=(), count=7):
+        self._model = type("m", (), {"dimension": dimension})()
+        self._fails_on = tuple(fails_on)
+        self._count = count
+        self.seen = []
+
+    def query(self, query_embeddings, n_results, where):
+        self.seen.append(where)
+        if where in self._fails_on:
+            raise RuntimeError("Error finding id")
+        return {"ids": [[]]}
+
+    def count(self):
+        return self._count
+
+
+def _install_fake_chroma(monkeypatch, cfg, collection):
+    """Point check_index_integrity at `collection` without a real Chroma on disk."""
+    cfg.chroma_path.mkdir(parents=True, exist_ok=True)
+    (cfg.chroma_path / "chroma.sqlite3").write_bytes(b"")
+
+    fake = types.ModuleType("chromadb")
+    fake.Settings = lambda **kw: None
+    fake.PersistentClient = lambda **kw: type(
+        "c", (), {"get_collection": lambda self, name: collection})()
+    monkeypatch.setitem(sys.modules, "chromadb", fake)
+
+
+def test_a_scope_that_cannot_be_queried_is_an_error(monkeypatch, cfg):
+    """The live bug: unfiltered search kept answering while every scope-filtered
+    query died on "Error finding id", so the hand-written slice was unreachable."""
+    collection = _FakeCollection(fails_on=({"kind": "note"},))
+    _install_fake_chroma(monkeypatch, cfg, collection)
+
+    result = doctor.check_index_integrity(cfg)
+
+    assert result["status"] == "error"
+    assert "scope-filtered search fails" in result["detail"]
+    assert "kind': 'note'" in result["detail"]
+    assert "restart the MCP server" in result["fix"]
+
+
+def test_every_scope_is_probed_not_just_the_first(monkeypatch, cfg):
+    collection = _FakeCollection()
+    _install_fake_chroma(monkeypatch, cfg, collection)
+
+    doctor.check_index_integrity(cfg)
+
+    assert collection.seen == list(doctor._SCOPE_FILTERS)
+
+
+def test_the_probed_filters_are_the_ones_search_actually_sends():
+    """is_external is written and queried as the string "true"; probing the
+    boolean would match no row and pass without testing anything."""
+    from delegation_core.vault import VaultManager
+
+    sent = []
+
+    class Spy:
+        def query(self, **kwargs):
+            sent.append(kwargs.get("where"))
+            return {"documents": [[]], "metadatas": [[]], "distances": [[]]}
+
+    vm = VaultManager(Config(vault_path="/tmp/whatever"))
+    vm._ensure_ready = lambda: None
+    vm.collection = Spy()
+    for scope in ("notes", "generated", "external"):
+        vm.search("q", scope=scope)
+
+    assert sent == list(doctor._SCOPE_FILTERS)
+
+
+def test_a_working_index_reports_its_size(monkeypatch, cfg):
+    _install_fake_chroma(monkeypatch, cfg, _FakeCollection(count=5687))
+
+    result = doctor.check_index_integrity(cfg)
+
+    assert result["status"] == "ok"
+    assert "5687 row(s)" in result["detail"]
+
+
+def test_the_probe_never_loads_an_embedding_model(monkeypatch, cfg):
+    """A doctor run must stay cheap: the query carries its own constant vector."""
+    collection = _FakeCollection(dimension=1024)
+    _install_fake_chroma(monkeypatch, cfg, collection)
+
+    def explode(*a, **kw):
+        raise AssertionError("doctor must not build an embedding function")
+
+    monkeypatch.setattr("delegation_core.vault.make_bge_embedding_function", explode)
+
+    assert doctor.check_index_integrity(cfg)["status"] == "ok"
+
+
+def test_no_index_yet_is_not_a_complaint(cfg):
+    assert doctor.check_index_integrity(cfg)["status"] == "ok"
+
+
+def test_a_collection_with_no_vectors_skips(monkeypatch, cfg):
+    _install_fake_chroma(monkeypatch, cfg, _FakeCollection(dimension=0))
+
+    assert doctor.check_index_integrity(cfg)["status"] == "skip"
+
+
+def test_an_unreadable_index_warns_instead_of_raising(monkeypatch, cfg):
+    cfg.chroma_path.mkdir(parents=True, exist_ok=True)
+    (cfg.chroma_path / "chroma.sqlite3").write_bytes(b"not a database")
+    fake = types.ModuleType("chromadb")
+    fake.Settings = lambda **kw: None
+
+    def boom(**kw):
+        raise RuntimeError("file is not a database")
+
+    fake.PersistentClient = boom
+    monkeypatch.setitem(sys.modules, "chromadb", fake)
+
+    result = doctor.check_index_integrity(cfg)
+
+    assert result["status"] == "warn"
+    assert "reindex" in result["fix"]
 
 
 # ── aggregate ────────────────────────────────────────────────────────────────

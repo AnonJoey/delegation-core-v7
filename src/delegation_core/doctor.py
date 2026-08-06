@@ -14,6 +14,10 @@ live machine, sometimes for weeks:
   on a missing import rather than on anything to do with graphs.
 * ``ingest_folder`` registry entries outlive the folders they point at, leaving
   rows that answer searches with paths that no longer resolve.
+* Every ``scope``-filtered search died on "Error finding id" while unfiltered
+  search kept answering, so the whole hand-written slice of the vault was
+  unreachable and nothing said so. doctor passed 6/6 green throughout, because
+  nothing here had ever asked the index a question.
 
 None of these surface through normal use. Each returns a status of ok | warn |
 error plus a one-line fix.
@@ -168,6 +172,80 @@ def check_graph_registry(cfg) -> dict:
             "detail": f"{len(registry)} graph(s), all sources present and tracked"}
 
 
+#: The metadata filters search_vault puts on a query, copied from search()'s own
+#: branches. A scope that cannot be queried is a scope that answers nothing,
+#: however healthy the counts look. is_external is the *string* "true" — that is
+#: what ingest writes and what search queries; the boolean matches no row and
+#: would make this probe pass without testing anything.
+_SCOPE_FILTERS = ({"kind": "note"}, {"kind": "generated"}, {"is_external": "true"})
+
+
+def check_index_integrity(cfg) -> dict:
+    """Ask the index the question that breaks, rather than inspecting its files.
+
+    A filtered query is the only authoritative test. Comparing ids between
+    chroma.sqlite3 and the vector segment looks rigorous and is not: records live
+    in memory until Chroma flushes them, so a healthy server with pending writes
+    is indistinguishable from a corrupt index, and ``index_metadata.pickle`` — the
+    obvious place to read ids from — is a legacy artifact that current Chroma does
+    not create for new collections at all.
+
+    So: issue the same shape of query search_vault issues, once per scope, with a
+    constant vector so no embedding model has to load. The failure this exists to
+    catch ("Error finding id") surfaces on exactly this call and on no cheaper one.
+    """
+    if not (cfg.chroma_path / "chroma.sqlite3").exists():
+        return {"check": "index_integrity", "status": "ok", "detail": "no index built yet"}
+
+    try:
+        import chromadb
+    except Exception as e:
+        return {"check": "index_integrity", "status": "skip",
+                "detail": f"chromadb unavailable ({type(e).__name__})"}
+
+    try:
+        client = chromadb.PersistentClient(
+            path=str(cfg.chroma_path),
+            settings=chromadb.Settings(anonymized_telemetry=False),
+        )
+        # No embedding_function: this must not pull BGE into memory just to probe.
+        collection = client.get_collection(name=cfg.collection_name)
+    except Exception as e:
+        return {"check": "index_integrity", "status": "warn",
+                "detail": f"index unreadable ({type(e).__name__}: {e})",
+                "fix": "delegation-core reindex --force"}
+
+    # Private attribute, and the only route to the width without embedding
+    # something. Degrade to skip if a Chroma upgrade moves it — an unprobeable
+    # index is unknown, not broken, and must not be reported as either.
+    try:
+        dimension = collection._model.dimension or 0
+    except Exception as e:
+        return {"check": "index_integrity", "status": "skip",
+                "detail": f"cannot read vector width from this chromadb ({type(e).__name__})"}
+
+    if not dimension:
+        return {"check": "index_integrity", "status": "skip",
+                "detail": "collection has no vectors yet"}
+
+    probe = [1.0] + [0.0] * (dimension - 1)
+    broken = []
+    for where in _SCOPE_FILTERS:
+        try:
+            collection.query(query_embeddings=[probe], n_results=1, where=where)
+        except Exception as e:
+            broken.append(f"{where}: {type(e).__name__}: {e}")
+
+    if broken:
+        return {"check": "index_integrity", "status": "error",
+                "detail": "scope-filtered search fails — " + "; ".join(broken),
+                "fix": "delegation-core reindex --force, then restart the MCP server "
+                       "(it holds the old index in memory and will not re-read disk)"}
+
+    return {"check": "index_integrity", "status": "ok",
+            "detail": f"{collection.count()} row(s), every search scope answers"}
+
+
 def run_all(cfg) -> dict:
     """Run every check. Returns {status, counts, checks[]} with the worst status on top."""
     checks = [
@@ -177,6 +255,7 @@ def run_all(cfg) -> dict:
         check_graph_extra(),
         check_ingest_registry(),
         check_graph_registry(cfg),
+        check_index_integrity(cfg),
     ]
     counts = {s: sum(1 for c in checks if c["status"] == s)
               for s in ("ok", "warn", "error", "skip")}
