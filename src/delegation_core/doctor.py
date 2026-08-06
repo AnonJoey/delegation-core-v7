@@ -244,10 +244,18 @@ def check_index_integrity(cfg) -> dict:
                 "fix": "delegation-core reindex --force"}
 
     if completed.returncode < 0:
-        return {"check": "index_integrity", "status": "warn",
-                "detail": f"the index crashed the probe (signal {-completed.returncode}) — "
-                          "known Chroma failure when its pending write log is deep",
-                "fix": "let the server compact, or delegation-core reindex --force"}
+        # Measured: `reindex --force` dies the same way on this state, so do not
+        # send anyone there. A running MCP server keeps serving from memory; only
+        # newly opened clients crash, which makes rebuilding from a clean path the
+        # remedy — and makes restarting that server the thing to avoid first.
+        return {"check": "index_integrity", "status": "error",
+                "detail": f"opening the index crashed the probe (signal "
+                          f"{-completed.returncode}) — every new process that opens it "
+                          "will crash the same way; a running server keeps working from "
+                          "memory",
+                "fix": "do not restart the MCP server yet — back up the chroma directory, "
+                       "then rebuild the index from a clean path (reindex --force crashes "
+                       "on this state too)"}
     if completed.returncode != 0:
         tail = (completed.stderr or "").strip().splitlines()
         return {"check": "index_integrity", "status": "warn",

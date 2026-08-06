@@ -202,7 +202,7 @@ def test_a_scope_that_cannot_be_queried_is_an_error(monkeypatch, cfg):
     assert "restart the MCP server" in result["fix"]
 
 
-def test_a_probe_killed_by_a_signal_warns_instead_of_taking_doctor_down(monkeypatch, cfg):
+def test_a_probe_killed_by_a_signal_is_reported_not_propagated(monkeypatch, cfg):
     """The regression this design exists for: querying Chroma from this process
     segfaulted the whole CLI (exit 139) once a bulk ingest left ~879 uncompacted
     rows in its embeddings_queue. doctor must survive the condition it reports."""
@@ -210,9 +210,20 @@ def test_a_probe_killed_by_a_signal_warns_instead_of_taking_doctor_down(monkeypa
 
     result = doctor.check_index_integrity(cfg)
 
-    assert result["status"] == "warn"
+    assert result["status"] == "error"
     assert "signal 11" in result["detail"]
-    assert "pending write log" in result["detail"]
+
+
+def test_a_crashing_index_does_not_send_the_reader_to_reindex(monkeypatch, cfg):
+    """Measured on the live vault: `reindex --force` segfaults on this same state,
+    so naming it as the fix sends someone into a second crash. What matters first
+    is not restarting the server that is still serving from memory."""
+    _fake_probe(monkeypatch, cfg, returncode=-11)
+
+    fix = doctor.check_index_integrity(cfg)["fix"]
+
+    assert "do not restart" in fix
+    assert "reindex --force crashes" in fix
 
 
 def test_a_hanging_probe_is_bounded(monkeypatch, cfg):
