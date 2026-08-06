@@ -143,6 +143,101 @@ def test_rows_indexed_before_kind_existed_are_classified_by_path(tmp_path):
     assert vm.search("q")[0]["kind"] == "generated"
 
 
+# ── kind is stamped at write time, not only by reindex ───────────────────────
+
+class RecordingCollection:
+    """Captures what index_note actually upserts."""
+
+    def __init__(self):
+        self.upserts = []
+
+    def upsert(self, ids, documents, metadatas):
+        self.upserts.append((ids[0], metadatas[0]))
+
+
+@pytest.fixture
+def writer(tmp_path):
+    vm = VaultManager(Config(vault_path=str(tmp_path / "v")))
+    vm._ensure_ready = lambda: None
+    vm.collection = RecordingCollection()
+    return vm
+
+
+def test_a_note_written_without_kind_is_still_reachable_by_scope(writer):
+    """The live defect: write_note, vault_update_note, export_session, inbox
+    classification and merges all passed a bare {title, path, folder}. The row
+    landed with no `kind`, and scope='notes' filters on kind == "note" inside
+    ChromaDB — so a note just written could not be found under the default scope
+    until a full reindex backfilled it."""
+    writer.index_note("body", {"title": "t", "path": "Decisions/a.md",
+                               "folder": "Decisions"})
+
+    _, meta = writer.collection.upserts[0]
+    assert meta["kind"] == "note"
+
+
+def test_a_generated_article_written_without_kind_gets_its_graph_too(writer):
+    writer.index_note("body", {"title": "Community_0",
+                               "path": "Reference/graphs/alpha/Community_0.md",
+                               "folder": "Reference/graphs/alpha"})
+
+    _, meta = writer.collection.upserts[0]
+    assert meta["kind"] == "generated"
+    assert meta["graph"] == "alpha"
+
+
+def test_an_explicit_kind_from_the_caller_wins(writer):
+    writer.index_note("body", {"title": "t", "path": "Decisions/a.md",
+                               "folder": "Decisions", "kind": "generated"})
+
+    assert writer.collection.upserts[0][1]["kind"] == "generated"
+
+
+def test_external_chunks_are_left_unscoped(writer):
+    """They scope on is_external and their path is absolute, not vault-relative —
+    classify_path would grade them as hand-written notes."""
+    writer.index_note("chunk", {"title": "README", "path": "/elsewhere/README.md",
+                                "folder": "_external", "is_external": "true"},
+                      doc_id="/elsewhere/README.md::chunk_0")
+
+    assert "kind" not in writer.collection.upserts[0][1]
+
+
+def test_an_absolute_path_is_never_graded_as_a_hand_written_note(writer):
+    """inject_backlinks re-indexes with a bare dict, dropping the is_external it
+    was given — 12 such rows exist in the live vault. Stamping them would file
+    ingested source files under scope='notes'; leaving them unscoped is correct."""
+    writer.index_note("body", {"title": "SKILL",
+                               "path": "/home/joey/Projects/hermes-agent/skills/SKILL.md",
+                               "folder": "/home/joey/Projects/hermes-agent/skills"})
+
+    assert "kind" not in writer.collection.upserts[0][1]
+
+
+def test_a_windows_absolute_path_is_also_left_alone(writer):
+    writer.index_note("body", {"title": "SKILL", "path": "C:\\repo\\skills\\SKILL.md",
+                               "folder": "skills"})
+
+    assert "kind" not in writer.collection.upserts[0][1]
+
+
+def test_a_row_with_no_path_is_left_unscoped(writer):
+    """index_note falls back to a timestamp doc_id when there is no path;
+    classify_path("") would grade that row as hand-written."""
+    writer.index_note("body", {"title": "t", "folder": "Decisions"})
+
+    assert "kind" not in writer.collection.upserts[0][1]
+
+
+def test_the_caller_s_metadata_dict_is_not_mutated(writer):
+    """Callers reuse these dicts; stamping in place would leak across writes."""
+    supplied = {"title": "t", "path": "Decisions/a.md", "folder": "Decisions"}
+
+    writer.index_note("body", supplied)
+
+    assert "kind" not in supplied
+
+
 def test_snippet_chars_caps_what_each_hit_costs(vm):
     long_doc = "x" * 5000
     vm.collection.rows = [row("Decisions/a.md", "Decisions", doc=long_doc)]

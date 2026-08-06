@@ -23,7 +23,7 @@ import logging
 import re
 import threading
 from datetime import datetime
-from pathlib import Path
+from pathlib import Path, PurePosixPath, PureWindowsPath
 
 from .config import Config
 from .embeddings import make_bge_embedding_function
@@ -376,11 +376,42 @@ class VaultManager:
 
         doc_id: explicit ID for chunked external files (IngestManager).
         Defaults to metadata['path'] so vault notes are keyed by their vault-relative path.
+
+        `kind` is derived here rather than trusted from the caller. Of the fifteen
+        call sites only graphbridge's and reindex_vault's passed note_metadata();
+        every other write path — write_note, vault_update_note, export_session,
+        inbox classification, merges, relinking — handed over a bare
+        {title, path, folder}. Rows written that way carry no `kind`, and
+        search(scope='notes') filters on `kind == "note"` inside ChromaDB, so a
+        note was unreachable through the default scope from the moment it was
+        written until the next full reindex backfilled it. search()'s docstring
+        treats missing `kind` as a legacy condition; these paths kept creating it.
         """
         self._ensure_ready()
         if not self.collection:
             return
         doc_id = doc_id or metadata.get("path", str(datetime.now().timestamp()))
+        # Only vault-relative paths can be classified. External content scopes on
+        # is_external, and an absolute path must never be stamped: classify_path
+        # grades anything it cannot recognise as hand-written, which would file
+        # ingested source files under scope='notes'. Rows that reach here absolute
+        # and unmarked stay unscoped — see inject_backlinks, which re-indexes with
+        # a bare metadata dict and drops the is_external marker it was given.
+        raw_path = str(metadata.get("path", ""))
+        # Both flavours: PurePosixPath misses "C:\...", PureWindowsPath misses "/...".
+        absolute = (PurePosixPath(raw_path).is_absolute()
+                    or PureWindowsPath(raw_path).is_absolute())
+        classifiable = (
+            "kind" not in metadata
+            and bool(raw_path)  # classify_path("") grades as "note"
+            and str(metadata.get("is_external", "")).lower() != "true"
+            and not absolute
+        )
+        if classifiable:
+            kind, graph = self.classify_path(metadata.get("path", ""))
+            metadata = {**metadata, "kind": kind}
+            if graph:
+                metadata["graph"] = graph
         try:
             with _chroma_write_lock:
                 self.collection.upsert(ids=[doc_id], documents=[content], metadatas=[metadata])
