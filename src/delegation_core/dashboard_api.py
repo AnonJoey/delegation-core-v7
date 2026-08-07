@@ -381,6 +381,20 @@ class _Handler(BaseHTTPRequestHandler):
 
     _MAX_BODY_BYTES = 1_000_000  # 1 MB — generous for a process create/update payload
 
+    #: Cap on how much of a rejected body we are willing to read just to answer
+    #: cleanly. Past this the client is not making an honest mistake, and a reset
+    #: is the right outcome rather than reading whatever it wants to send.
+    _MAX_DRAIN_BYTES = 8_000_000
+
+    def _drain_body(self, length: int) -> None:
+        """Consume a body we are about to reject, so the response is readable."""
+        remaining = min(length, self._MAX_DRAIN_BYTES)
+        while remaining > 0:
+            chunk = self.rfile.read(min(65536, remaining))
+            if not chunk:
+                break
+            remaining -= len(chunk)
+
     def _read_json_body(self) -> dict | None:
         """Parse the request body as JSON. Returns None (and has already sent an
         error response) if the body is missing, oversized, or not valid JSON —
@@ -390,6 +404,13 @@ class _Handler(BaseHTTPRequestHandler):
             self._send_json({"error": "missing request body"}, status=400)
             return None
         if length > self._MAX_BODY_BYTES:
+            # Answer, but read the body first. Closing with unread bytes still in
+            # the socket makes the client see a connection reset instead of the
+            # 413 — the rejection arrives as a transport failure, which is the
+            # one outcome an explicit status code exists to avoid. It also made
+            # the test for this flaky: it passed alone and failed under the load
+            # of the full suite, where the timing tips the other way.
+            self._drain_body(length)
             self._send_json({"error": "request body too large"}, status=413)
             return None
         raw = self.rfile.read(length)
