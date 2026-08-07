@@ -221,13 +221,17 @@ def check_index_integrity(cfg) -> dict:
 
     **The probe runs in a child process because it can take the interpreter with
     it.** Opening a PersistentClient and querying it segfaulted the whole CLI
-    (SIGSEGV, exit 139) after a bulk ingest left 879 uncompacted rows in Chroma's
-    ``embeddings_queue``: the Rust bindings replay that log recursively and blow
-    the stack. It reproduced on a copy of the index with no other process running,
-    so it is the pending write log, not contention. That is precisely when someone
-    runs doctor — right after loading data — and a diagnostic that dies on the
-    condition it was written to report is worse than no diagnostic. In a child, the
-    same crash is an answer.
+    (SIGSEGV, exit 139) on a live index after a bulk ingest; the coredump showed
+    unbounded recursion inside chromadb_rust_bindings. It reproduced on a copy
+    with no other process running, so it was the index state rather than
+    contention — but the state was never narrowed further. The obvious suspect,
+    a deep pending write log, was ruled out: a rebuild passed the same depth and
+    opened normally.
+
+    That is unresolved, and it is the point. A diagnostic that dies on a condition
+    it cannot explain is worse than no diagnostic, and this one runs right after
+    loading data, which is when the condition appeared. In a child process the
+    same crash becomes an answer.
     """
     if not (cfg.chroma_path / "chroma.sqlite3").exists():
         return {"check": "index_integrity", "status": "ok", "detail": "no index built yet"}
@@ -244,18 +248,21 @@ def check_index_integrity(cfg) -> dict:
                 "fix": "delegation-core reindex --force"}
 
     if completed.returncode < 0:
-        # Measured: `reindex --force` dies the same way on this state, so do not
-        # send anyone there. A running MCP server keeps serving from memory; only
-        # newly opened clients crash, which makes rebuilding from a clean path the
-        # remedy — and makes restarting that server the thing to avoid first.
+        # What was measured on the one occurrence, and nothing beyond it: every
+        # newly opened client died on this index while the running server kept
+        # answering from memory, `reindex --force` died the same way without
+        # touching a row, and a fresh path worked normally. The cause was never
+        # established — a deep pending write log looked responsible and was not:
+        # a rebuild reproduced that depth and opened fine. So describe the
+        # symptom and the exit, and claim no more than that.
         return {"check": "index_integrity", "status": "error",
                 "detail": f"opening the index crashed the probe (signal "
                           f"{-completed.returncode}) — every new process that opens it "
                           "will crash the same way; a running server keeps working from "
                           "memory",
-                "fix": "do not restart the MCP server yet — back up the chroma directory, "
-                       "then rebuild the index from a clean path (reindex --force crashes "
-                       "on this state too)"}
+                "fix": "do not restart the MCP server yet — back it up, then rebuild from "
+                       "a clean path and re-run the ingests in ingested_sources.json; "
+                       "reindex --force crashes on this state too"}
     if completed.returncode != 0:
         tail = (completed.stderr or "").strip().splitlines()
         return {"check": "index_integrity", "status": "warn",

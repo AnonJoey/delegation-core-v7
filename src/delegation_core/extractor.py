@@ -1,7 +1,7 @@
 """
 extractor.py — Convert file formats to plain text for vault ingestion.
 
-Supported: .md/.markdown  .txt/.text  .csv  .html/.htm  .pdf  .docx  .xlsx  .pptx
+Supported: .md/.markdown/.mdx  .txt/.text  .csv  .html/.htm  .pdf  .docx  .xlsx  .pptx
 Images are not supported — convert to .txt before dropping in the inbox.
 
 All extractors return a string. Callers treat None or empty string as a failure
@@ -18,7 +18,11 @@ from pathlib import Path
 logger = logging.getLogger("extractor")
 
 SUPPORTED: frozenset[str] = frozenset({
-    ".md", ".markdown",
+    # .mdx is markdown with JSX components interleaved. The prose reads fine as
+    # text and the components degrade to inert tags, which is why it goes through
+    # _text unchanged: openclaw's docs skipped three real deploy guides over an
+    # extension that needed no extraction logic of its own.
+    ".md", ".markdown", ".mdx",
     ".txt", ".text",
     ".csv",
     ".html", ".htm",
@@ -38,6 +42,7 @@ def extract(path: Path) -> str | None:
     _map = {
         ".md":   _text,
         ".markdown": _text,
+        ".mdx":  _text,
         ".txt":  _text,
         ".text": _text,
         ".csv":  _csv_to_md,
