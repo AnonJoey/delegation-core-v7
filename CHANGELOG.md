@@ -40,6 +40,39 @@
 
 ### Fixed
 
+- **A running server never saw another process's writes.** Concurrent writers
+  are by design — the SessionEnd hook fires a detached `reindex`, SessionStart
+  fires `maintain`, and any CLI use writes the same path while the server runs —
+  but `PersistentClient` loads the vector index once and never re-reads it, and
+  the module write lock is a `threading.Lock` that knows nothing about another
+  process. After a CLI ingest, a running server answered `scope='all'` with
+  pre-write content and failed every scope-filtered query with "Error finding
+  id", while a freshly opened client read the same index perfectly. Only a
+  restart cleared it, which made the documented "the transcript is searchable
+  right after the session" path the thing that broke search.
+
+  `_ensure_ready` now compares a one-stat fingerprint of `chroma.sqlite3` and
+  reopens when it moved. Constructing a new `PersistentClient` is not enough on
+  its own: chromadb caches one System per path for the process lifetime, so the
+  "new" client shares the stale segment state and keeps failing filtered queries
+  while reporting the new row count — `clear_system_cache()` is what makes the
+  reopen equivalent to the fresh process. The embedding function is reused
+  across reopens, because rebuilding it reloads BGE onto a GPU that is routinely
+  full here.
+
+- **A rejected oversized body arrived as a connection reset.** The dashboard
+  API's 413 path answered without reading the request body, and closing with
+  unread bytes in the socket makes the client see ECONNRESET instead of the
+  status line. It also explains a flake: the test for it passed alone and failed
+  about one full-suite run in three, when load tips the timing. The body is now
+  drained before answering, bounded at 8 MB.
+
+- **`.mdx` was never an ingest candidate.** `ingest` globs on `SUPPORTED` before
+  extracting, so three real deploy guides in a docs tree were reported as
+  "764 indexed, 0 skipped" while being invisible. MDX is markdown with JSX
+  interleaved; the prose reads as text and the components degrade to inert tags,
+  so it goes through `_text` with no extraction logic of its own.
+
 - **Notes were unreachable through the default search scope from the moment
   they were written.** `search(scope='notes')` filters on `kind == "note"`
   inside ChromaDB, and of the fifteen `index_note` call sites only
