@@ -204,8 +204,55 @@ class VaultManager:
         self.ef = None
         self._initialized = False
         self._init_lock = threading.Lock()
+        self._disk_state: tuple | None = None
 
     # ── init ─────────────────────────────────────────────────────────────────
+
+    def _read_disk_state(self) -> tuple | None:
+        """Cheap fingerprint of the index on disk: one stat of Chroma's sqlite."""
+        try:
+            st = (self.cfg.chroma_path / "chroma.sqlite3").stat()
+        except OSError:
+            return None
+        return (st.st_mtime_ns, st.st_size)
+
+    def _reload_if_disk_changed(self):
+        """Reopen the collection when another process has written to the index.
+
+        A PersistentClient loads the vector index into memory once and never
+        re-reads it, and the write lock above is a threading.Lock — it serialises
+        this process and knows nothing about another one. Concurrent writers are
+        by design here: the SessionEnd hook fires a detached ``reindex``, the
+        SessionStart hook fires ``maintain``, and any CLI use writes to the same
+        path while the server runs.
+
+        Measured consequence before this existed: after a CLI ingest, a running
+        server answered scope='all' with pre-write content and failed every
+        scope-filtered query outright with ChromaDB's "Error finding id", while a
+        freshly opened client read the same index perfectly. Only a restart
+        cleared it, which made the documented "the transcript is searchable right
+        after the session" path the thing that broke search.
+        """
+        if not self._initialized:
+            return
+        current = self._read_disk_state()
+        if current is None or current == self._disk_state:
+            return
+        logger.info("Index changed on disk by another process — reopening")
+        # Constructing a new PersistentClient is not enough on its own: chromadb
+        # caches one System per path for the life of the process, so the "new"
+        # client shares the stale segment state and keeps failing filtered
+        # queries with "Error finding id" even while reporting the new row count.
+        # Dropping that cache is what makes the reopen equivalent to the fresh
+        # process that reads the same index correctly.
+        try:
+            from chromadb.api.client import SharedSystemClient
+            SharedSystemClient.clear_system_cache()
+        except Exception as e:  # pragma: no cover - depends on chromadb internals
+            logger.warning("Could not clear chromadb system cache: %s", e)
+        self._initialized = False
+        self.collection = None
+        self._init()
 
     def _init(self):
         with self._init_lock:
@@ -225,7 +272,13 @@ class VaultManager:
             try:
                 import chromadb
                 self.cfg.chroma_path.mkdir(parents=True, exist_ok=True)
-                self.ef = make_bge_embedding_function(self.cfg.bge_model)
+                # Reuse the embedding function across reopens. Rebuilding it
+                # reloads BGE onto the GPU, which a reload triggered by someone
+                # else's write must not pay for — and on this machine the GPU is
+                # routinely full, so the rebuild can fail where the first one
+                # succeeded.
+                if self.ef is None:
+                    self.ef = make_bge_embedding_function(self.cfg.bge_model)
                 client = chromadb.PersistentClient(
                     path=str(self.cfg.chroma_path),
                     settings=chromadb.Settings(anonymized_telemetry=False),
@@ -240,11 +293,16 @@ class VaultManager:
             except Exception as e:
                 logger.error("ChromaDB/BGE init failed: %s — vault will retry on next call", e)
                 return  # do NOT set _initialized; leave it False so _ensure_ready() retries
+            # Taken after the open, so a write that lands mid-open is seen as a
+            # change on the next call rather than being missed for the session.
+            self._disk_state = self._read_disk_state()
             self._initialized = True  # only reached on successful init
 
     def _ensure_ready(self):
         if not self._initialized:
             self._init()
+        else:
+            self._reload_if_disk_changed()
 
     def warm_up(self):
         """Start BGE model loading in a background thread before the first tool call."""
@@ -415,6 +473,9 @@ class VaultManager:
         try:
             with _chroma_write_lock:
                 self.collection.upsert(ids=[doc_id], documents=[content], metadatas=[metadata])
+                # Our own write moves the fingerprint; adopt it, or the next call
+                # reads it as a foreign change and reopens on every single write.
+                self._disk_state = self._read_disk_state()
         except Exception as e:
             logger.warning("Index error: %s", e)
 
@@ -432,6 +493,7 @@ class VaultManager:
         try:
             with _chroma_write_lock:
                 self.collection.delete(ids=list(rel_paths))
+                self._disk_state = self._read_disk_state()
         except Exception as e:
             logger.warning("Delete error: %s", e)
             return 0
@@ -526,6 +588,7 @@ class VaultManager:
                           and not (self.cfg.vault / i).exists()]
                 if orphans:
                     self.collection.delete(ids=orphans)
+                    self._disk_state = self._read_disk_state()
                 # Remove orphan entries from saved state
                 for o in orphans:
                     state.pop(o, None)
