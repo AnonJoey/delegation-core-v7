@@ -19,6 +19,79 @@
   category markers, deliberately uncounted — because listing them is what stops
   the next reader from "fixing" a link that names a folder.
 
+- **`doctor` asks the index a question.** Every `scope`-filtered search was
+  dying on ChromaDB's "Error finding id" while unfiltered search kept answering,
+  so the entire hand-written slice of a 6723-row vault was unreachable — and
+  `doctor` passed 6/6 green throughout, because nothing in it had ever queried
+  the index. `check_index_integrity` now issues the same shape of query
+  `search_vault` issues, once per scope, carrying a constant vector so no
+  embedding model loads.
+
+  Comparing ids between `chroma.sqlite3` and the vector segment was the first
+  attempt and it does not work: records live in memory until Chroma flushes, so
+  a healthy server with pending writes is indistinguishable from a corrupt
+  index — it reported an error against a note written seconds earlier. The
+  obvious place to read ids from, `index_metadata.pickle`, is worse: current
+  Chroma does not create it for new collections at all, so the check would have
+  been silently inert on any fresh install. The probed filters are asserted
+  against the ones `search()` actually sends; `is_external` is the string
+  `"true"`, and probing the boolean matches no row and passes without testing
+  anything.
+
+### Fixed
+
+- **A running server never saw another process's writes.** Concurrent writers
+  are by design — the SessionEnd hook fires a detached `reindex`, SessionStart
+  fires `maintain`, and any CLI use writes the same path while the server runs —
+  but `PersistentClient` loads the vector index once and never re-reads it, and
+  the module write lock is a `threading.Lock` that knows nothing about another
+  process. After a CLI ingest, a running server answered `scope='all'` with
+  pre-write content and failed every scope-filtered query with "Error finding
+  id", while a freshly opened client read the same index perfectly. Only a
+  restart cleared it, which made the documented "the transcript is searchable
+  right after the session" path the thing that broke search.
+
+  `_ensure_ready` now compares a one-stat fingerprint of `chroma.sqlite3` and
+  reopens when it moved. Constructing a new `PersistentClient` is not enough on
+  its own: chromadb caches one System per path for the process lifetime, so the
+  "new" client shares the stale segment state and keeps failing filtered queries
+  while reporting the new row count — `clear_system_cache()` is what makes the
+  reopen equivalent to the fresh process. The embedding function is reused
+  across reopens, because rebuilding it reloads BGE onto a GPU that is routinely
+  full here.
+
+- **A rejected oversized body arrived as a connection reset.** The dashboard
+  API's 413 path answered without reading the request body, and closing with
+  unread bytes in the socket makes the client see ECONNRESET instead of the
+  status line. It also explains a flake: the test for it passed alone and failed
+  about one full-suite run in three, when load tips the timing. The body is now
+  drained before answering, bounded at 8 MB.
+
+- **`.mdx` was never an ingest candidate.** `ingest` globs on `SUPPORTED` before
+  extracting, so three real deploy guides in a docs tree were reported as
+  "764 indexed, 0 skipped" while being invisible. MDX is markdown with JSX
+  interleaved; the prose reads as text and the components degrade to inert tags,
+  so it goes through `_text` with no extraction logic of its own.
+
+- **Notes were unreachable through the default search scope from the moment
+  they were written.** `search(scope='notes')` filters on `kind == "note"`
+  inside ChromaDB, and of the fifteen `index_note` call sites only
+  `graphbridge`'s and `reindex_vault`'s passed `note_metadata()`. Every other
+  write path — `write_note`, `vault_update_note`, `export_session`, inbox
+  classification, merges, relinking — handed over a bare
+  `{title, path, folder}`. The row landed without `kind` and stayed invisible
+  until the next full reindex backfilled it. Since `scope='notes'` is the
+  default, the symptom was: write a note, then fail to find it by its own
+  near-exact title.
+
+  `search()`'s docstring treated a missing `kind` as a legacy condition that
+  `reindex --force` cures; these paths kept creating it. It is now derived in
+  `index_note` rather than trusted from the caller, so all fifteen call sites
+  are covered at one choke point. External chunks keep scoping on
+  `is_external`, and an absolute path is never stamped — `classify_path` grades
+  what it cannot recognise as hand-written, which would file ingested source
+  files under `scope='notes'`.
+
 ## v0.10.0 — 2026-08-03
 
 ### Added

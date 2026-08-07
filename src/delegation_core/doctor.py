@@ -14,6 +14,10 @@ live machine, sometimes for weeks:
   on a missing import rather than on anything to do with graphs.
 * ``ingest_folder`` registry entries outlive the folders they point at, leaving
   rows that answer searches with paths that no longer resolve.
+* Every ``scope``-filtered search died on "Error finding id" while unfiltered
+  search kept answering, so the whole hand-written slice of the vault was
+  unreachable and nothing said so. doctor passed 6/6 green throughout, because
+  nothing here had ever asked the index a question.
 
 None of these surface through normal use. Each returns a status of ok | warn |
 error plus a one-line fix.
@@ -22,6 +26,8 @@ error plus a one-line fix.
 from __future__ import annotations
 
 import json
+import subprocess
+import sys
 from pathlib import Path
 
 CONFIG_DIR = Path.home() / ".delegation_core"
@@ -168,6 +174,121 @@ def check_graph_registry(cfg) -> dict:
             "detail": f"{len(registry)} graph(s), all sources present and tracked"}
 
 
+#: The metadata filters search_vault puts on a query, copied from search()'s own
+#: branches. A scope that cannot be queried is a scope that answers nothing,
+#: however healthy the counts look. is_external is the *string* "true" — that is
+#: what ingest writes and what search queries; the boolean matches no row and
+#: would make this probe pass without testing anything.
+_SCOPE_FILTERS = ({"kind": "note"}, {"kind": "generated"}, {"is_external": "true"})
+
+
+#: Probe body, run in a child process. See check_index_integrity for why.
+_PROBE_SOURCE = """
+import json, sys, warnings
+warnings.filterwarnings("ignore")
+import chromadb
+
+path, name, filters = sys.argv[1], sys.argv[2], json.loads(sys.argv[3])
+client = chromadb.PersistentClient(
+    path=path, settings=chromadb.Settings(anonymized_telemetry=False))
+# No embedding_function: this must not pull BGE into memory just to probe.
+collection = client.get_collection(name=name)
+dimension = collection._model.dimension or 0
+if not dimension:
+    print(json.dumps({"empty": True}))
+    raise SystemExit(0)
+
+probe = [1.0] + [0.0] * (dimension - 1)
+broken = []
+for where in filters:
+    try:
+        collection.query(query_embeddings=[probe], n_results=1, where=where)
+    except Exception as e:
+        broken.append(f"{where}: {type(e).__name__}: {e}")
+print(json.dumps({"broken": broken, "count": collection.count()}))
+"""
+
+
+def check_index_integrity(cfg) -> dict:
+    """Ask the index the question that breaks, rather than inspecting its files.
+
+    A filtered query is the only authoritative test. Comparing ids between
+    chroma.sqlite3 and the vector segment looks rigorous and is not: records live
+    in memory until Chroma flushes them, so a healthy server with pending writes
+    is indistinguishable from a corrupt index, and ``index_metadata.pickle`` — the
+    obvious place to read ids from — is a legacy artifact that current Chroma does
+    not create for new collections at all.
+
+    **The probe runs in a child process because it can take the interpreter with
+    it.** Opening a PersistentClient and querying it segfaulted the whole CLI
+    (SIGSEGV, exit 139) on a live index after a bulk ingest; the coredump showed
+    unbounded recursion inside chromadb_rust_bindings. It reproduced on a copy
+    with no other process running, so it was the index state rather than
+    contention — but the state was never narrowed further. The obvious suspect,
+    a deep pending write log, was ruled out: a rebuild passed the same depth and
+    opened normally.
+
+    That is unresolved, and it is the point. A diagnostic that dies on a condition
+    it cannot explain is worse than no diagnostic, and this one runs right after
+    loading data, which is when the condition appeared. In a child process the
+    same crash becomes an answer.
+    """
+    if not (cfg.chroma_path / "chroma.sqlite3").exists():
+        return {"check": "index_integrity", "status": "ok", "detail": "no index built yet"}
+
+    try:
+        completed = subprocess.run(
+            [sys.executable, "-c", _PROBE_SOURCE, str(cfg.chroma_path),
+             cfg.collection_name, json.dumps(list(_SCOPE_FILTERS))],
+            capture_output=True, text=True, timeout=120,
+        )
+    except subprocess.TimeoutExpired:
+        return {"check": "index_integrity", "status": "warn",
+                "detail": "index did not answer within 120s",
+                "fix": "delegation-core reindex --force"}
+
+    if completed.returncode < 0:
+        # What was measured on the one occurrence, and nothing beyond it: every
+        # newly opened client died on this index while the running server kept
+        # answering from memory, `reindex --force` died the same way without
+        # touching a row, and a fresh path worked normally. The cause was never
+        # established — a deep pending write log looked responsible and was not:
+        # a rebuild reproduced that depth and opened fine. So describe the
+        # symptom and the exit, and claim no more than that.
+        return {"check": "index_integrity", "status": "error",
+                "detail": f"opening the index crashed the probe (signal "
+                          f"{-completed.returncode}) — every new process that opens it "
+                          "will crash the same way; a running server keeps working from "
+                          "memory",
+                "fix": "do not restart the MCP server yet — back it up, then rebuild from "
+                       "a clean path and re-run the ingests in ingested_sources.json; "
+                       "reindex --force crashes on this state too"}
+    if completed.returncode != 0:
+        tail = (completed.stderr or "").strip().splitlines()
+        return {"check": "index_integrity", "status": "warn",
+                "detail": f"index unreadable ({tail[-1] if tail else 'no output'})",
+                "fix": "delegation-core reindex --force"}
+
+    try:
+        result = json.loads(completed.stdout.strip().splitlines()[-1])
+    except Exception:
+        return {"check": "index_integrity", "status": "skip",
+                "detail": "probe returned nothing parseable"}
+
+    if result.get("empty"):
+        return {"check": "index_integrity", "status": "skip",
+                "detail": "collection has no vectors yet"}
+
+    if result["broken"]:
+        return {"check": "index_integrity", "status": "error",
+                "detail": "scope-filtered search fails — " + "; ".join(result["broken"]),
+                "fix": "delegation-core reindex --force, then restart the MCP server "
+                       "(it holds the old index in memory and will not re-read disk)"}
+
+    return {"check": "index_integrity", "status": "ok",
+            "detail": f"{result['count']} row(s), every search scope answers"}
+
+
 def run_all(cfg) -> dict:
     """Run every check. Returns {status, counts, checks[]} with the worst status on top."""
     checks = [
@@ -177,6 +298,7 @@ def run_all(cfg) -> dict:
         check_graph_extra(),
         check_ingest_registry(),
         check_graph_registry(cfg),
+        check_index_integrity(cfg),
     ]
     counts = {s: sum(1 for c in checks if c["status"] == s)
               for s in ("ok", "warn", "error", "skip")}
