@@ -201,11 +201,16 @@ body {
   background: rgba(0, 242, 254, 0.1);
 }
 
+/* Minimise/maximise/close are the one part of this bar that must survive any
+   width. Without flex-shrink:0 an over-full topbar pushes them past the right
+   edge of the window — observed at 1290px, where close and maximise were
+   simply not on screen and the window could only be closed with a shortcut. */
 .window-controls {
   display: flex;
   align-items: center;
   gap: 4px;
   margin-left: 8px;
+  flex-shrink: 0;
 }
 
 .win-btn {
@@ -307,12 +312,34 @@ body {
   cursor: default;
 }
 
+/* The squeeze belongs to the chip list, not the label. `overflow: hidden` here
+   resolved this box's min-width:auto to 0, so it shrank past its own content
+   and clipped the label mid-word — the header read "CLIE" at 1100px with no
+   chip visible at all.
+
+   The squeeze now lands where it should: min-width:0 here and on .clients-list
+   lets both shrink (removing overflow:hidden alone is not enough — the list's
+   min-content contribution still floors this box and pushed the window controls
+   off screen), while .section-label is flex-shrink:0 so the word stays whole
+   and .clients-list keeps the overflow-x:auto it already had. Measured at
+   1290px: "CLIENTS" intact, chip list scrolled, all three window controls on
+   screen. */
 .topbar-clients {
   display: flex;
   align-items: center;
   gap: 10px;
   max-width: 40%;
-  overflow: hidden;
+  min-width: 0;
+}
+
+/* Below this the telemetry ribbon alone fills the bar and the chip list gets
+   no usable width, so the section would be a label introducing nothing. The
+   Fleet tab (Ctrl+4) renders the same /api/clients response as full cards, so
+   hiding the strip here costs no information. */
+@media (max-width: 1280px) {
+  .topbar-clients {
+    display: none;
+  }
 }
 
 .section-label {
@@ -322,6 +349,7 @@ body {
   letter-spacing: 0.05em;
   color: var(--fg-dim);
   white-space: nowrap;
+  flex-shrink: 0;   /* the list shrinks, the word does not */
 }
 
 .clients-list {
@@ -329,6 +357,7 @@ body {
   gap: 8px;
   overflow-x: auto;
   padding-bottom: 2px;
+  min-width: 0;   /* absorb the squeeze here — see .topbar-clients above */
 }
 
 .client-chip {
