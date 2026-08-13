@@ -169,6 +169,12 @@ async function refreshStatus() {
       stat("Synthesis", s.synthesis_enabled ? "on" : "off"),
     ].join("");
 
+    // The version the server actually is. This was hardcoded in index.html and
+    // said v0.9.0 while the source tree was at 0.10.0 — kept blank until the
+    // server answers rather than shipping another copy to go stale.
+    const badge = document.getElementById("brand-badge");
+    if (badge && s.version) badge.textContent = `Orchestrator v${s.version}`;
+
     // Sync Obsidian Statusbar
     const sbNotes = document.getElementById("sb-notes-val");
     if (sbNotes && s.chroma_indexed_notes !== undefined) sbNotes.textContent = `${s.chroma_indexed_notes} notes`;

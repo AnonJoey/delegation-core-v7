@@ -255,7 +255,13 @@ def _status(cfg, vault) -> dict:
 
     chroma_count = vault.get_stats().get("indexed_notes") if vault else None
 
+    # The header used to hardcode this in index.html, where it read v0.9.0
+    # against a source tree at 0.10.0 — a copy of the version nothing could keep
+    # in sync, and the one users actually look at. Served from the package now.
+    from . import __version__
+
     return {
+        "version": __version__,
         "configured": cfg.is_configured(),
         "vault_path": cfg.vault_path,
         "vault_ok": vault_ok,
@@ -358,7 +364,21 @@ class _Handler(BaseHTTPRequestHandler):
                 self._handle_vault_search(query)
             elif parsed.path == "/api/vault/graph":
                 q = parse_qs(parsed.query)
-                include_generated = (q.get("generated") or ["1"])[0] != "0"
+                # Defaults to excluding generated articles, which is what
+                # _build_vault_graph's own signature, its docstring and the
+                # frontend all already assumed. This line said ["1"] and was the
+                # only one that disagreed, and since the frontend sends no
+                # `generated` param it decided every graph the dashboard drew.
+                #
+                # The effect was not subtle. Nodes are capped at the 1500 most
+                # recent, and 3427 of this vault's 3629 notes are graph_build
+                # articles — so the cap filled with generated articles, which
+                # carry no wikilinks between them, and crowded out the
+                # hand-written notes that hold all of them. Measured on the live
+                # vault: 238 nodes / 2962 edges excluded, against 1500 nodes /
+                # **13** edges included. The dashboard rendered the latter: a
+                # near-empty canvas, which is what sent us looking.
+                include_generated = (q.get("generated") or ["0"])[0] != "0"
                 self._send_json(_build_vault_graph(_cfg, include_generated=include_generated))
             elif parsed.path == "/api/graphs":
                 from . import graphbridge
@@ -375,9 +395,36 @@ class _Handler(BaseHTTPRequestHandler):
                 self._handle_config_get()
             else:
                 self._send_json({"error": f"not found: {parsed.path}"}, status=404)
+        except (BrokenPipeError, ConnectionResetError):
+            self._log_disconnect(parsed.path)
         except Exception as e:
             logger.exception("Request failed: %s", parsed.path)
-            self._send_json({"error": str(e)}, status=500)
+            self._send_error_response(parsed.path, e)
+
+    def _log_disconnect(self, path: str) -> None:
+        """A client that hung up is not an error, and must not be answered.
+
+        The old handler treated it as one: a disconnect during the response
+        raised out of _send_json, was logged with a full traceback at ERROR,
+        and then the handler tried to send a 500 — on the same dead socket, so
+        it raised again, this time out of do_GET entirely and into
+        socketserver's "Exception occurred during processing of request".
+        Two tracebacks and a scary log line for a client pressing Escape.
+
+        Cheap to ignore under the old sidecar, whose stderr nobody read. These
+        handlers now run inside the daemon, so this lands in the journal
+        alongside real faults — and a 2-second curl against /api/status is
+        enough to produce it, since that route waits on a llama.cpp health
+        check.
+        """
+        logger.debug("client disconnected before the response was sent: %s", path)
+
+    def _send_error_response(self, path: str, exc: Exception) -> None:
+        """Send the 500 for a failed request, unless the client is already gone."""
+        try:
+            self._send_json({"error": str(exc)}, status=500)
+        except (BrokenPipeError, ConnectionResetError):
+            self._log_disconnect(path)
 
     _MAX_BODY_BYTES = 1_000_000  # 1 MB — generous for a process create/update payload
 
@@ -447,9 +494,11 @@ class _Handler(BaseHTTPRequestHandler):
                 self._handle_purge_orphans()
             else:
                 self._send_json({"error": f"not found: {parsed.path}"}, status=404)
+        except (BrokenPipeError, ConnectionResetError):
+            self._log_disconnect(parsed.path)
         except Exception as e:
             logger.exception("Request failed: %s", parsed.path)
-            self._send_json({"error": str(e)}, status=500)
+            self._send_error_response(parsed.path, e)
 
     def _handle_processes_list(self, query) -> None:
         status = (query.get("status") or ["active"])[0]

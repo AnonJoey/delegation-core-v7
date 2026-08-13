@@ -2,6 +2,39 @@
 
 ## Unreleased
 
+### Fixed
+
+- **The vault graph drew 13 edges instead of 2962.** `/api/vault/graph` defaulted
+  to *including* graph_build articles, while `_build_vault_graph`'s own
+  signature, its docstring and the frontend all assumed the opposite — and since
+  the frontend passes no `generated` parameter, that one line decided every
+  graph the dashboard ever drew. Nodes are capped at the 1500 most recent, and
+  3427 of this vault's 3629 notes are generated articles, so the cap filled with
+  articles that carry no wikilinks between them and crowded out the hand-written
+  notes holding all of them. Measured on the live vault: 238 nodes / 2962 edges
+  excluded, against 1500 nodes / 13 edges included. On screen that was a canvas
+  with six dots and no lines, which is how it was found. The frontend's own
+  "N code-graph articles are under Code" caption had never once been shown.
+
+- **The version was wrong in five places at once.** `pyproject.toml` said
+  0.10.0, `__init__.py`'s docstring said 0.10.0, its `__version__` said 0.9.0,
+  the installed editable metadata said 0.7.0, and `index.html` hardcoded
+  "Orchestrator v0.9.0" into the header users actually look at. This is the
+  third recorded drift, each previously re-synced by hand under a comment
+  promising lockstep. Now: one literal in `__init__.py`, no copy in the
+  docstring, the header served from `/api/status`, and
+  `test_version_consistency.py` failing the suite when it drifts again.
+  Deriving it from `importlib.metadata` was tried and rejected — an editable
+  install freezes metadata at install time, which is why it read 0.7.0.
+
+- **A client hanging up mid-response logged two tracebacks.** The disconnect
+  raised out of `_send_json`, was logged at ERROR with a traceback, and then the
+  handler tried to send a 500 down the same dead socket — raising again, out of
+  the handler entirely and into socketserver's "Exception occurred during
+  processing of request". Cheap under a sidecar whose stderr nobody read; these
+  handlers now run in the daemon, where it lands in the journal beside real
+  faults. A disconnect is logged at debug and not answered.
+
 ### Changed
 
 - **The daemon serves the dashboard's JSON API; the Tauri app stops spawning a
