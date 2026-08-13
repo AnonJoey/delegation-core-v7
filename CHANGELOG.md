@@ -2,6 +2,47 @@
 
 ## Unreleased
 
+### Changed
+
+- **`reindex`, `maintain` and `ingest` hand their work to the running daemon.**
+  Moving the server to a single HTTP daemon gave one owner of the index and one
+  resident copy of BGE — for *clients*. The CLI kept building its own
+  `VaultManager`, so the common path through the product was still the one that
+  reintroduced the second writer: the hooks fire exactly these three commands as
+  detached processes (`session_export.py` after writing a transcript,
+  `session_start_brief.py` for maintenance and a backstop reindex). The daemon's
+  journal shows the consequence minutes into any session — *"Index changed on
+  disk by another process — reopening"*.
+
+  Measured on this vault (3627 notes, incremental, nothing to do): the old path
+  took 7.9s wall and pushed GPU use from 4060 to 6383 MiB — a second 2.3 GiB
+  copy of BGE-m3 loaded to index nothing. Routed, the same command takes 0.99s
+  and GPU use does not move. `--local` forces the old in-process path, and a
+  machine with no daemon listening still falls back to it automatically, so an
+  install without the service keeps working.
+
+  A daemon call that *fails* deliberately does not fall back: retrying locally
+  would start the concurrent writer this removes, against a daemon that is
+  already unwell. A daemon that *disappears* mid-call does fall back — that is a
+  restart, not a failure. `ingest` resolves its path before sending it, since
+  the daemon's working directory is not the shell's.
+
+  Two bugs surfaced in the first real run rather than in review. Polling read
+  `"error" in status`, but `jobs.submit()` seeds every job with `error=None`, so
+  a *finished* reindex was reported as a lost job while the daemon's log showed
+  it completing. And obeying `check_again_in_seconds` — floored at 30s, written
+  for an agent that spends a turn per poll — turned 70ms of work into 10.6s of
+  waiting; the interval now starts at 250ms and grows. Both are pinned by tests.
+
+### Fixed
+
+- **Stale session files were skipped forever instead of deleted.**
+  `list_connected_clients()` only unlinked files whose pid was gone, so a stale
+  session belonging to the *live* daemon sat in `~/.delegation_core/sessions/`
+  permanently. Harmless while every client was a long-lived editor; since the
+  CLI now connects once per routed command — several times a day via the hooks —
+  it was a file per invocation with no reader.
+
 ### Added
 
 - **`vault_health_detail()` — the findings behind the health counts.** The
