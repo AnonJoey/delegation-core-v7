@@ -110,17 +110,36 @@
           <div class="dock-header">
             <span class="dock-title" id="dock-title">Vault</span>
           </div>
+          <!-- The whole vault directory lives here: filter, folders, notes. The
+               reader gets the main column to itself, and the ribbon decides which
+               navigator is docked beside it. -->
           <div class="dock-panel active" id="dock-notes">
-              <div class="folder-list-pane dock-body">
-                <div class="pane-section-header">Folders</div>
-                <div class="folder-list" id="folder-list">
-                  <div class="pane-state loading">
-                    <div class="spinner"></div>
-                    <div class="pane-state-title">Loading…</div>
-                  </div>
+            <div class="notes-toolbar">
+              <div class="search-box">
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"></circle><line x1="21" y1="21" x2="16.65" y2="16.65"></line></svg>
+                <input
+                  type="search"
+                  id="notes-filter"
+                  placeholder="Filter notes by title…"
+                  aria-label="Filter notes by title"
+                  autocomplete="off"
+                  spellcheck="false"
+                />
+              </div>
+            </div>
+            <div class="folder-list-pane dock-body">
+              <div class="pane-section-header">Folders</div>
+              <div class="folder-list" id="folder-list">
+                <div class="pane-state loading">
+                  <div class="spinner"></div>
+                  <div class="pane-state-title">Loading…</div>
                 </div>
               </div>
-
+            </div>
+            <div class="note-list-pane">
+              <div class="pane-section-header">Notes (<span id="note-count-badge">0</span>)</div>
+              <div class="note-list" id="note-list"></div>
+            </div>
           </div>
           <div class="dock-panel" id="dock-tasks">
                   <div class="task-list-pane">
@@ -164,25 +183,7 @@
 
           <!-- Tab 1: Notes Browser & Reader -->
           <section class="tab-content active" id="tab-notes">
-            <div class="notes-toolbar">
-              <div class="search-box">
-                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"></circle><line x1="21" y1="21" x2="16.65" y2="16.65"></line></svg>
-                <input
-                  type="search"
-                  id="notes-filter"
-                  placeholder="Filter notes by title…"
-                  aria-label="Filter notes by title"
-                  autocomplete="off"
-                  spellcheck="false"
-                />
-              </div>
-            </div>
             <div class="notes-browser">
-              <div class="note-list-pane">
-                <div class="pane-section-header">Notes (<span id="note-count-badge">0</span>)</div>
-                <div class="note-list" id="note-list"></div>
-              </div>
-
               <div class="note-view-pane">
                 <div class="note-view-header" id="note-view-header" hidden>
                   <div class="note-title-bar">
