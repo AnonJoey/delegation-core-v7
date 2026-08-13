@@ -17,7 +17,7 @@ import socket
 
 import pytest
 
-from delegation_core import cli, daemon
+from delegation_core import cli, daemon, jobs
 from delegation_core.config import Config
 
 
@@ -191,6 +191,23 @@ def test_a_vanished_job_is_an_error_not_a_silent_success():
     with pytest.raises(daemon.DaemonCallFailed, match="lost job"):
         daemon.next_poll_wait({"error": "Job 'j1' not found."}, "j1",
                               "run_maintenance_bg", poll)
+
+
+def test_the_enriched_not_found_payload_is_still_read_as_not_found():
+    """task_status() explains a vanished job; next_poll_wait() must still see it.
+
+    The two modules are coupled through the *absence* of a "status" key, which is
+    easy to break from the server side without touching this file: any status
+    value here reads as neither done nor error, so the CLI would poll a job that
+    does not exist until it timed out. This pins the real payload, built the way
+    server.task_status builds it, against the reader.
+    """
+    payload = {"error": "Job 'j1' not found.",
+               "job_store_started": jobs.STARTED_AT.isoformat(),
+               "hint": "Job ids live in this daemon's memory..."}
+    poll = daemon._Poll(daemon.JOB_WAIT_TIMEOUT_SEC)
+    with pytest.raises(daemon.DaemonCallFailed, match="lost job"):
+        daemon.next_poll_wait(payload, "j1", "run_maintenance_bg", poll)
 
 
 def test_a_failed_job_is_reported_as_a_failure():

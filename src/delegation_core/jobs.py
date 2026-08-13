@@ -27,6 +27,13 @@ logger = logging.getLogger("jobs")
 _jobs: dict = {}
 _lock = threading.Lock()
 
+# When this process's job store came up. A job_id that is absent is either a
+# typo or a casualty of a restart, and those want opposite responses from the
+# caller — this is the one fact that separates them: submit a job, get an id
+# back, and if the store is younger than the id you are holding, the daemon
+# restarted underneath you and the work's outcome is unknown, not failed.
+STARTED_AT = datetime.now()
+
 # Rolling history of completed durations per task name. Small and advisory —
 # a corrupt or missing file just means callers get no hint, never an error.
 _DURATIONS_PATH = Path.home() / ".delegation_core" / "job_durations.json"

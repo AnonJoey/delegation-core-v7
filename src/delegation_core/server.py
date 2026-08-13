@@ -823,7 +823,20 @@ async def task_status(job_id: str) -> str:
     """
     job = jobs.get(job_id)
     if not job:
-        return json.dumps({"error": f"Job '{job_id}' not found."})
+        # Deliberately carries no "status" key: daemon.next_poll_wait() keys on
+        # its absence to tell not-found from a real job state, and a "status"
+        # here would read as neither done nor error and send the CLI back round
+        # the poll loop until it timed out. The extra fields below are additive
+        # for that reason — they explain the shape without changing it.
+        return json.dumps({
+            "error": f"Job '{job_id}' not found.",
+            "job_store_started": jobs.STARTED_AT.isoformat(),
+            "hint": ("Job ids live in this daemon's memory and do not survive a restart. "
+                     "If this job was submitted before job_store_started, the daemon "
+                     "restarted and the work's outcome is UNKNOWN, not failed — confirm "
+                     "with vault_stats()/vault_inbox_status() before re-running, since "
+                     "the job may well have completed."),
+        })
     if job["status"] == "running":
         from datetime import datetime as dt
         elapsed = (dt.now() - dt.fromisoformat(job["started"])).total_seconds()
@@ -1009,15 +1022,50 @@ async def graph_build(path: str, name: str = "", force: bool = False,
 
 
 @mcp.tool()
-async def graph_list() -> str:
-    """List previously built code graphs: name, source path, node/edge/community counts, last built."""
-    return json.dumps(graphbridge.list_graphs(_vault.cfg))
+async def graph_list(name: str = "") -> str:
+    """List previously built code graphs: name, source path, node/edge/community counts, last built.
+
+    Vault note paths are returned as a count (`vault_notes_filed`). Pass `name` to
+    get that one graph's entry with the full `vault_paths` list.
+    """
+    return json.dumps(graphbridge.list_graphs(_vault.cfg, name=name or None))
+
+
+# A GRAPH_REPORT.md is a whole markdown document, and on this machine the two
+# largest are 335,350 and 319,254 characters — both past the MCP tool-result cap,
+# so graph_report returned nothing readable for precisely the graphs big enough
+# to be worth a report. Paged rather than summarised: unlike graph_list's
+# vault_paths, every line here is content the caller explicitly asked for.
+# Only the MCP path pages. graphbridge.get_report() still returns the document
+# whole for the dashboard and the CLI, which render it locally and have no cap.
+GRAPH_REPORT_PAGE_CHARS = 30_000
+
+
+def _page_report(result: dict, offset: int, page_chars: int = GRAPH_REPORT_PAGE_CHARS) -> dict:
+    """Cut one page out of a get_report() result, leaving error results alone."""
+    report = result.get("report")
+    if report is None:
+        return result
+    total = len(report)
+    start = min(max(offset, 0), total)
+    page = report[start:start + page_chars]
+    result["report"] = page
+    result["offset"] = start
+    result["total_chars"] = total
+    if start + len(page) < total:
+        result["next_offset"] = start + len(page)
+        result["truncated"] = True
+    return result
 
 
 @mcp.tool()
-async def graph_report(name: str) -> str:
-    """Return the full GRAPH_REPORT.md for a previously built graph by name (see graph_list)."""
-    return json.dumps(graphbridge.get_report(_vault.cfg, name))
+async def graph_report(name: str, offset: int = 0) -> str:
+    """Return the GRAPH_REPORT.md for a previously built graph by name (see graph_list).
+
+    Long reports are paged. When `truncated` is true, call again with
+    offset=`next_offset` to read on; `total_chars` is the report's full length.
+    """
+    return json.dumps(_page_report(graphbridge.get_report(_vault.cfg, name), offset))
 
 
 @mcp.tool()

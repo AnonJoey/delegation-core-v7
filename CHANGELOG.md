@@ -4,6 +4,42 @@
 
 ### Fixed
 
+- **`graph_list` and `graph_report` were both too large to return.** Measured on
+  this machine's registry, `graph_list` answered with 181,666 characters, past
+  the MCP tool-result cap — the tool was unusable through the one interface it
+  exists for. One field caused it: `vault_paths` is the only unbounded entry in
+  a registry record, holding a path per filed vault article, and the six graphs
+  here carry 3,391 between them (openclaw 1,441, hermes-agent 1,053). Nothing
+  read the array — the CLI prints counts, the dashboard reads `node_count`, and
+  `graph_preview` had already settled on `vault_notes_filed` for this same field.
+  It now returns that count; measured after, 1,580 characters, a 99.1%
+  reduction. The paths stay reachable through `graph_list(name=...)`, which
+  returns one graph's record whole.
+
+  `graph_report` had the same problem and no summary available, since every line
+  of a report is content the caller asked for: openclaw's is 335,321 characters
+  and hermes-agent's 319,254, both past the cap, so the largest graphs were
+  exactly the ones that returned nothing. It is paged instead — 30,000 characters
+  a page with `next_offset`/`total_chars`/`truncated`, and openclaw's twelve
+  pages reassemble byte-identical to the document. Reports under a page come back
+  whole and unflagged. Only the MCP path pages: `graphbridge.get_report()` still
+  returns the full text for the dashboard and CLI, which render it locally with
+  no cap.
+
+### Changed
+
+- **`task_status` says whether a vanished job was lost or never existed.** A
+  missing `job_id` answered `{"error": "Job 'x' not found."}` and nothing more.
+  Under stdio that was almost always a typo; under the daemon it is almost always
+  a restart, and the two call for opposite responses — re-run the tool, or go
+  check whether the work already finished. The response now carries
+  `job_store_started`, the one fact that separates them, with the reasoning
+  spelled out for the agent reading it. It deliberately gained no `status` key:
+  `daemon.next_poll_wait()` identifies not-found by that key's *absence*, and any
+  value there reads as neither done nor error, which would leave the CLI polling
+  a nonexistent job until its timeout. Confirmed by calling `next_poll_wait` on
+  such a payload — it returns a wait instead of raising — and pinned by a test.
+
 - **The vault graph drew 13 edges instead of 2962.** `/api/vault/graph` defaulted
   to *including* graph_build articles, while `_build_vault_graph`'s own
   signature, its docstring and the frontend all assumed the opposite — and since

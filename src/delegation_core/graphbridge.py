@@ -566,10 +566,35 @@ async def build_graph(cfg, vault_manager, source_path: str,
     return result
 
 
-def list_graphs(cfg) -> dict:
-    """Return the registry of previously built graphs: name, source path, counts, timestamps."""
+def list_graphs(cfg, name: str | None = None) -> dict:
+    """Return the registry of previously built graphs: name, source path, counts, timestamps.
+
+    `vault_paths` is summarised to its length rather than returned. It is the one
+    unbounded field in a registry entry — one graph on this machine holds 1441
+    entries, and the six together made this 181,666 characters, past the MCP
+    tool-result cap, so the tool returned nothing usable at all. Every caller
+    (CLI, dashboard, the MCP tool) reads only the counts; graph_preview already
+    summarises the same field as `vault_notes_filed`, so this is the shape the
+    rest of the module had already settled on.
+
+    Pass `name` to get one graph's full entry, `vault_paths` included — that is
+    bounded by a single graph and is how a caller who does want the paths asks.
+    """
     registry = _load_registry(cfg)
-    return {"count": len(registry), "graphs": registry}
+    if name:
+        graph_name = _slugify(name)
+        entry = registry.get(graph_name)
+        if entry is None:
+            return {"error": f"No graph named '{graph_name}'. Call graph_list() for the registry."}
+        return {"count": 1, "graphs": {graph_name: entry}}
+    return {
+        "count": len(registry),
+        "graphs": {
+            n: {k: v for k, v in e.items() if k != "vault_paths"}
+                | {"vault_notes_filed": len(e.get("vault_paths") or [])}
+            for n, e in registry.items()
+        },
+    }
 
 
 def get_report(cfg, name: str) -> dict:

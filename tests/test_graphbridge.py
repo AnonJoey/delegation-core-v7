@@ -123,6 +123,47 @@ def test_list_graphs_reports_count(cfg):
     assert set(result["graphs"]) == {"a", "b"}
 
 
+def test_list_graphs_summarises_vault_paths_instead_of_listing_them(cfg):
+    """The registry's one unbounded field pushed this tool past the MCP result cap.
+
+    Measured on the real registry before this change: 181,666 characters for six
+    graphs, 3,391 vault_paths between them, so the tool returned nothing a client
+    could read. Counts are what every caller actually uses.
+    """
+    graphbridge._save_registry(cfg, {
+        "big": {"node_count": 10, "vault_paths": [f"Reference/wiki/n{i}.md" for i in range(1441)]},
+    })
+    result = graphbridge.list_graphs(cfg)
+    entry = result["graphs"]["big"]
+    assert "vault_paths" not in entry
+    assert entry["vault_notes_filed"] == 1441
+    assert entry["node_count"] == 10
+    # the whole point: the payload is bounded regardless of how much was filed
+    assert len(json.dumps(result)) < 1000
+
+
+def test_list_graphs_missing_vault_paths_counts_as_zero(cfg):
+    graphbridge._save_registry(cfg, {"fresh": {"node_count": 3}})
+    assert graphbridge.list_graphs(cfg)["graphs"]["fresh"]["vault_notes_filed"] == 0
+
+
+def test_list_graphs_by_name_returns_the_full_paths_for_one_graph(cfg):
+    graphbridge._save_registry(cfg, {
+        "a": {"vault_paths": ["Reference/a.md"]},
+        "b": {"vault_paths": ["Reference/b.md"]},
+    })
+    result = graphbridge.list_graphs(cfg, name="a")
+    assert result["count"] == 1
+    assert set(result["graphs"]) == {"a"}
+    assert result["graphs"]["a"]["vault_paths"] == ["Reference/a.md"]
+
+
+def test_list_graphs_by_name_slugifies_and_errors_on_unknown(cfg):
+    graphbridge._save_registry(cfg, {"my-graph": {"vault_paths": []}})
+    assert set(graphbridge.list_graphs(cfg, name="my graph")["graphs"]) == {"my-graph"}
+    assert "error" in graphbridge.list_graphs(cfg, name="never-built")
+
+
 def test_get_report_missing_graph_returns_error(cfg):
     result = graphbridge.get_report(cfg, "never-built")
     assert "error" in result
