@@ -185,6 +185,18 @@ class Config:
     # for a machine running no daemon.
     dashboard_port: int = 8788
 
+    # How long the local model may sit loaded with an empty task line before the
+    # worker unloads it. A queued task pins ~11.5 GiB on this machine (gemma-12B
+    # Q6 alongside BGE-m3, measured: 3838 -> 15386 MiB), and without this a
+    # single task holds that until the next daemon restart — reintroducing
+    # exactly the GPU contention that engine_mode "agent" exists to avoid.
+    #
+    # Only applies in agent mode, where the local model runs solely to serve the
+    # queue. In local/hybrid mode it is the engine every other caller uses, and
+    # unloading it under them would turn one idle minute into a 10s reload on
+    # the next call. 0 disables the unload entirely.
+    local_idle_shutdown_sec: int = 300
+
     # ── v0.11: local-model queue ─────────────────────────────────────────────
     # How many llama.cpp requests may be in flight at once. One daemon now
     # fronts every client, so without this a burst of clients would stampede a

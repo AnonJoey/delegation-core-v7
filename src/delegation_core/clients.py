@@ -7,7 +7,7 @@ spawns a *second* server that will fight the daemon for the port, the ChromaDB
 index, and the GPU. There is no version of "it keeps working by accident", so the
 migration is explicit and this module is what performs it.
 
-Two clients are handled directly because they are the two on this machine.
+Three clients are handled directly because they are the ones on this machine.
 Everything else is covered by `entry_summary()`, which just describes the URL and
 token so a user can paste them wherever their client wants them.
 
@@ -28,10 +28,24 @@ Codex (~/.codex/config.toml, TOML):
 Codex reads the secret from an environment variable rather than the config file,
 so migrating it also means telling the user to export DELEGATION_CORE_TOKEN. That
 is Codex's design, not a choice made here.
+
+Antigravity / Gemini CLI (~/.gemini/config/mcp_config.json, JSON):
+
+    "delegation-core": {
+      "serverUrl": "http://127.0.0.1:8787/mcp",
+      "headers": {"Authorization": "Bearer <token>"}
+    }
+
+The key is `serverUrl`, not `url` — Antigravity's own embedded documentation
+describes exactly two transports, stdio (`command`/`args`/`env`) and remote
+(`serverUrl`), and calls the remote one SSE. This daemon serves streamable HTTP
+at the same path, which most current clients accept under that field; whether
+this one does is a question for a live connection, not for this docstring.
 """
 
 from __future__ import annotations
 
+import json
 import logging
 import shutil
 from pathlib import Path
@@ -42,6 +56,10 @@ from .windows import SELF, read_client_config, write_client_config
 logger = logging.getLogger("clients")
 
 CODEX_CONFIG = Path.home() / ".codex" / "config.toml"
+
+#: Antigravity (the `agy` CLI) and the Gemini CLI share this file. Its own docs
+#: call it the "Global Configuration", applying to all sessions.
+ANTIGRAVITY_CONFIG = Path.home() / ".gemini" / "config" / "mcp_config.json"
 
 #: Codex looks the bearer token up in the environment under this name.
 CODEX_TOKEN_ENV_VAR = "DELEGATION_CORE_TOKEN"
@@ -65,6 +83,72 @@ def codex_block(cfg: Config) -> str:
         f"startup_timeout_sec = 30\n"
         f"tool_timeout_sec = 120\n"
     )
+
+
+def antigravity_entry(cfg: Config) -> dict:
+    """The ~/.gemini/config/mcp_config.json mcpServers value for the daemon."""
+    return {
+        "serverUrl": cfg.server_url,
+        "headers": {"Authorization": f"Bearer {cfg.server_token}"},
+    }
+
+
+def install_antigravity(cfg: Config) -> dict:
+    """Point Antigravity / the Gemini CLI at the daemon.
+
+    The file ships empty (0 bytes on this machine, untouched since it was
+    created), and json.load on an empty file raises rather than returning {} —
+    so emptiness is treated as "no servers yet" instead of as corruption.
+
+    Other servers in the file are preserved; only this one entry is rewritten.
+    """
+    ANTIGRAVITY_CONFIG.parent.mkdir(parents=True, exist_ok=True)
+
+    data: dict = {}
+    if ANTIGRAVITY_CONFIG.exists():
+        raw = ANTIGRAVITY_CONFIG.read_text(encoding="utf-8").strip()
+        if raw:
+            try:
+                loaded = json.loads(raw)
+                data = loaded if isinstance(loaded, dict) else {}
+            except json.JSONDecodeError:
+                # Refuse rather than overwrite: this file may hold another
+                # client's servers, and clobbering them to add ours is a worse
+                # outcome than telling the user to look at it.
+                return {
+                    "client": "antigravity",
+                    "path": str(ANTIGRAVITY_CONFIG),
+                    "status": "error",
+                    "detail": "mcp_config.json is not valid JSON — not touching it",
+                }
+
+    servers = data.setdefault("mcpServers", {})
+    if not isinstance(servers, dict):
+        return {
+            "client": "antigravity",
+            "path": str(ANTIGRAVITY_CONFIG),
+            "status": "error",
+            "detail": "mcpServers is not an object — not touching it",
+        }
+
+    before = servers.get(SELF)
+    servers[SELF] = antigravity_entry(cfg)
+    if before == servers[SELF]:
+        return {"client": "antigravity", "path": str(ANTIGRAVITY_CONFIG),
+                "status": "already-configured"}
+
+    if ANTIGRAVITY_CONFIG.exists() and ANTIGRAVITY_CONFIG.stat().st_size:
+        backup = ANTIGRAVITY_CONFIG.with_suffix(".json.dc-backup")
+        if not backup.exists():
+            shutil.copy2(ANTIGRAVITY_CONFIG, backup)
+
+    # Atomic: a half-written config leaves the client unable to start, and this
+    # one is read by every agy session.
+    tmp = ANTIGRAVITY_CONFIG.with_suffix(".json.tmp")
+    tmp.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
+    tmp.replace(ANTIGRAVITY_CONFIG)
+    return {"client": "antigravity", "path": str(ANTIGRAVITY_CONFIG),
+            "status": "updated" if before else "installed"}
 
 
 def install_claude_code(cfg: Config) -> dict:

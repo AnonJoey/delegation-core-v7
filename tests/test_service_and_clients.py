@@ -162,3 +162,101 @@ def test_windows_registry_round_trips_an_http_spec(monkeypatch, tmp_path):
 
     windows_mod.open_window("remote")
     assert json.loads(client_config.read_text())["mcpServers"]["remote"] == http_spec
+
+
+# ── Antigravity / Gemini CLI ──────────────────────────────────────────────────
+# Its config ships empty (0 bytes, untouched since creation on this machine),
+# which is the case json.load raises on — so "empty" has to mean "no servers
+# yet", not "corrupt".
+
+def _agy_cfg(tmp_path, monkeypatch):
+    from delegation_core import clients
+    path = tmp_path / "gemini" / "config" / "mcp_config.json"
+    monkeypatch.setattr(clients, "ANTIGRAVITY_CONFIG", path)
+    return path
+
+
+def test_antigravity_entry_uses_serverurl_not_url():
+    """Antigravity's schema names the remote field serverUrl; an `url` key is
+    silently not a server."""
+    from delegation_core import clients
+    from delegation_core.config import Config
+
+    cfg = Config(server_token="tok")
+    entry = clients.antigravity_entry(cfg)
+    assert entry["serverUrl"] == cfg.server_url
+    assert "url" not in entry
+    assert entry["headers"]["Authorization"] == "Bearer tok"
+
+
+def test_installs_into_a_missing_file(tmp_path, monkeypatch):
+    import json
+    from delegation_core import clients
+    from delegation_core.config import Config
+
+    path = _agy_cfg(tmp_path, monkeypatch)
+    result = clients.install_antigravity(Config(server_token="tok"))
+    assert result["status"] == "installed"
+    assert json.loads(path.read_text())["mcpServers"]["delegation-core"]["serverUrl"]
+
+
+def test_installs_into_the_empty_file_it_actually_ships_with(tmp_path, monkeypatch):
+    import json
+    from delegation_core import clients
+    from delegation_core.config import Config
+
+    path = _agy_cfg(tmp_path, monkeypatch)
+    path.parent.mkdir(parents=True)
+    path.write_text("")            # 0 bytes, exactly as found on disk
+    assert clients.install_antigravity(Config(server_token="tok"))["status"] == "installed"
+    assert "delegation-core" in json.loads(path.read_text())["mcpServers"]
+
+
+def test_other_servers_are_preserved(tmp_path, monkeypatch):
+    import json
+    from delegation_core import clients
+    from delegation_core.config import Config
+
+    path = _agy_cfg(tmp_path, monkeypatch)
+    path.parent.mkdir(parents=True)
+    path.write_text(json.dumps({"mcpServers": {"sqlite-helper": {"command": "x"}}}))
+    clients.install_antigravity(Config(server_token="tok"))
+    servers = json.loads(path.read_text())["mcpServers"]
+    assert servers["sqlite-helper"] == {"command": "x"}
+    assert "delegation-core" in servers
+
+
+def test_reinstall_is_idempotent(tmp_path, monkeypatch):
+    from delegation_core import clients
+    from delegation_core.config import Config
+
+    _agy_cfg(tmp_path, monkeypatch)
+    cfg = Config(server_token="tok")
+    clients.install_antigravity(cfg)
+    assert clients.install_antigravity(cfg)["status"] == "already-configured"
+
+
+def test_a_rotated_token_is_written_through(tmp_path, monkeypatch):
+    import json
+    from delegation_core import clients
+    from delegation_core.config import Config
+
+    path = _agy_cfg(tmp_path, monkeypatch)
+    clients.install_antigravity(Config(server_token="old"))
+    assert clients.install_antigravity(Config(server_token="new"))["status"] == "updated"
+    entry = json.loads(path.read_text())["mcpServers"]["delegation-core"]
+    assert entry["headers"]["Authorization"] == "Bearer new"
+
+
+def test_malformed_config_is_refused_not_overwritten(tmp_path, monkeypatch):
+    """The file may hold another client's servers. Clobbering them to add ours
+    is worse than reporting it."""
+    from delegation_core import clients
+    from delegation_core.config import Config
+
+    path = _agy_cfg(tmp_path, monkeypatch)
+    path.parent.mkdir(parents=True)
+    path.write_text("{ not json")
+    result = clients.install_antigravity(Config(server_token="tok"))
+    assert result["status"] == "error"
+    assert path.read_text() == "{ not json"

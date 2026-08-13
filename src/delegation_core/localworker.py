@@ -18,6 +18,11 @@ which starts llama.cpp on demand and calls it directly. The cost is real and
 worth stating — llama.cpp and BGE-m3 share one GPU, and this is exactly the
 contention that moving to `engine_mode: "agent"` was meant to remove. It is paid
 only while the line is non-empty, and only because something asked for it.
+
+Which is also why the worker unloads the model again. Left alone, one queued
+task pins the GPU until the next daemon restart — measured on this machine,
+3838 -> 15386 MiB for a single 12-word prompt. After `local_idle_shutdown_sec`
+with an empty line, the model is stopped and the next task pays an 8s reload.
 """
 
 from __future__ import annotations
@@ -39,9 +44,17 @@ IDLE_POLL_SECONDS = 2.0
 class LocalTaskWorker:
     """Drains the local task line on a background thread."""
 
-    def __init__(self, engine, poll_seconds: float = IDLE_POLL_SECONDS):
+    def __init__(self, engine, poll_seconds: float = IDLE_POLL_SECONDS,
+                 idle_shutdown_sec: int | None = None):
         self._engine = engine
         self._poll = poll_seconds
+        # None means "read it from config" — passing it explicitly is for tests,
+        # which should not depend on whatever this machine happens to be set to.
+        if idle_shutdown_sec is None:
+            cfg = getattr(engine, "cfg", None)
+            idle_shutdown_sec = getattr(cfg, "local_idle_shutdown_sec", 0)
+        self._idle_shutdown_sec = idle_shutdown_sec
+        self._idle_since: float | None = None
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
 
@@ -76,17 +89,55 @@ class LocalTaskWorker:
             while not self._stop.is_set():
                 task = localqueue.claim_next()
                 if task is None:
+                    self._maybe_unload_idle_model()
                     # Event.wait rather than sleep: stop() interrupts an idle
                     # worker immediately instead of after a full poll interval.
                     self._stop.wait(self._poll)
                     continue
+                self._idle_since = None
                 self._run_one(loop, task)
+                # Start the idle clock from when the line went quiet, not from
+                # the last claim attempt — otherwise polling keeps resetting it
+                # and the model never unloads.
+                self._idle_since = time.time()
         finally:
             try:
                 loop.run_until_complete(self._engine.aclose())
             except Exception:
                 pass
             loop.close()
+
+    def _maybe_unload_idle_model(self) -> None:
+        """Unload the local model once the line has been empty long enough.
+
+        Guarded to agent mode: there the model is loaded only because something
+        queued work for it, so an empty line means nothing needs it. In
+        local/hybrid mode it is the engine every other caller uses, and pulling
+        it out from under them trades an idle minute for a cold start on the
+        next call.
+
+        _shutdown() itself only stops a process this engine started, so a
+        llama.cpp someone else is running by hand is never touched.
+        """
+        if not self._idle_shutdown_sec or self._idle_since is None:
+            return
+        if not getattr(getattr(self._engine, "cfg", None), "is_agent_mode", False):
+            return
+        if time.time() - self._idle_since < self._idle_shutdown_sec:
+            return
+
+        self._idle_since = None
+        try:
+            if self._engine._is_healthy():
+                logger.info(
+                    "local task line idle for %ds — unloading the local model",
+                    self._idle_shutdown_sec,
+                )
+                self._engine._shutdown()
+        except Exception as e:
+            # An unload that fails is a held GPU, not a broken queue: the next
+            # task still runs against whatever is (or isn't) loaded.
+            logger.warning("could not unload the idle local model: %s", e)
 
     def _run_one(self, loop, task: dict) -> None:
         started = time.time()

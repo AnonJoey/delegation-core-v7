@@ -166,3 +166,93 @@ def test_stop_is_prompt_when_idle():
     worker.stop(timeout=5)
     assert time.time() - began < 2.0
     assert not worker.running
+
+
+class FakeCfg:
+    def __init__(self, agent_mode=True):
+        self.is_agent_mode = agent_mode
+        self.local_idle_shutdown_sec = 300
+
+
+class UnloadableEngine(FakeEngine):
+    """FakeEngine that also models the loaded/unloaded state of llama.cpp."""
+
+    def __init__(self, agent_mode=True, healthy=True, **kw):
+        super().__init__(**kw)
+        self.cfg = FakeCfg(agent_mode)
+        self.healthy = healthy
+        self.shutdowns = 0
+
+    def _is_healthy(self):
+        return self.healthy
+
+    def _shutdown(self):
+        self.shutdowns += 1
+        self.healthy = False
+
+
+def test_idle_model_is_unloaded_after_the_line_drains():
+    """One task otherwise pins ~11.5 GiB until the daemon restarts."""
+    engine = UnloadableEngine()
+    localqueue.submit("wake the model")
+    worker = LocalTaskWorker(engine, poll_seconds=0.01, idle_shutdown_sec=0.05)
+    worker.start()
+    try:
+        assert _drain(worker, lambda: engine.shutdowns == 1, timeout=5)
+    finally:
+        worker.stop()
+    assert engine.healthy is False
+
+
+def test_model_is_not_unloaded_before_the_idle_period():
+    engine = UnloadableEngine()
+    localqueue.submit("still warm")
+    worker = LocalTaskWorker(engine, poll_seconds=0.01, idle_shutdown_sec=30)
+    worker.start()
+    try:
+        assert _drain(worker, lambda: len(engine.calls) == 1)
+        time.sleep(0.2)
+    finally:
+        worker.stop()
+    assert engine.shutdowns == 0
+
+
+def test_local_mode_keeps_its_model_loaded():
+    """In local/hybrid mode the model serves every other caller too — unloading
+    it under them buys an idle minute and costs a cold start."""
+    engine = UnloadableEngine(agent_mode=False)
+    localqueue.submit("shared model")
+    worker = LocalTaskWorker(engine, poll_seconds=0.01, idle_shutdown_sec=0.05)
+    worker.start()
+    try:
+        assert _drain(worker, lambda: len(engine.calls) == 1)
+        time.sleep(0.3)
+    finally:
+        worker.stop()
+    assert engine.shutdowns == 0
+
+
+def test_zero_disables_the_unload():
+    engine = UnloadableEngine()
+    localqueue.submit("keep it loaded")
+    worker = LocalTaskWorker(engine, poll_seconds=0.01, idle_shutdown_sec=0)
+    worker.start()
+    try:
+        assert _drain(worker, lambda: len(engine.calls) == 1)
+        time.sleep(0.3)
+    finally:
+        worker.stop()
+    assert engine.shutdowns == 0
+
+
+def test_unload_is_not_attempted_when_nothing_is_loaded():
+    """An idle worker that never ran a task must not poke a model that was
+    never started — and must not spin calling _shutdown every poll."""
+    engine = UnloadableEngine(healthy=False)
+    worker = LocalTaskWorker(engine, poll_seconds=0.01, idle_shutdown_sec=0.01)
+    worker.start()
+    try:
+        time.sleep(0.2)
+    finally:
+        worker.stop()
+    assert engine.shutdowns == 0

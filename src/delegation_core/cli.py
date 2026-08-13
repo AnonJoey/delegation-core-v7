@@ -165,13 +165,13 @@ def cmd_clients(args):
     cfg = Config.load()
     token = cfg.ensure_server_token()
 
-    if args.show or not (args.claude_code or args.codex):
+    if args.show or not (args.claude_code or args.codex or args.antigravity):
         console.print(f"[bold]URL[/bold]    {cfg.server_url}")
         console.print(f"[bold]Header[/bold] Authorization: Bearer {token}")
         console.print(f"[bold]Env[/bold]    {_clients.CODEX_TOKEN_ENV_VAR}={token}")
         if not args.show:
-            console.print("\n[dim]Nothing written. Pass --claude-code and/or --codex "
-                          "to update a client config.[/dim]")
+            console.print("\n[dim]Nothing written. Pass --claude-code, --codex "
+                          "and/or --antigravity to update a client config.[/dim]")
         return 0
 
     if args.claude_code:
@@ -189,6 +189,15 @@ def cmd_clients(args):
             console.print(result["block"])
         console.print(f"  [yellow]Export the token before starting Codex:[/yellow] "
                       f"export {_clients.CODEX_TOKEN_ENV_VAR}={token}")
+
+    if args.antigravity:
+        result = _clients.install_antigravity(cfg)
+        colour = "red" if result["status"] == "error" else "green"
+        console.print(f"[{colour}]antigravity[/{colour}] {result['status']} — {result['path']}")
+        if result.get("detail"):
+            console.print(f"  [yellow]{result['detail']}[/yellow]")
+        else:
+            console.print("  [yellow]Restart agy for this to take effect.[/yellow]")
     return 0
 
 
@@ -1070,6 +1079,8 @@ def main():
         "clients", help="Point MCP clients at the HTTP daemon (migrates from stdio)")
     p_clients.add_argument("--claude-code", action="store_true",
                            help="Rewrite delegation-core's entry in ~/.claude.json")
+    p_clients.add_argument("--antigravity", action="store_true",
+                           help="Point Antigravity / the Gemini CLI (agy) at the daemon")
     p_clients.add_argument("--codex", action="store_true",
                            help="Append delegation-core's table to ~/.codex/config.toml")
     p_clients.add_argument("--show", action="store_true",
