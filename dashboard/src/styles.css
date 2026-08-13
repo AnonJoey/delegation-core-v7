@@ -724,6 +724,90 @@ body {
   background: transparent;
 }
 
+/* Indent steps for the explorer tree. These exist as classes rather than inline
+   padding because the app's CSP is `style-src 'self'` with no 'unsafe-inline',
+   under which WebKit silently drops style attributes — the reason the folder
+   tree rendered flat for as long as it has. 18px a level, from a 8px base. */
+.explorer .indent-0 { padding-left: 8px; }
+.explorer .indent-1 { padding-left: 26px; }
+.explorer .indent-2 { padding-left: 44px; }
+.explorer .indent-3 { padding-left: 62px; }
+.explorer .indent-4 { padding-left: 80px; }
+.explorer .indent-5 { padding-left: 98px; }
+.explorer .indent-6 { padding-left: 116px; }
+.explorer .indent-7 { padding-left: 134px; }
+.explorer .indent-8 { padding-left: 152px; }
+
+/* The explorer: folders and notes in one tree. Rows carry their own indent, so
+   the container only owns scrolling. */
+.explorer {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 4px 6px 10px;
+}
+
+/* A note is a leaf: no caret column, and it reads lighter than the folder that
+   holds it so the hierarchy is legible without lines or extra chrome. */
+.explorer .note-row {
+  color: var(--fg-muted);
+  font-size: 12.5px;
+  display: block;
+  white-space: normal;
+}
+
+/* .list-item is justify-content: space-between, which suits a two-column row but
+   floats a folder's name away from its own caret — at depth the name drifts to
+   the middle of the row and the indent stops reading as hierarchy. In a tree the
+   name belongs against the caret, with the count pushed to the far edge. */
+.explorer .dir-row {
+  font-weight: 500;
+  justify-content: flex-start;
+  gap: 6px;
+}
+
+.explorer .dir-row .count {
+  margin-left: auto;
+}
+
+.explorer .dir-caret {
+  flex: 0 0 auto;
+  width: 12px;
+  text-align: center;
+  color: var(--fg-dim);
+}
+
+.explorer .note-row.active {
+  background: var(--bg-active);
+  color: var(--accent-cyan);
+}
+
+.explorer-hint {
+  padding: 5px 10px;
+  font-size: 11.5px;
+  color: var(--fg-dim);
+  font-style: italic;
+}
+
+.explorer .list-more {
+  display: block;
+  width: calc(100% - 8px);
+  margin: 2px 4px 6px;
+  padding: 5px 8px;
+  text-align: left;
+  font-size: 11.5px;
+  color: var(--fg-dim);
+  background: transparent;
+  border: 1px dashed var(--border-subtle);
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+}
+
+.explorer .list-more:hover {
+  color: var(--fg-main);
+  background: var(--bg-hover);
+}
+
 .dock-panel .folder-list-pane {
   width: auto;
   flex: 0 1 auto;
