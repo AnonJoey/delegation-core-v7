@@ -448,122 +448,175 @@ function switchGraphMode(mode) {
 let vaultDirs = null;          // [{path, name, depth, count}] — 25 entries here
 let collapsedDirs = new Set();  // dir paths the user folded shut
 let currentListing = null;      // {dir, total, offset, notes, has_more}
+const notesByDir = new Map();   // dir -> listing, filled lazily as folders open
 let findResults = null;         // literal-search results, when the filter is active
 let selectedFolder = null;
 const NOTES_PAGE = 200;
 
-function renderFolderList() {
-  const folderList = document.getElementById("folder-list");
-  if (!vaultDirs) return;
-  if (!vaultDirs.length) {
-    folderList.innerHTML = paneState("No Folders", "The vault has no notes yet.");
-    return;
+// ── Vault explorer ───────────────────────────────────────────────────────────
+// One tree, folders and notes together, the way Obsidian does it: a note lives
+// inside the folder that holds it rather than in a second list that only shows
+// whichever folder is selected. Two lists meant the answer to "what is in here"
+// was split across two panes, and only one directory could ever be open.
+//
+// The server hands back a flat, pre-ordered directory list with depth already
+// computed. Rendering nests it: a folder's subfolders are drawn before its
+// notes, so opening a folder reads top-down as folders-then-files.
+//
+// Notes are fetched per directory the first time it opens and cached. Loading
+// every note up front is not an option here — this vault has 3600 notes across
+// 25 directories, most of them generated articles nobody expands.
+
+function buildDirTree(dirs) {
+  const byPath = new Map(dirs.map((d) => [d.path, { ...d, children: [] }]));
+  const roots = [];
+  for (const d of dirs) {
+    const node = byPath.get(d.path);
+    const parent = nearestListedAncestor(byPath, d.path);
+    if (parent) parent.children.push(node);
+    else roots.push(node);
+  }
+  return roots;
+}
+
+// The immediate parent is not guaranteed to be in the list: this vault has
+// `Projects/FITapp/audits` at depth 2 with no `Projects/FITapp` entry, because a
+// directory holding only subdirectories and no notes of its own is not listed.
+// Looking up the literal parent leaves such a folder orphaned, and an orphan
+// becomes a root — which silently moved `audits` out from under `Projects` and
+// down to the bottom of the tree. Climb to the nearest ancestor that does exist.
+// Indentation still uses the server's depth, so the missing level reads as a gap
+// rather than pretending the folder sits one level up.
+function nearestListedAncestor(byPath, path) {
+  const parts = path.split("/");
+  for (let i = parts.length - 1; i >= 1; i--) {
+    const found = byPath.get(parts.slice(0, i).join("/"));
+    if (found) return found;
+  }
+  return null;
+}
+
+// Indentation is a class, not a style attribute. This app ships a CSP of
+// `style-src 'self'` with no 'unsafe-inline', and WebKit drops inline style
+// attributes outright under it — which is why the folder tree has never actually
+// been indented: the original renderer set padding-left inline and the browser
+// discarded it silently, with no console error and no visual clue beyond a flat
+// list. Loosening the CSP to buy back one padding value would be the wrong
+// trade, so depth ships as a class with the values in the stylesheet.
+//
+// Depth is clamped because the classes are enumerated there; a vault nested
+// deeper than this keeps rendering, it just stops indenting further.
+const MAX_INDENT_DEPTH = 8;
+
+function indentClass(depth) {
+  return `indent-${Math.min(depth, MAX_INDENT_DEPTH)}`;
+}
+
+function explorerRows(nodes, out) {
+  for (const n of nodes) {
+    const expanded = !collapsedDirs.has(n.path);
+    const expandable = n.children.length > 0 || n.count > 0;
+    const caret = expandable ? (expanded ? "▾" : "▸") : "&nbsp;";
+    out.push(`<div class="list-item dir-row ${indentClass(n.depth)} ${n.path === selectedFolder ? "active" : ""}"
+      data-folder="${escapeHtml(n.path)}" tabindex="0"
+      role="treeitem" aria-expanded="${expandable ? expanded : ""}">
+      <span class="dir-caret">${caret}</span>
+      ${escapeHtml(n.name)} <span class="count">${n.count}</span>
+    </div>`);
+
+    if (!expanded) continue;
+    explorerRows(n.children, out);
+
+    const listing = notesByDir.get(n.path);
+    if (!listing) {
+      // Only claim to be loading when there is something to load; a directory
+      // whose count is 0 is a container for subfolders and never fetches.
+      if (n.count > 0) {
+        out.push(`<div class="explorer-hint ${indentClass(n.depth + 1)}">Loading…</div>`);
+      }
+      continue;
+    }
+    for (const note of listing.notes) {
+      out.push(`<div class="list-item note-row ${indentClass(n.depth + 1)} ${note.path === currentNotePath ? "active" : ""}"
+        data-path="${escapeHtml(note.path)}" tabindex="0"
+        role="treeitem">${escapeHtml(note.title)}</div>`);
+    }
+    if (listing.has_more) {
+      const shown = listing.offset + listing.notes.length;
+      out.push(`<button class="list-more ${indentClass(n.depth + 1)}" data-more="${escapeHtml(n.path)}"
+        data-shown="${shown}">Load more — ${shown} of ${listing.total}</button>`);
+    }
+  }
+}
+
+function renderExplorer() {
+  const el = document.getElementById("explorer");
+  if (!el || !vaultDirs) return;
+
+  // The filter searches the whole vault server-side, so its hits are a flat list
+  // that belongs to no one directory — the tree is set aside while it is active
+  // rather than trying to graft unrelated paths into it.
+  if (findResults) {
+    el.innerHTML = findResults.results.length
+      ? findResults.results.map((n) => `<div class="list-item note-row" data-path="${escapeHtml(n.path)}" tabindex="0">
+          ${escapeHtml(n.title)}<span class="note-dir">${escapeHtml(n.path.split("/").slice(0, -1).join("/"))}</span>
+        </div>`).join("")
+      : paneState("No matches", "No note title or path contains that text.");
+  } else if (!vaultDirs.length) {
+    el.innerHTML = paneState("No folders", "The vault has no notes yet.");
+  } else {
+    const rows = [];
+    explorerRows(buildDirTree(vaultDirs), rows);
+    el.innerHTML = rows.join("");
   }
 
-  // A directory is hidden when any ancestor is collapsed. Depth is precomputed
-  // server-side, so rendering is a flat map with an indent — no recursion, and
-  // no virtualization needed for 25 rows.
-  const hidden = (path) => {
-    const parts = path.split("/");
-    for (let i = 1; i < parts.length; i++) {
-      if (collapsedDirs.has(parts.slice(0, i).join("/"))) return true;
-    }
-    return false;
-  };
-  const hasChildren = (path) => vaultDirs.some((d) => d.path.startsWith(path + "/"));
-
-  folderList.innerHTML = vaultDirs
-    .filter((d) => !hidden(d.path))
-    .map((d) => {
-      const kids = hasChildren(d.path);
-      const folded = collapsedDirs.has(d.path);
-      const caret = kids ? (folded ? "▸" : "▾") : "&nbsp;";
-      return `<div class="list-item dir-row ${d.path === selectedFolder ? "active" : ""}"
-        data-folder="${escapeHtml(d.path)}" style="padding-left:${0.5 + d.depth * 0.85}rem" tabindex="0">
-        <span class="dir-caret" data-toggle="${escapeHtml(d.path)}">${caret}</span>
-        ${escapeHtml(d.name)} <span class="count">${d.count}</span>
-      </div>`;
-    })
-    .join("");
-
-  folderList.querySelectorAll(".dir-caret").forEach((el) => {
-    el.addEventListener("click", (ev) => {
-      ev.stopPropagation();
-      const path = el.dataset.toggle;
-      collapsedDirs.has(path) ? collapsedDirs.delete(path) : collapsedDirs.add(path);
-      renderFolderList();
-    });
+  el.querySelectorAll(".dir-row").forEach((row) => {
+    const open = () => toggleFolder(row.dataset.folder);
+    row.addEventListener("click", open);
+    row.addEventListener("keydown", (ev) => { if (ev.key === "Enter") open(); });
   });
-  folderList.querySelectorAll(".list-item").forEach((el) => {
-    el.addEventListener("click", () => selectFolder(el.dataset.folder));
-    el.addEventListener("keydown", (ev) => {
-      if (ev.key === "Enter") selectFolder(el.dataset.folder);
+  el.querySelectorAll(".note-row").forEach((row) => {
+    const open = () => selectNote(row.dataset.path, row);
+    row.addEventListener("click", open);
+    row.addEventListener("keydown", (ev) => { if (ev.key === "Enter") open(); });
+  });
+  el.querySelectorAll("[data-more]").forEach((btn) => {
+    btn.addEventListener("click", (ev) => {
+      ev.stopPropagation();
+      loadNotes(btn.dataset.more, Number(btn.dataset.shown), true);
     });
   });
 }
 
-function renderNoteList() {
-  const noteList = document.getElementById("note-list");
-  const countBadge = document.getElementById("note-count-badge");
+// Kept as the name the rest of the file calls; both lists are one tree now.
+function renderFolderList() { renderExplorer(); }
+function renderNoteList() { renderExplorer(); }
 
-  // Filter active → show literal-search hits across the whole vault instead of
-  // one directory. The old filter was a substring test over whichever notes had
-  // already been loaded, so it could not see past the first page.
-  const listing = findResults
-    ? { notes: findResults.results, total: findResults.count, has_more: false, offset: 0 }
-    : currentListing;
-
-  if (!listing) {
-    noteList.innerHTML = paneState("Pick a folder", "Choose a directory to list its notes.");
-    if (countBadge) countBadge.textContent = "0";
-    return;
-  }
-  if (countBadge) countBadge.textContent = listing.total;
-
-  if (!listing.notes.length) {
-    noteList.innerHTML = findResults
-      ? paneState("No matches", "No note title or path contains that text.")
-      : paneState("Empty folder", "Notes filed here will appear in this list.");
-    return;
-  }
-
-  const rows = listing.notes
-    .map((n) => `<div class="list-item" data-path="${escapeHtml(n.path)}" tabindex="0">
-      ${escapeHtml(n.title)}${findResults ? `<span class="note-dir">${escapeHtml(n.path.split("/").slice(0, -1).join("/"))}</span>` : ""}
-    </div>`)
-    .join("");
-
-  const shown = listing.offset + listing.notes.length;
-  const more = listing.has_more
-    ? `<button class="list-more" id="notes-load-more">Load more — showing ${shown} of ${listing.total}</button>`
-    : "";
-  noteList.innerHTML = rows + more;
-
-  noteList.querySelectorAll(".list-item").forEach((el) => {
-    el.addEventListener("click", () => selectNote(el.dataset.path, el));
-    el.addEventListener("keydown", (ev) => {
-      if (ev.key === "Enter") selectNote(el.dataset.path, el);
-    });
-  });
-  const moreBtn = document.getElementById("notes-load-more");
-  if (moreBtn) moreBtn.addEventListener("click", () => loadNotes(selectedFolder, shown, true));
+function toggleFolder(dir) {
+  selectedFolder = dir;
+  if (collapsedDirs.has(dir)) collapsedDirs.delete(dir);
+  else collapsedDirs.add(dir);
+  renderExplorer();
+  // Fetch on first open only; the cache is what makes reopening instant.
+  if (!collapsedDirs.has(dir) && !notesByDir.has(dir)) loadNotes(dir);
 }
 
 async function loadNotesBrowser() {
-  const folderList = document.getElementById("folder-list");
+  const explorer = document.getElementById("explorer");
   try {
     const data = await apiGet("/api/vault/tree");
     vaultDirs = data.directories || [];
   } catch (e) {
-    folderList.innerHTML = paneState("Vault unavailable", "Could not load the directory tree.");
+    if (explorer) explorer.innerHTML = paneState("Vault unavailable", "Could not load the directory tree.");
     return;
   }
-  // Generated code-graph articles live under <folder>/graphs/<name>/ and number
-  // in the thousands; start them folded so the browser opens on real notes.
-  vaultDirs.forEach((d) => {
-    if (d.path.endsWith("/graphs")) collapsedDirs.add(d.path);
-  });
-  renderFolderList();
+  // Everything starts folded except the directory opened below. The tree now
+  // carries notes, and expanding a directory fetches them — unfolding the whole
+  // vault on load would be 25 requests for lists nobody has asked to see.
+  // Generated code-graph articles are the extreme case: thousands of articles
+  // under <folder>/graphs/<name>/.
+  vaultDirs.forEach((d) => collapsedDirs.add(d.path));
+  renderExplorer();
   if (vaultDirs.length) selectFolder(vaultDirs[0].path);
 }
 
@@ -571,21 +624,30 @@ async function loadNotes(dir, offset = 0, append = false) {
   try {
     const data = await apiGet(`/api/vault/notes?dir=${encodeURIComponent(dir)}&offset=${offset}&limit=${NOTES_PAGE}`);
     if (data.error) throw new Error(data.error);
-    currentListing = append && currentListing
-      ? { ...data, notes: currentListing.notes.concat(data.notes), offset: 0 }
+    const prev = notesByDir.get(dir);
+    const listing = append && prev
+      ? { ...data, notes: prev.notes.concat(data.notes), offset: 0 }
       : data;
+    notesByDir.set(dir, listing);
+    currentListing = listing;
   } catch (e) {
-    currentListing = { dir, total: 0, offset: 0, notes: [], has_more: false };
+    // Cache the failure too, so an unreadable directory does not re-request on
+    // every re-render; reopening it is what retries.
+    const empty = { dir, total: 0, offset: 0, notes: [], has_more: false };
+    notesByDir.set(dir, empty);
+    currentListing = empty;
   }
-  renderNoteList();
+  renderExplorer();
 }
 
 function selectFolder(dir) {
+  // Reveal the directory rather than merely marking it: an ancestor left folded
+  // would otherwise "select" a row that is not on screen.
   selectedFolder = dir;
-  document.querySelectorAll("#folder-list .list-item").forEach((el) => {
-    el.classList.toggle("active", el.dataset.folder === dir);
-  });
-  loadNotes(dir);
+  const parts = dir.split("/");
+  for (let i = 1; i <= parts.length; i++) collapsedDirs.delete(parts.slice(0, i).join("/"));
+  renderExplorer();
+  if (!notesByDir.has(dir)) loadNotes(dir);
 }
 
 function setupNotesFilter() {
@@ -673,7 +735,7 @@ async function selectNote(path, el) {
   // file with it.
   if (editing) setEditChrome(false);
   currentNotePath = path;
-  document.querySelectorAll("#note-list .list-item").forEach((e) => e.classList.remove("active"));
+  document.querySelectorAll("#explorer .note-row").forEach((e) => e.classList.remove("active"));
   if (el) el.classList.add("active");
 
   const header = document.getElementById("note-view-header");
