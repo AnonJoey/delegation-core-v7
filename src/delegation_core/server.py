@@ -96,6 +96,7 @@ from . import capabilities as _capabilities
 from . import graphbridge
 from . import jobs
 from . import notewriter as _notewriter
+from .auth import LocalTokenAuth
 from .client_tracking import ClientTrackingMiddleware as _ClientTrackingMiddleware
 from .client_tracking import cleanup_own_session_file as _cleanup_own_session_file
 from .client_tracking import list_connected_clients as _list_connected_clients
@@ -103,6 +104,7 @@ from . import session as _session
 from . import windows as _windows
 from .config import Config
 from .engine import DelegationEngine
+from .engine import queue_stats as _local_model_queue_stats
 from .ingest import IngestManager
 from .organizer import heal as _heal_notes
 from .organizer import relink_folder as _relink_folder
@@ -154,6 +156,50 @@ def _confidence(top_sim: float, model_name: str) -> str:
     from .embeddings import profile_for
     high, medium = profile_for(model_name)["confidence"]
     return "high" if top_sim >= high else "medium" if top_sim >= medium else "low"
+
+
+async def _run_or_queue(task_name: str, make_result) -> str:
+    """Run local-model work inline, or hand back a job_id when the queue is busy.
+
+    One daemon now fronts every client, so an interactive tool can find the local
+    model already occupied by somebody else's request. Blocking would be the
+    obvious thing and the wrong one: the client applies its own deadline to a
+    tool call — mcp_timeout_sec defaults to 60 — and a caller third in line
+    behind two long generations blows through it and reports a dead server.
+
+    So: free queue, behave exactly as before (inline, same response shape). Busy
+    queue, submit and return the queued envelope, which is the same
+    {job_id, status} contract the _bg tools already use and task_status already
+    understands, including its "this usually takes N seconds" hint.
+
+    `make_result(engine)` must return the tool's FINAL response string, not a raw
+    completion, so that task_status(job_id) yields something directly usable
+    rather than a fragment the caller has to reassemble.
+    """
+    stats = _local_model_queue_stats()
+    if stats["running"] < max(1, _engine.cfg.llama_queue_concurrency):
+        return await make_result(_engine)
+
+    async def _in_background():
+        # Fresh engine per background loop, for the reason spelled out in
+        # _bg_maintenance_wrapper: httpx transports are bound to the loop that
+        # created them, and jobs.submit runs asyncio.run() on a new one.
+        bg_engine = DelegationEngine(_engine.cfg)
+        try:
+            return await make_result(bg_engine)
+        finally:
+            await bg_engine.aclose()
+
+    job_id = jobs.submit(task_name, asyncio.run, _in_background())
+    return json.dumps({
+        "job_id": job_id,
+        "status": "queued",
+        "task": task_name,
+        "queue": stats,
+        "message": (f"The local model is busy ({stats['running']} running, "
+                    f"{stats['waiting']} waiting). Queued — call task_status(job_id) "
+                    f"for the result."),
+    })
 
 
 @mcp.tool()
@@ -222,30 +268,33 @@ async def search_vault(query: str, limit: int = 5, use_local: bool = False,
                                       "use_local=true to have the local model summarize it.")
         return json.dumps(payload)
 
-    try:
-        summary = await _engine.invoke(
-            f"Summarize these vault notes for the query: {query}\n\n{combined}",
-            system="Vault Analyst. Return compressed insight only — no preamble, no headers.",
-            max_tokens=_engine.budget("search_summary", 800),
-            temperature=0.3,
-            task="search_summary",
-        )
-    except Exception as e:
-        logger.warning("search_vault: llama.cpp summarization failed (%s) — returning raw hits", e)
+    async def _summarize(engine) -> str:
+        try:
+            summary = await engine.invoke(
+                f"Summarize these vault notes for the query: {query}\n\n{combined}",
+                system="Vault Analyst. Return compressed insight only — no preamble, no headers.",
+                max_tokens=engine.budget("search_summary", 800),
+                temperature=0.3,
+                task="search_summary",
+            )
+        except Exception as e:
+            logger.warning("search_vault: llama.cpp summarization failed (%s) — returning raw hits", e)
+            return json.dumps({
+                "query": query, "summary": None, "sources": hits, "degraded": True,
+                "scope": scope_used,
+                "note": "llama.cpp offline — returning raw snippets without summarization.",
+                "quality": {"confidence": confidence, "top_similarity": top_sim,
+                            "sources_found": len(hits), "output_empty": True},
+            })
+
+        output_empty = not summary or len(summary.strip()) < 20
         return json.dumps({
-            "query": query, "summary": None, "sources": hits, "degraded": True,
-            "scope": scope_used,
-            "note": "llama.cpp offline — returning raw snippets without summarization.",
+            "query": query, "summary": summary, "sources": hits, "scope": scope_used,
             "quality": {"confidence": confidence, "top_similarity": top_sim,
-                        "sources_found": len(hits), "output_empty": True},
+                        "sources_found": len(hits), "output_empty": output_empty},
         })
 
-    output_empty = not summary or len(summary.strip()) < 20
-    return json.dumps({
-        "query": query, "summary": summary, "sources": hits, "scope": scope_used,
-        "quality": {"confidence": confidence, "top_similarity": top_sim,
-                    "sources_found": len(hits), "output_empty": output_empty},
-    })
+    return await _run_or_queue("search_summary", _summarize)
 
 
 @mcp.tool()
@@ -311,28 +360,31 @@ async def compress(source: str, raw_content: str, use_local: bool = False) -> st
                                       "to the local model (slower, but zero agent tokens).")
         return json.dumps(payload)
 
-    try:
-        result = await _engine.invoke(
-            f"Extract only key facts, decisions, and action items. No preamble.\n"
-            f"Source: {source}\n\n{raw_content[:limit]}",
-            system="Compression Engine. Be extremely concise.",
-            max_tokens=_engine.budget("compress", 1200),
-            temperature=0.2,
-            task="compress",
-        )
-    except Exception as e:
-        return json.dumps({"error": f"Compression failed: {e}", "source": source})
+    async def _compress(engine) -> str:
+        try:
+            result = await engine.invoke(
+                f"Extract only key facts, decisions, and action items. No preamble.\n"
+                f"Source: {source}\n\n{raw_content[:limit]}",
+                system="Compression Engine. Be extremely concise.",
+                max_tokens=engine.budget("compress", 1200),
+                temperature=0.2,
+                task="compress",
+            )
+        except Exception as e:
+            return json.dumps({"error": f"Compression failed: {e}", "source": source})
 
-    output_chars = len(result.strip()) if result else 0
-    ratio = round(output_chars / max(input_chars, 1), 2)
-    return json.dumps({
-        "source": source, "compressed": result,
-        "quality": {
-            "input_chars": input_chars, "output_chars": output_chars,
-            "ratio": ratio, "truncated_input": truncated,
-            "poor": output_chars < 30 or ratio > 0.85,
-        },
-    })
+        output_chars = len(result.strip()) if result else 0
+        ratio = round(output_chars / max(input_chars, 1), 2)
+        return json.dumps({
+            "source": source, "compressed": result,
+            "quality": {
+                "input_chars": input_chars, "output_chars": output_chars,
+                "ratio": ratio, "truncated_input": truncated,
+                "poor": output_chars < 30 or ratio > 0.85,
+            },
+        })
+
+    return await _run_or_queue("compress", _compress)
 
 
 @mcp.tool()
@@ -702,14 +754,18 @@ async def search_web(query: str, num_results: int = 5, use_local: bool = False) 
             f"[{i+1}] {r.get('title', '')}\n{r.get('body', '')}"
             for i, r in enumerate(raw_results)
         )[:5000]
-        summary = await _engine.invoke(
-            f"Compress these search results into key facts for: {query}\n\n{snippets}",
-            system="Research Compressor. Be extremely concise.",
-            max_tokens=_engine.budget("compress", 400),
-            temperature=0.2,
-            task="compress",
-        )
-        return json.dumps({"query": query, "summary": summary, "sources": sources})
+
+        async def _summarize(engine) -> str:
+            summary = await engine.invoke(
+                f"Compress these search results into key facts for: {query}\n\n{snippets}",
+                system="Research Compressor. Be extremely concise.",
+                max_tokens=engine.budget("compress", 400),
+                temperature=0.2,
+                task="compress",
+            )
+            return json.dumps({"query": query, "summary": summary, "sources": sources})
+
+        return await _run_or_queue("search_web_summary", _summarize)
     except Exception as e:
         logger.error("search_web failed: %s", e)
         return json.dumps({"error": str(e)})
@@ -1104,19 +1160,47 @@ def run_server(cfg: Config):
 
     mcp.add_middleware(_ClientTrackingMiddleware())
 
-    _vault._init()   # blocking — BGE + ChromaDB must be ready before tools serve
+    # Wired here rather than at module import so that importing server.py — which
+    # the tests and the capability registry both do — never has the side effect of
+    # generating and persisting a secret.
+    mcp.auth = LocalTokenAuth(
+        cfg.ensure_server_token(),
+        base_url=f"http://{cfg.server_host}:{cfg.server_port}",
+    )
 
-    if not _vault.collection:
-        sys.stderr.write("FATAL: Could not initialize ChromaDB/BGE.\n")
-        sys.stderr.write("Check sentence-transformers install and vault path.\n")
-        sys.exit(1)
+    # Non-blocking. BGE + ChromaDB load on a background thread while the transport
+    # comes up; every public VaultManager method already guards with
+    # _ensure_ready(), so a tool call that lands mid-load waits for it instead of
+    # failing, and _init() deliberately leaves _initialized False on error so a
+    # transient GPU OOM retries on the next call rather than wedging the daemon.
+    #
+    # This was a blocking _vault._init() followed by a hard exit when the
+    # collection came back empty. Under stdio the cost was paid once per client
+    # spawn and nothing observed it. Over HTTP the client times the handshake —
+    # Codex 0.147.0 defaults to startup_timeout_sec = 10 — and a machine that has
+    # to download BGE-m3 first blows through that by minutes. Measured on this
+    # machine with the model already cached: 3.94s from "Loading BGE model" to
+    # "ready", which fits, but nothing about that margin is guaranteed elsewhere.
+    #
+    # Dropping the hard exit is deliberate too: for a daemon that outlives every
+    # client, dying on a transient GPU OOM is strictly worse than serving and
+    # retrying, which is the behaviour _ensure_ready() was built for.
+    _vault.warm_up()
 
     from . import __version__ as _version
     logger.info(
-        "delegation-core v%s ready — vault: %s | llama: %s | budget: %s "
-        "| synthesis: %s (%s) | split: %d chars / %d notes max | tools: 31",
-        _version, cfg.vault, cfg.llama_url, cfg.budget_mode,
+        "delegation-core v%s ready on %s — vault: %s | llama: %s | budget: %s "
+        "| synthesis: %s (%s) | split: %d chars / %d notes max",
+        _version, cfg.server_url, cfg.vault, cfg.llama_url, cfg.budget_mode,
         "on" if cfg.synthesis_enabled else "off", cfg.synthesis_lang,
         cfg.split_min_chars, cfg.split_max_notes,
     )
-    mcp.run()
+    # The tool count used to be hardcoded into that line and read 31 while the
+    # server served 49 — the drift this module's own docstring warns about.
+    # capabilities() reports the live list; a log line should not compete with it.
+    mcp.run(
+        transport="http",
+        host=cfg.server_host,
+        port=cfg.server_port,
+        path=cfg.server_path,
+    )

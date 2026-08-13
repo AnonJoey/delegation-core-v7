@@ -93,8 +93,14 @@ def _mounted(cfg: dict) -> dict:
 def sync_registry_from_client() -> dict:
     """Catalogue whatever the client currently has mounted.
 
-    Without this, closing a window would lose the command/args needed to reopen it.
-    Called before every mutation so a server configured by hand is never dropped.
+    Without this, closing a window would lose whatever the client needs to reopen
+    it. Called before every mutation so a server configured by hand is never
+    dropped.
+
+    The spec is stored and restored verbatim, without inspecting its shape — so
+    stdio entries ({command, args}) and HTTP entries ({type, url, headers}) both
+    round-trip. That matters since v0.11, where delegation-core itself moved to
+    HTTP and other servers in a user's config may be either kind.
     """
     reg = load_registry()
     for name, spec in _mounted(read_client_config()).items():

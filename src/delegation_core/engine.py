@@ -22,6 +22,7 @@ import platform
 import subprocess
 import threading
 import time
+from contextlib import asynccontextmanager
 
 import httpx
 import requests
@@ -83,6 +84,53 @@ def _detached_popen_kwargs() -> dict:
     if platform.system() == "Windows":
         return {"creationflags": subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP}
     return {"start_new_session": True}
+
+
+# ── local-model queue ────────────────────────────────────────────────────────
+#
+# Process-global on purpose. llama.cpp is ONE server process shared by everything
+# in here, while DelegationEngine gets instantiated more than once (server.py
+# builds one, cli.py builds its own). A per-instance gate would let those two
+# stampede the same model, which is the exact thing this exists to stop.
+#
+# Why a threading.Semaphore and not asyncio.Semaphore: this process runs several
+# event loops. jobs.submit() calls asyncio.run() inside a daemon thread — the
+# comment at server.py's _run_bg spells that out — so an asyncio primitive
+# created on the main loop and awaited from a job's loop raises "attached to a
+# different loop". A threading semaphore is loop-agnostic; the wait is handed to
+# an executor thread so no event loop is ever blocked while queueing.
+_model_gate: threading.Semaphore | None = None
+_model_gate_lock = threading.Lock()
+_queue_waiting = 0          # callers parked in the queue, not yet running
+_queue_running = 0          # callers currently talking to llama.cpp
+_queue_counters_lock = threading.Lock()
+
+
+def _gate(concurrency: int) -> threading.Semaphore:
+    """Return the process-wide gate, sized by the first caller to need it."""
+    global _model_gate
+    if _model_gate is None:
+        with _model_gate_lock:
+            if _model_gate is None:
+                _model_gate = threading.Semaphore(max(1, concurrency))
+                logger.info("Local-model queue armed at concurrency=%d", max(1, concurrency))
+    return _model_gate
+
+
+def queue_stats() -> dict:
+    """Snapshot of the local-model queue, for heartbeat()/dashboards."""
+    with _queue_counters_lock:
+        return {"waiting": _queue_waiting, "running": _queue_running}
+
+
+def _reset_queue_for_tests() -> None:
+    """Drop the gate so a test can re-arm it at a different concurrency."""
+    global _model_gate, _queue_waiting, _queue_running
+    with _model_gate_lock:
+        _model_gate = None
+    with _queue_counters_lock:
+        _queue_waiting = 0
+        _queue_running = 0
 
 
 class DelegationEngine:
@@ -204,6 +252,55 @@ class DelegationEngine:
         if self.cfg.is_agent_mode:
             return self._extractive_fallback(prompt, self.budget(task, max_tokens))
 
+        # Everything past here talks to the one local model, so it queues. The
+        # gate is taken before ensure_running() deliberately: starting llama.cpp
+        # is itself the heaviest thing that can happen here, and letting four
+        # callers discover a cold model simultaneously is how you get four
+        # startup attempts racing for the same port.
+        async with self._queued():
+            return await self._invoke_now(
+                prompt, system, max_tokens, temperature, task, max_retries, retry_delay
+            )
+
+    @asynccontextmanager
+    async def _queued(self):
+        """Hold the process-wide local-model gate for the duration of the block."""
+        global _queue_waiting, _queue_running
+        gate = _gate(self.cfg.llama_queue_concurrency)
+
+        # Fast path: gate free, no executor hop, no measurable overhead.
+        if not gate.acquire(blocking=False):
+            with _queue_counters_lock:
+                _queue_waiting += 1
+            waited_from = time.time()
+            try:
+                loop = asyncio.get_running_loop()
+                await loop.run_in_executor(None, gate.acquire)
+            finally:
+                with _queue_counters_lock:
+                    _queue_waiting -= 1
+            logger.info("Waited %.1fs in the local-model queue", time.time() - waited_from)
+
+        with _queue_counters_lock:
+            _queue_running += 1
+        try:
+            yield
+        finally:
+            with _queue_counters_lock:
+                _queue_running -= 1
+            gate.release()
+
+    async def _invoke_now(
+        self,
+        prompt: str,
+        system: str = "",
+        max_tokens: int = 0,
+        temperature: float = 0.4,
+        task: str = "default",
+        max_retries: int = 3,
+        retry_delay: int = 20,
+    ) -> str:
+        """invoke()'s body, run with the local-model gate already held."""
         if not await self.ensure_running():
             raise RuntimeError(
                 "llama.cpp could not be reached or started. "

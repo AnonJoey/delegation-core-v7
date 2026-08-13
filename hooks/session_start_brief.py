@@ -28,6 +28,12 @@ transcript, but this covers cases where that trigger didn't fire (e.g. the
 venv wasn't installed yet at SessionEnd, or notes arrived from another
 surface that doesn't reindex itself).
 
+Both triggers are detached processes, which used to mean two more ChromaDB
+writers against the index the daemon holds open. Since v0.11 `maintain` and
+`reindex` hand their work to the running daemon and only fall back to doing it
+in-process when none is listening — see src/delegation_core/daemon.py. Nothing
+about this hook changes; what changed is what those commands do when they land.
+
 Requires only stdlib — runs with system Python 3.11+, no venv needed. The
 maintenance trigger shells out to the venv's delegation-core binary but does
 not import anything from it, so the hook itself stays dependency-free.

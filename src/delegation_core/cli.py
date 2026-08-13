@@ -23,6 +23,11 @@ real, installed CLI (this file) but it only covered operational/maintenance
 commands, not the actual knowledge-work tools. This closes that gap so the
 vault and the code-graph pipeline are usable standalone from a terminal.
 
+v0.11: reindex/maintain/ingest hand their work to the running HTTP daemon
+instead of opening a second ChromaDB and loading a second copy of BGE. They
+still do the work in-process when no daemon answers — and with --local when
+told to — so a machine without the service keeps working. See daemon.py.
+
 v0.8.0: added dashboard-api, the local JSON sidecar the Tauri dashboard (see
 dashboard/) talks to. Not an MCP tool — a separate small HTTP process, since
 FastMCP's mcp.run() serves one transport at a time (stdio here) and can't
@@ -52,6 +57,20 @@ def _read_content(file_arg: str | None, what: str = "content") -> str:
             return data
     sys.stderr.write(f"No {what} provided — pass --file PATH or pipe it via stdin.\n")
     sys.exit(1)
+
+
+def _add_local_flag(parser):
+    """Opt out of daemon routing for a command that writes to the index.
+
+    The escape hatch matters because routing is the default: if the daemon is
+    up but wedged, or a person wants the work to happen in the process they are
+    watching, there has to be a way to say so out loud. Silently falling back
+    would be the same second writer, just undocumented.
+    """
+    parser.add_argument(
+        "--local", action="store_true",
+        help="Do the work in this process instead of handing it to the running daemon",
+    )
 
 
 def cmd_setup(_args):
@@ -111,6 +130,66 @@ def cmd_run(args):
 
     from .server import run_server
     run_server(cfg)
+
+
+def cmd_service(args):
+    """Manage the daemon's per-user service registration."""
+    from rich.console import Console
+    from . import service as _service
+
+    console = Console()
+    result = {"install": _service.install,
+              "uninstall": _service.uninstall,
+              "status": _service.status}[args.action]()
+
+    for key, value in result.items():
+        console.print(f"[bold]{key}[/bold]: {value}")
+    if result.get("status") == "unsupported":
+        return 1
+    return 0
+
+
+def cmd_clients(args):
+    """Point MCP clients at the HTTP daemon.
+
+    Needed because v0.11 is a breaking transport change: an existing
+    {"command": ..., "args": ["run"]} entry no longer starts a private server
+    for that client, it starts a *second* daemon that competes with the real one
+    for the port, the index, and the GPU.
+    """
+    from rich.console import Console
+    from .config import Config
+    from . import clients as _clients
+
+    console = Console()
+    cfg = Config.load()
+    token = cfg.ensure_server_token()
+
+    if args.show or not (args.claude_code or args.codex):
+        console.print(f"[bold]URL[/bold]    {cfg.server_url}")
+        console.print(f"[bold]Header[/bold] Authorization: Bearer {token}")
+        console.print(f"[bold]Env[/bold]    {_clients.CODEX_TOKEN_ENV_VAR}={token}")
+        if not args.show:
+            console.print("\n[dim]Nothing written. Pass --claude-code and/or --codex "
+                          "to update a client config.[/dim]")
+        return 0
+
+    if args.claude_code:
+        result = _clients.install_claude_code(cfg)
+        console.print(f"[green]claude-code[/green] {result['status']} — {result['path']}")
+        if result.get("replaced"):
+            console.print(f"  [dim]replaced: {result['replaced']}[/dim]")
+        console.print("  [yellow]Reconnect the client for this to take effect.[/yellow]")
+
+    if args.codex:
+        result = _clients.install_codex(cfg)
+        console.print(f"[green]codex[/green] {result['status']} — {result['path']}")
+        if result.get("note"):
+            console.print(f"  [yellow]{result['note']}[/yellow]")
+            console.print(result["block"])
+        console.print(f"  [yellow]Export the token before starting Codex:[/yellow] "
+                      f"export {_clients.CODEX_TOKEN_ENV_VAR}={token}")
+    return 0
 
 
 def cmd_status(_args):
@@ -181,10 +260,43 @@ def cmd_status(_args):
     console.print()
 
 
+def _delegate(cfg, args, tool: str, arguments: dict, say) -> dict | None:
+    """Hand index work to the running daemon; None means "do it yourself".
+
+    Every command that writes to ChromaDB goes through here. When the daemon is
+    up it owns the index and the resident BGE model, so a second process opening
+    the same directory is both a concurrent writer and a second ~2.4 GiB copy of
+    the model on the GPU — see daemon.py for what that cost in practice, and for
+    why a *failed* daemon call is not allowed to fall back to local work.
+
+    `say` reports routing on the command's own output channel, since `maintain`
+    speaks JSON on stdout and must keep it parseable.
+    """
+    if getattr(args, "local", False):
+        return None
+
+    from . import daemon
+
+    if not daemon.is_listening(cfg):
+        say(f"No daemon on {cfg.server_host}:{cfg.server_port} — running in this process.")
+        return None
+    try:
+        say(f"Delegating to the daemon at {cfg.server_url} ...")
+        return daemon.submit_and_wait(cfg, tool, arguments)
+    except daemon.DaemonUnavailable as exc:
+        say(f"Daemon went away ({exc}) — running in this process.")
+        return None
+    except daemon.DaemonCallFailed as exc:
+        # Deliberately fatal. Retrying locally would start the second writer the
+        # daemon exists to prevent, on top of a daemon that is already unwell.
+        say(f"Error: {exc}")
+        say("Re-run with --local to do this work in this process anyway.")
+        sys.exit(1)
+
+
 def cmd_reindex(args):
     from rich.console import Console
     from .config import Config
-    from .vault import VaultManager
 
     console = Console()
     cfg = Config.load()
@@ -194,6 +306,14 @@ def cmd_reindex(args):
 
     force = getattr(args, "force", False)
     console.print(f"Reindexing [bold]{cfg.vault_path}[/bold]{' (full)' if force else ''} ...")
+
+    job = _delegate(cfg, args, "vault_reindex_bg", {"force": force},
+                    lambda msg: console.print(f"[dim]{msg}[/dim]"))
+    if job is not None:
+        console.print(f"[green]✓[/green]  {job.get('result')} notes indexed (by the daemon).")
+        return
+
+    from .vault import VaultManager
     vault = VaultManager(cfg)
     count = vault.reindex_vault(force=force)
     console.print(f"[green]✓[/green]  {count} notes indexed.")
@@ -204,12 +324,9 @@ def cmd_dashboard_api(args):
     dashboard_api.run(port=args.port, host=args.host)
 
 
-def cmd_maintain(_args):
+def cmd_maintain(args):
     import asyncio
     from .config import Config
-    from .engine import DelegationEngine
-    from .vault import VaultManager
-    from . import organizer
 
     cfg = Config.load()
     if not cfg.is_configured():
@@ -222,6 +339,18 @@ def cmd_maintain(_args):
         handlers=[logging.StreamHandler(sys.stderr)],
     )
 
+    # Routing notes go to stderr: stdout is the maintenance result as JSON, and
+    # the SessionStart hook redirects both into maintenance.log.
+    job = _delegate(cfg, args, "run_maintenance_bg", {},
+                    lambda msg: sys.stderr.write(f"maintain: {msg}\n"))
+    if job is not None:
+        print(json.dumps(job.get("result"), indent=2))
+        return
+
+    from .engine import DelegationEngine
+    from .vault import VaultManager
+    from . import organizer
+
     vault  = VaultManager(cfg)
     engine = DelegationEngine(cfg)
     result = asyncio.run(organizer.run(engine, vault))
@@ -231,8 +360,6 @@ def cmd_maintain(_args):
 def cmd_ingest(args):
     from rich.console import Console
     from .config import Config
-    from .vault import VaultManager
-    from .ingest import IngestManager
 
     console = Console()
     cfg = Config.load()
@@ -241,11 +368,25 @@ def cmd_ingest(args):
         sys.exit(1)
 
     recursive = not getattr(args, "no_recursive", False)
-    console.print(f"Ingesting [bold]{args.path}[/bold] (recursive={recursive}) ...")
+    # Resolved before it goes anywhere: the daemon runs as a service with its own
+    # working directory, so a relative path that means one thing in this shell
+    # means something else (or nothing) there. Doing it for the local path too
+    # keeps one interpretation of the argument.
+    source = str(Path(args.path).expanduser().resolve())
+    console.print(f"Ingesting [bold]{source}[/bold] (recursive={recursive}) ...")
 
-    vault  = VaultManager(cfg)
-    ingest = IngestManager(vault)
-    result = ingest.ingest(args.path, recursive=recursive)
+    job = _delegate(cfg, args, "ingest_folder_bg",
+                    {"source_path": source, "recursive": recursive},
+                    lambda msg: console.print(f"[dim]{msg}[/dim]"))
+    result = job.get("result") if job is not None else None
+
+    if result is None:
+        from .vault import VaultManager
+        from .ingest import IngestManager
+
+        vault  = VaultManager(cfg)
+        ingest = IngestManager(vault)
+        result = ingest.ingest(source, recursive=recursive)
 
     if "error" in result:
         console.print(f"[red]Error:[/red] {result['error']}")
@@ -921,13 +1062,27 @@ def main():
         "--recalibrate", action="store_true",
         help="Reset and rerun tok/sec auto-calibration before starting (use after swapping models)",
     )
+    p_service = sub.add_parser(
+        "service", help="Install/remove the daemon as a per-user background service")
+    p_service.add_argument("action", choices=["install", "uninstall", "status"])
+
+    p_clients = sub.add_parser(
+        "clients", help="Point MCP clients at the HTTP daemon (migrates from stdio)")
+    p_clients.add_argument("--claude-code", action="store_true",
+                           help="Rewrite delegation-core's entry in ~/.claude.json")
+    p_clients.add_argument("--codex", action="store_true",
+                           help="Append delegation-core's table to ~/.codex/config.toml")
+    p_clients.add_argument("--show", action="store_true",
+                           help="Print URL and token without writing anything")
     sub.add_parser("status",   help="Check vault, model, binary, llama.cpp, and feature config")
     sub.add_parser("doctor",   help="Diagnose installation drift and vault hygiene problems")
     p_reindex = sub.add_parser("reindex", help="Rebuild ChromaDB search index from vault folders")
     p_reindex.add_argument("--force", action="store_true",
                            help="Reindex every note, not just those changed since last run "
                                 "(needed to backfill new metadata fields)")
-    sub.add_parser("maintain", help="Run inbox maintenance once and exit")
+    _add_local_flag(p_reindex)
+    p_maintain = sub.add_parser("maintain", help="Run inbox maintenance once and exit")
+    _add_local_flag(p_maintain)
 
     # cmd_embed_model existed and was never registered, while cmd_status told
     # users to run `delegation-core embed-model ...` — the command it named did
@@ -948,6 +1103,7 @@ def main():
     p_ingest = sub.add_parser("ingest", help="Index files from an external folder without moving them")
     p_ingest.add_argument("path",           help="Absolute path to a file or directory to index")
     p_ingest.add_argument("--no-recursive", action="store_true", help="Only index top-level files")
+    _add_local_flag(p_ingest)
 
     p_relink = sub.add_parser("relink", help="Add wikilinks to notes in a vault subfolder")
     p_relink.add_argument("folder",                   help="Vault-relative folder path (e.g. meetings)")
@@ -1060,6 +1216,8 @@ def main():
     dispatch = {
         "setup":    cmd_setup,
         "run":      cmd_run,
+        "service":  cmd_service,
+        "clients":  cmd_clients,
         "status":   cmd_status,
         "doctor":   cmd_doctor,
         "reindex":  cmd_reindex,

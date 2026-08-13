@@ -39,6 +39,7 @@ v0.7.0 additions:
 
 import json
 import logging
+import secrets
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
@@ -149,11 +150,44 @@ class Config:
     # cost estimate and offers the local model (opt-in via use_local=true).
     hybrid_local_min_chars: int = 8000
 
+    # ── v0.11: HTTP transport ────────────────────────────────────────────────
+    # The server is a single long-lived daemon that every MCP client connects
+    # to over HTTP, replacing the previous stdio model where each client
+    # spawned its own process (and its own BGE copy, and its own ChromaDB
+    # writer — see client_tracking.py's module docstring for what that cost).
+    #
+    # server_host stays on loopback. Nothing here is designed to be reachable
+    # from another machine: the token below is a guard against other *local*
+    # processes, not a substitute for network isolation.
+    server_host: str = "127.0.0.1"
+    server_port: int = 8787
+    server_path: str = "/mcp"
+
+    # Bearer token every client must present. Generated on first use by
+    # ensure_server_token(); empty means "not yet generated", never "no auth".
+    # dashboard_api.py learned this the hard way in v0.8.1 — an unauthenticated
+    # local port let any website in the user's browser read and write the vault
+    # via a guessed port. The surface here is the whole vault plus every tool,
+    # so there is no unauthenticated mode to fall back to.
+    server_token: str = ""
+
+    # ── v0.11: local-model queue ─────────────────────────────────────────────
+    # How many llama.cpp requests may be in flight at once. One daemon now
+    # fronts every client, so without this a burst of clients would stampede a
+    # single local model. 1 keeps the model's own batching predictable; raise
+    # it only if the model is served with real parallel slots.
+    llama_queue_concurrency: int = 1
+
     # ── derived ──────────────────────────────────────────────────────────────
 
     @property
     def llama_url(self) -> str:
         return f"http://localhost:{self.llama_port}"
+
+    @property
+    def server_url(self) -> str:
+        """The MCP endpoint clients put in their config. Always loopback."""
+        return f"http://{self.server_host}:{self.server_port}{self.server_path}"
 
     @property
     def vault(self) -> Path:
@@ -267,3 +301,22 @@ class Config:
     def save(self):
         CONFIG_DIR.mkdir(parents=True, exist_ok=True)
         CONFIG_FILE.write_text(json.dumps(asdict(self), indent=2), encoding="utf-8")
+        # server_token lives in here, so the file is a secret now. Best-effort:
+        # chmod is a no-op for this purpose on Windows, where the user profile
+        # directory is what actually restricts access.
+        try:
+            CONFIG_FILE.chmod(0o600)
+        except OSError:
+            pass
+
+    def ensure_server_token(self) -> str:
+        """Return the bearer token, generating and persisting one on first call.
+
+        Called from the server's startup path rather than only from `setup`, so
+        an install that predates HTTP transport (or a config edited by hand)
+        still comes up authenticated instead of coming up open.
+        """
+        if not self.server_token:
+            self.server_token = secrets.token_urlsafe(32)
+            self.save()
+        return self.server_token

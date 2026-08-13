@@ -2,14 +2,23 @@
 client_tracking.py — records which MCP client(s) are currently connected to this
 delegation-core process, for the Tauri dashboard's "Connected Clients" panel.
 
-delegation-core runs over MCP stdio, so each client (Claude Code, Claude Desktop,
-Codex, Antigravity, whatever else speaks MCP) that has it configured launches its
-own separate `delegation-core run` process — there is no single shared connection
-to introspect from one place. Instead, each running instance writes its own small
-heartbeat file to ~/.delegation_core/sessions/<pid>.json, and the dashboard (via
-dashboard_api.py) aggregates whichever files are still fresh. A file with a stale
-last_seen (no update in SESSION_STALE_SECONDS) is treated as disconnected — this
-covers unclean shutdowns/kills, not just the atexit cleanup path.
+Since v0.11 delegation-core is a single HTTP daemon and every client (Claude Code,
+Claude Desktop, Codex, Antigravity, whatever else speaks MCP) connects to the same
+process. Before that it ran over stdio, so each client spawned its own
+`delegation-core run` and the heartbeat file was keyed by **pid** — one file per
+process was one file per client, and the two were the same thing.
+
+That identity no longer holds: one pid now serves N clients, and pid-keyed files
+would have every client overwriting the previous one's name, leaving
+list_mcp_clients() reporting whoever called most recently as the only client
+connected. Files are therefore keyed by **MCP session id**
+(~/.delegation_core/sessions/<session>.json), which is one per connected client
+for exactly as long as that client stays connected.
+
+The pid is still recorded inside the file, because it is still what tells a
+*dead* daemon's leftovers apart from a live one's sessions. A file with a stale
+last_seen (no update in SESSION_STALE_SECONDS) is treated as disconnected — that
+covers clients that vanish without closing, which over HTTP is the common case.
 
 The client's identity comes from the MCP initialize handshake (clientInfo: name +
 version), which the underlying MCP SDK stores on the session
@@ -26,6 +35,8 @@ New in v0.8.0.
 import json
 import logging
 import os
+import re
+import threading
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -37,21 +48,44 @@ SESSIONS_DIR = Path.home() / ".delegation_core" / "sessions"
 SESSION_STALE_SECONDS = 120
 
 
-def _session_path(pid: int) -> Path:
-    return SESSIONS_DIR / f"{pid}.json"
+#: Session ids arrive from the wire, so they are sanitised before becoming a
+#: filename — an id containing "../" would otherwise write outside SESSIONS_DIR.
+_SAFE_KEY_RE = re.compile(r"[^A-Za-z0-9_-]")
+
+
+def _safe_key(session_id: str) -> str:
+    return _SAFE_KEY_RE.sub("_", session_id)[:120] or "unknown"
+
+
+def _session_path(session_id: str) -> Path:
+    return SESSIONS_DIR / f"{_safe_key(session_id)}.json"
 
 
 def cleanup_own_session_file() -> None:
-    """Best-effort removal of this process's own heartbeat file. Called from the
-    same atexit hook server.py already registers for engine cleanup."""
+    """Best-effort removal of every heartbeat file this process owns.
+
+    Called from the same atexit hook server.py already registers for engine
+    cleanup. Under stdio this deleted one file, because the process *was* the
+    session. The daemon owns one file per connected client, so it clears all of
+    the ones carrying its pid and leaves other daemons' files alone.
+    """
     try:
-        _session_path(os.getpid()).unlink(missing_ok=True)
+        my_pid = os.getpid()
+        for f in SESSIONS_DIR.glob("*.json"):
+            try:
+                if json.loads(f.read_text(encoding="utf-8")).get("pid") == my_pid:
+                    f.unlink(missing_ok=True)
+            except Exception:
+                continue
     except Exception:
         pass
 
 
 class ClientTrackingMiddleware(Middleware):
-    """Writes/updates ~/.delegation_core/sessions/<pid>.json on every message.
+    """Writes/updates ~/.delegation_core/sessions/<session>.json on every message.
+
+    One middleware instance serves every client on the daemon, so all per-client
+    state is keyed by session id rather than held as a scalar on self.
 
     Best-effort throughout: a tracking failure must never break the actual
     request it's piggybacking on.
@@ -59,8 +93,11 @@ class ClientTrackingMiddleware(Middleware):
 
     def __init__(self):
         self._pid = os.getpid()
-        self._path = _session_path(self._pid)
-        self._tool_calls = 0
+        # session id -> tool call count. Guarded because the HTTP transport can
+        # dispatch concurrent requests from different sessions, which the stdio
+        # transport never did.
+        self._tool_calls: dict[str, int] = {}
+        self._lock = threading.Lock()
 
     async def on_message(self, context: MiddlewareContext, call_next):
         result = await call_next(context)
@@ -80,30 +117,45 @@ class ClientTrackingMiddleware(Middleware):
         if client_info is None:
             return
 
-        if context.method == "tools/call":
-            self._tool_calls += 1
+        session_id = getattr(fctx, "session_id", None)
+        if not session_id:
+            # Nothing sane to key on. Recording under a shared fallback would
+            # merge unrelated clients into one row, which is the failure this
+            # module was rewritten to avoid — so skip instead.
+            logger.debug("No session id on this message; not recording a client row")
+            return
+
+        with self._lock:
+            if context.method == "tools/call":
+                self._tool_calls[session_id] = self._tool_calls.get(session_id, 0) + 1
+            calls = self._tool_calls.get(session_id, 0)
 
         now = datetime.now(timezone.utc).isoformat()
         SESSIONS_DIR.mkdir(parents=True, exist_ok=True)
+        path = _session_path(session_id)
 
         existing = {}
-        if self._path.exists():
+        if path.exists():
             try:
-                existing = json.loads(self._path.read_text(encoding="utf-8"))
+                existing = json.loads(path.read_text(encoding="utf-8"))
             except Exception:
                 existing = {}
 
         data = {
             "pid": self._pid,
+            "session_id": session_id,
             "client_name": getattr(client_info, "name", None),
             "client_version": getattr(client_info, "version", None),
             "first_seen": existing.get("first_seen", now),
             "last_seen": now,
-            "tool_calls": self._tool_calls,
+            "tool_calls": calls,
         }
-        tmp = self._path.with_suffix(".tmp")
+        # Unique temp name: two sessions writing concurrently would otherwise
+        # race on a single "<key>.tmp" and one could rename the other's partial
+        # file into place.
+        tmp = path.with_suffix(f".{os.getpid()}.{threading.get_ident()}.tmp")
         tmp.write_text(json.dumps(data), encoding="utf-8")
-        os.replace(tmp, self._path)
+        os.replace(tmp, path)
 
 
 def list_connected_clients() -> list[dict]:
@@ -131,6 +183,16 @@ def list_connected_clients() -> list[dict]:
             last_seen = datetime.fromisoformat(data["last_seen"])
             age = (now - last_seen).total_seconds()
             if age > SESSION_STALE_SECONDS:
+                # Deleted, not just skipped. The pid check above only clears
+                # files left by a *dead* daemon; a stale session belonging to
+                # the live one used to sit here forever. That was invisible
+                # while clients were long-lived editors, but since v0.11 the
+                # CLI connects for each reindex/maintain/ingest — including
+                # every hook-triggered one — so a skipped-but-kept file is a
+                # file per invocation, several a day, accumulating with no
+                # reader. A stale row is by definition not a connected client.
+                if is_real_dir:
+                    f.unlink(missing_ok=True)
                 continue
             data["seconds_since_active"] = round(age)
             clients.append(data)

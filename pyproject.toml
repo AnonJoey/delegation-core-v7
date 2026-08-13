@@ -13,7 +13,12 @@ dependencies = [
     # exist before fastmcp 2.9.0 (older 0.x/2.0-2.8 releases have no
     # server/middleware package at all) — a resolver that picked anything in
     # the old >=0.4.0 range would fail on import at server startup.
-    "fastmcp>=2.9.0",
+    # Upper bound added in v0.11: 3.x is what is actually installed and tested
+    # against, and it is not source-compatible with 2.x — streamable_http_app()
+    # and sse_app() are gone, replaced by http_app(), and FastMCP.__init__ grew
+    # the auth= parameter this server now depends on. The old floor-only range
+    # let a resolver pick either major.
+    "fastmcp>=3.4,<4",
     "chromadb>=0.5.0",
     "sentence-transformers>=3.0.0",
     "requests>=2.32.0",

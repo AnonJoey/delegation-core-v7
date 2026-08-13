@@ -102,6 +102,12 @@ def _trigger_reindex() -> bool:
     """Fire `delegation-core reindex` as a detached background process so the
     transcript just written becomes searchable without a manual reindex.
 
+    Since v0.11 that command hands the work to the running HTTP daemon rather
+    than opening its own ChromaDB, so this no longer starts a second writer
+    against an index the daemon holds open, nor a second copy of BGE on the GPU
+    — see daemon.py. It still does the work in-process when no daemon answers,
+    which is what keeps this hook working on a machine without the service.
+
     Best-effort: returns False if the venv binary isn't installed yet.
     """
     if not VENV_BIN.exists():
