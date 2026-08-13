@@ -1187,6 +1187,35 @@ def run_server(cfg: Config):
     # retrying, which is the behaviour _ensure_ready() was built for.
     _vault.warm_up()
 
+    # The dashboard's JSON API, on the daemon's own VaultManager. It was a
+    # sidecar the Tauri app spawned, which stopped making sense the moment this
+    # server got a network transport: the sidecar existed because mcp.run()
+    # serves one transport at a time, so a dashboard could not attach to the MCP
+    # server and needed a process of its own. That process paid for the
+    # separation in a second resident BGE-m3 (2314 MiB, measured on this
+    # machine) and a second ChromaDB opener on one index — the same duplication
+    # the daemon exists to remove.
+    #
+    # A bind failure is logged, not fatal: the dashboard is an accessory, and a
+    # busy port (usually a second daemon, or a sidecar still running from the
+    # old model) is not a reason to take MCP service down with it.
+    if cfg.dashboard_port:
+        try:
+            # Imported here, not at module scope: dashboard_api pulls in the
+            # http.server stack and is irrelevant to every other importer of
+            # this module (the tests and the capability registry both import it).
+            from . import dashboard_api
+
+            dashboard_api.serve_in_process(
+                cfg, _vault, _tracker,
+                host=cfg.server_host, port=cfg.dashboard_port,
+            )
+        except OSError as e:
+            logger.warning(
+                "dashboard API not served on port %d (%s) — the dashboard will "
+                "fall back to spawning its own sidecar", cfg.dashboard_port, e,
+            )
+
     from . import __version__ as _version
     logger.info(
         "delegation-core v%s ready on %s — vault: %s | llama: %s | budget: %s "

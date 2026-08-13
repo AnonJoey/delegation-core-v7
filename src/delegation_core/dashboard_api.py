@@ -77,7 +77,7 @@ from . import notewriter as _notewriter
 
 logger = logging.getLogger("dashboard_api")
 
-_cfg = None     # set once in run() — Config
+_cfg = None     # set once in run() or serve_in_process() — Config
 _vault = None   # set once in run() — VaultManager, shared across every request.
                 # A fresh VaultManager per request (the original version of this
                 # file did this) reloads the BGE model and re-opens ChromaDB on
@@ -874,6 +874,36 @@ def _start_parent_watchdog(parent_pid: int, server: ThreadingHTTPServer) -> None
         os._exit(0)  # backstop: main thread didn't exit (wedged handler etc.)
 
     threading.Thread(target=_watch, daemon=True, name="parent-watchdog").start()
+
+
+def serve_in_process(cfg, vault, tracker, host: str = "127.0.0.1",
+                     port: int = 0) -> ThreadingHTTPServer:
+    """Serve these same routes from inside the daemon, on the daemon's objects.
+
+    The handlers below read `_cfg`/`_vault`/`_tracker` as module globals, so the
+    only difference between this and run() is where those three come from: run()
+    builds its own, and this one is handed the daemon's already-warm instances.
+    That is the whole point — a VaultManager is a resident copy of BGE-m3 (2314
+    MiB on this machine, measured) plus a writer against ChromaDB, and the
+    dashboard was opening a second one of each while the daemon held the first.
+
+    Returns the server so the caller can shut it down; serving happens on a
+    daemon thread, since the caller's main thread goes on to run the MCP
+    transport. Binding failures propagate rather than being swallowed: a port
+    already in use usually means a second daemon, which is worth failing loudly
+    over.
+    """
+    global _cfg, _vault, _tracker
+    _cfg, _vault, _tracker = cfg, vault, tracker
+
+    server = ThreadingHTTPServer((host, port), _Handler)
+    threading.Thread(
+        target=server.serve_forever,
+        daemon=True,
+        name="dashboard-api",
+    ).start()
+    logger.info("dashboard API listening on http://%s:%d", host, server.server_address[1])
+    return server
 
 
 def run(port: int = 0, host: str = "127.0.0.1", parent_pid: int | None = None) -> None:

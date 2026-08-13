@@ -171,6 +171,20 @@ class Config:
     # so there is no unauthenticated mode to fall back to.
     server_token: str = ""
 
+    # The dashboard's JSON API, served by the daemon on a second loopback port.
+    # It used to be a sidecar the Tauri app spawned, which was the right shape
+    # under stdio — mcp.run() served one transport, so the dashboard could not
+    # attach to the MCP server and needed its own process. That process then
+    # built its own VaultManager: measured on this machine, opening the
+    # dashboard added a second 2314 MiB copy of BGE-m3 to the GPU and a second
+    # ChromaDB opener on the same index, which is exactly what moving to a
+    # daemon removed for every other client.
+    #
+    # The daemon already holds a warm VaultManager, so it serves those routes
+    # itself. 0 disables it, and the sidecar entry point still works standalone
+    # for a machine running no daemon.
+    dashboard_port: int = 8788
+
     # ── v0.11: local-model queue ─────────────────────────────────────────────
     # How many llama.cpp requests may be in flight at once. One daemon now
     # fronts every client, so without this a burst of clients would stampede a

@@ -1,8 +1,13 @@
 // delegation-core dashboard — Tauri backend.
 //
-// Spawns delegation-core's own dashboard_api.py (a small stdlib http.server
-// JSON API, see src/delegation_core/dashboard_api.py) as a child process on
-// startup, using plain std::process::Command from Rust setup code rather than
+// Finds the JSON API the frontend talks to. Since v0.11 the delegation-core
+// daemon serves that API itself (see daemon_dashboard_port below), because it
+// already holds the VaultManager the API needs; this app only spawns its own
+// copy when no daemon answers.
+//
+// That fallback spawns delegation-core's own dashboard_api.py (a small stdlib
+// http.server JSON API, see src/delegation_core/dashboard_api.py) as a child
+// process, using plain std::process::Command from Rust setup code rather than
 // tauri-plugin-shell — this doesn't need the frontend/webview to be allowed to
 // execute shell commands, since it's the Rust backend spawning a fixed,
 // hardcoded program, not the JS side invoking one. Keeps the capabilities
@@ -43,6 +48,78 @@ fn venv_python() -> Result<PathBuf, SidecarError> {
     }
     Ok(path)
 }
+
+/// Port the daemon serves the dashboard API on, when it is serving it.
+///
+/// Since v0.11 delegation-core runs as one HTTP daemon that already holds a
+/// warm VaultManager, and it serves these same routes itself on
+/// `dashboard_port`. Spawning the sidecar anyway would put a second copy of
+/// BGE-m3 on the GPU (2314 MiB, measured) to answer the same questions, so the
+/// daemon is tried first and the sidecar is the fallback for a machine running
+/// no daemon.
+///
+/// The probe is a real GET of /api/status rather than a bare TCP connect: the
+/// point is to identify the service, and something else holding the port would
+/// pass a connect check and then fail every request the dashboard makes.
+fn daemon_dashboard_port() -> Option<u16> {
+    let home = std::env::var("HOME")
+        .or_else(|_| std::env::var("USERPROFILE"))
+        .ok()?;
+    let mut cfg_path = PathBuf::from(home);
+    cfg_path.push(".delegation_core");
+    cfg_path.push("config.json");
+
+    let raw = std::fs::read_to_string(&cfg_path).ok()?;
+    let cfg: serde_json::Value = serde_json::from_str(&raw).ok()?;
+    // Absent means a config written before this existed, which the Python side
+    // reads as its own default rather than as "off". 0 is the explicit "off".
+    let port = cfg
+        .get("dashboard_port")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(8788);
+    if port == 0 || port > u16::MAX as u64 {
+        return None;
+    }
+    let port = port as u16;
+
+    if daemon_answers(port) {
+        Some(port)
+    } else {
+        None
+    }
+}
+
+fn daemon_answers(port: u16) -> bool {
+    use std::io::{Read, Write};
+    use std::net::{SocketAddr, TcpStream};
+
+    let addr = SocketAddr::from(([127, 0, 0, 1], port));
+    let Ok(mut stream) = TcpStream::connect_timeout(&addr, DAEMON_PROBE_TIMEOUT) else {
+        return false;
+    };
+    let _ = stream.set_read_timeout(Some(DAEMON_PROBE_TIMEOUT));
+    let _ = stream.set_write_timeout(Some(DAEMON_PROBE_TIMEOUT));
+
+    let req = format!(
+        "GET /api/status HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nConnection: close\r\n\r\n"
+    );
+    if stream.write_all(req.as_bytes()).is_err() {
+        return false;
+    }
+    // Only the status line is needed, and the body is the whole vault status —
+    // read a bounded prefix instead of to_end().
+    let mut buf = [0u8; 64];
+    let Ok(n) = stream.read(&mut buf) else {
+        return false;
+    };
+    String::from_utf8_lossy(&buf[..n]).starts_with("HTTP/1.0 200")
+        || String::from_utf8_lossy(&buf[..n]).starts_with("HTTP/1.1 200")
+}
+
+/// Short on purpose: this runs before any window exists, against a loopback
+/// port that is either answering or not. A daemon too busy to answer in this
+/// window is treated as absent, which costs a sidecar, not a failure.
+const DAEMON_PROBE_TIMEOUT: Duration = Duration::from_secs(2);
 
 /// Everything that can go wrong starting the sidecar, as data rather than a
 /// panic — a packaged app launched by double-clicking an icon has no attached
@@ -235,6 +312,15 @@ pub fn run() {
             close_window
         ])
         .setup(|app| {
+            // The daemon serving these routes is the normal case; the sidecar
+            // is what happens when there is no daemon to ask.
+            if let Some(port) = daemon_dashboard_port() {
+                app.manage(SidecarState {
+                    port,
+                    child: Mutex::new(None),
+                });
+                return Ok(());
+            }
             match spawn_dashboard_api() {
                 Ok((port, child)) => {
                     app.manage(SidecarState {

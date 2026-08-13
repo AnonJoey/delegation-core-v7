@@ -4,6 +4,33 @@
 
 ### Changed
 
+- **The daemon serves the dashboard's JSON API; the Tauri app stops spawning a
+  sidecar.** The sidecar was correct under stdio: `mcp.run()` serves one
+  transport at a time, so a dashboard could not attach to the MCP server and
+  needed a process of its own. It paid for that separation with a second
+  `VaultManager` — measured here, opening the dashboard took GPU use from 3826
+  to 6055 MiB, the extra 2314 MiB being a second resident copy of BGE-m3, plus a
+  second ChromaDB opener on the index the daemon already had open. That is the
+  duplication the move to a daemon exists to remove, still in place on the one
+  client the transport rearchitecture was originally *for*.
+
+  The daemon holds a warm `VaultManager`, so it now serves those routes itself
+  on `dashboard_port` (8788, loopback; 0 disables). No handler changed: they
+  read `_cfg`/`_vault`/`_tracker` as module globals, and `serve_in_process()`
+  points those at the daemon's instances instead of building new ones. The Tauri
+  app probes that port with a real `GET /api/status` — a bare TCP connect would
+  accept any process squatting the port — and only spawns the sidecar when
+  nothing answers, so a machine running no daemon keeps working unchanged.
+  Verified against the live daemon: one process, one 2314 MiB BGE copy, both
+  8787 and 8788 served, `/api/vault/search` answering off the real 3629-note
+  vault.
+
+  Note the exposure this changes: the dashboard API has no auth of its own (it
+  is loopback-bound behind the CORS allowlist added in v0.8.1), and it now
+  listens whenever the daemon runs rather than only while the dashboard app is
+  open. Any local process can read the vault through it. The MCP transport's
+  bearer token does not cover these routes.
+
 - **`reindex`, `maintain` and `ingest` hand their work to the running daemon.**
   Moving the server to a single HTTP daemon gave one owner of the index and one
   resident copy of BGE — for *clients*. The CLI kept building its own
