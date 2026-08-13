@@ -55,8 +55,10 @@ def instrumented_engine(monkeypatch):
         return _FakeResp()
 
     monkeypatch.setattr(httpx.AsyncClient, "post", fake_post)
+    # force= arrived with the local task line, which needs the model started even
+    # in agent mode; this stub stands in for a model that is already up either way.
     monkeypatch.setattr(E.DelegationEngine, "ensure_running",
-                        lambda self: asyncio.sleep(0, result=True))
+                        lambda self, force=False: asyncio.sleep(0, result=True))
     return spans
 
 

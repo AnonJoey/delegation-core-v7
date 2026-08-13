@@ -95,10 +95,12 @@ from . import graph_hook
 from . import capabilities as _capabilities
 from . import graphbridge
 from . import jobs
+from . import localqueue as _localqueue
 from . import notewriter as _notewriter
 from .auth import LocalTokenAuth
 from .client_tracking import ClientTrackingMiddleware as _ClientTrackingMiddleware
 from .client_tracking import cleanup_own_session_file as _cleanup_own_session_file
+from .client_tracking import current_client_name as _current_client_name
 from .client_tracking import list_connected_clients as _list_connected_clients
 from . import session as _session
 from . import windows as _windows
@@ -106,6 +108,7 @@ from .config import Config
 from .engine import DelegationEngine
 from .engine import queue_stats as _local_model_queue_stats
 from .ingest import IngestManager
+from .localworker import LocalTaskWorker
 from .organizer import heal as _heal_notes
 from .organizer import relink_folder as _relink_folder
 from .organizer import run as _run_maintenance
@@ -539,6 +542,95 @@ async def list_mcp_clients() -> str:
     answer "what's connected right now" instead of guessing from config files.
     """
     return json.dumps({"clients": _list_connected_clients()})
+
+
+@mcp.tool()
+async def local_task_submit(prompt: str, system: str = "", task: str = "default",
+                            run_after: str = "", note: str = "") -> str:
+    """
+    Queue work for the LOCAL model (llama.cpp) and return immediately with a task id.
+
+    Use this instead of doing it yourself when the work is bulk, repetitive, or
+    not worth your own tokens — summarising a long document, classifying a batch,
+    drafting something you will rewrite anyway. You are one of several agents
+    connected to this daemon; the local model is a single GPU slot serving all of
+    you, so work is queued rather than called and the line is drained one task at
+    a time in submission order.
+
+    This does NOT block. Poll `local_task_status(task_id)` for the result, or
+    leave it and come back — the queue is on disk and survives a daemon restart,
+    so a task outlives the session that submitted it.
+
+    run_after: ISO-8601 timestamp. The task waits until then instead of queueing
+    now — that is how you schedule work for the local model (overnight batches,
+    "do this after the ingest finishes"). Omit it to run as soon as the line
+    clears.
+
+    Note the local model runs even when engine_mode is "agent": a task queued
+    here is an explicit request for llama.cpp, so it starts on demand. It shares
+    the GPU with BGE-m3, so queue what is worth that, not everything.
+    """
+    try:
+        record = _localqueue.submit(
+            prompt=prompt, system=system, task=task,
+            submitted_by=_current_client_name(), run_after=run_after, note=note,
+        )
+    except ValueError as e:
+        return json.dumps({"error": str(e)})
+    return json.dumps({
+        "task_id": record["id"],
+        "status": record["status"],
+        "submitted_by": record["submitted_by"],
+        "queue": _localqueue.stats(),
+        "next": "Poll local_task_status(task_id); it does not block.",
+    })
+
+
+@mcp.tool()
+async def local_task_status(task_id: str) -> str:
+    """
+    Check one queued local-model task: its state, and its result once finished.
+
+    States: scheduled (waiting for run_after), queued, running, done, error,
+    cancelled. `result` is populated only when done; `error` only when errored.
+    """
+    record = _localqueue.get(task_id)
+    if record is None:
+        return json.dumps({
+            "error": f"No local task {task_id!r}.",
+            "hint": "Finished tasks are pruned once the line grows past its cap; "
+                    "an id from a while ago may simply have aged out.",
+        })
+    return json.dumps(record)
+
+
+@mcp.tool()
+async def local_task_list(status: str = "", limit: int = 20) -> str:
+    """
+    List local-model tasks, newest first, with who submitted each one.
+
+    Filter by status ("queued", "running", "scheduled", "done", "error",
+    "cancelled") or omit it for everything. Use this to see what the other
+    connected agents have put in the line before adding to it.
+    """
+    return json.dumps({
+        "queue": _localqueue.stats(),
+        "tasks": _localqueue.list_tasks(status=status, limit=limit),
+    })
+
+
+@mcp.tool()
+async def local_task_cancel(task_id: str) -> str:
+    """
+    Drop a local-model task that has not started yet.
+
+    A running task is left alone and reported as running: stopping it would mean
+    killing the llama.cpp process every other queued task is waiting on.
+    """
+    record = _localqueue.cancel(task_id)
+    if record is None:
+        return json.dumps({"error": f"No local task {task_id!r}."})
+    return json.dumps(record)
 
 
 @mcp.tool()
@@ -1245,6 +1337,14 @@ def run_server(cfg: Config):
     # A bind failure is logged, not fatal: the dashboard is an accessory, and a
     # busy port (usually a second daemon, or a sidecar still running from the
     # old model) is not a reason to take MCP service down with it.
+    # The task line's single consumer. Started here rather than lazily on first
+    # submit so that tasks scheduled by a previous run — and tasks left running
+    # when that run died — are picked up at boot rather than whenever someone
+    # next happens to call a tool.
+    _worker = LocalTaskWorker(_engine)
+    _worker.start()
+    atexit.register(_worker.stop)
+
     if cfg.dashboard_port:
         try:
             # Imported here, not at module scope: dashboard_api pulls in the

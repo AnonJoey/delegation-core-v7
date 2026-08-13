@@ -166,16 +166,20 @@ class DelegationEngine:
 
     # ── public ───────────────────────────────────────────────────────────────
 
-    async def ensure_running(self) -> bool:
-        if self.cfg.is_agent_mode:
+    async def ensure_running(self, force: bool = False) -> bool:
+        # force=True is the local task line (localworker.py): work an agent
+        # queued *for the local model*, which must run even in agent mode. Every
+        # other caller keeps the old behaviour, so nothing the daemon starts by
+        # itself can wake llama.cpp.
+        if self.cfg.is_agent_mode and not force:
             return False   # no local model to run in agent mode
-        if await self.check_health():
+        if await self.check_health(force=force):
             return True
         loop = asyncio.get_running_loop()
         return await loop.run_in_executor(None, self._start_locked)
 
-    async def check_health(self) -> bool:
-        if self.cfg.is_agent_mode:
+    async def check_health(self, force: bool = False) -> bool:
+        if self.cfg.is_agent_mode and not force:
             return False   # nothing to health-check; generation is delegated
         try:
             r = await self._async_client.get(f"{self.cfg.llama_url}/health", timeout=3.0)
@@ -241,15 +245,22 @@ class DelegationEngine:
         task: str = "default",
         max_retries: int = 3,
         retry_delay: int = 20,
+        force_local: bool = False,
     ) -> str:
-        """Async call to llama.cpp /v1/chat/completions. task selects budget cap."""
+        """Async call to llama.cpp /v1/chat/completions. task selects budget cap.
+
+        force_local bypasses the agent-mode short-circuit below. It exists for
+        the local task line: a task an agent explicitly queued for the local
+        model, where returning an extractive summary instead of running it would
+        answer a different question than the one asked.
+        """
         # v5.1 agent mode: no local model. Interactive tools branch to hand raw
         # context to the calling Claude before reaching invoke(); the callers
         # that DO reach here are background/no-agent pipelines (classify,
         # synthesize, heal) which cannot call back into the agent. Give them a
         # deterministic extractive reduction so maintenance never hangs on a
         # model that isn't there.
-        if self.cfg.is_agent_mode:
+        if self.cfg.is_agent_mode and not force_local:
             return self._extractive_fallback(prompt, self.budget(task, max_tokens))
 
         # Everything past here talks to the one local model, so it queues. The
@@ -259,7 +270,8 @@ class DelegationEngine:
         # startup attempts racing for the same port.
         async with self._queued():
             return await self._invoke_now(
-                prompt, system, max_tokens, temperature, task, max_retries, retry_delay
+                prompt, system, max_tokens, temperature, task, max_retries,
+                retry_delay, force_local=force_local,
             )
 
     @asynccontextmanager
@@ -299,9 +311,10 @@ class DelegationEngine:
         task: str = "default",
         max_retries: int = 3,
         retry_delay: int = 20,
+        force_local: bool = False,
     ) -> str:
         """invoke()'s body, run with the local-model gate already held."""
-        if not await self.ensure_running():
+        if not await self.ensure_running(force=force_local):
             raise RuntimeError(
                 "llama.cpp could not be reached or started. "
                 "Check llama_binary and llama_model in ~/.delegation_core/config.json"

@@ -199,3 +199,28 @@ def list_connected_clients() -> list[dict]:
         except Exception:
             continue
     return sorted(clients, key=lambda c: c.get("last_seen", ""), reverse=True)
+
+
+def current_client_name(default: str = "unknown") -> str:
+    """Name of the client whose call is being handled, from inside a tool.
+
+    The middleware above records this per session for the dashboard; a tool that
+    wants to *attribute* something needs the same fact at call time. With one
+    client connected this was not worth asking — with several agents sharing one
+    task line, "who queued this" is the first question anyone asks about a task.
+
+    Best-effort by design: no client info (a direct call, a test, a handshake
+    that omitted clientInfo) returns the default rather than raising, because
+    failing to name the submitter is not a reason to refuse the work.
+    """
+    try:
+        from fastmcp.server.dependencies import get_context
+
+        ctx = get_context()
+        session = getattr(ctx, "session", None)
+        params = getattr(session, "client_params", None) if session else None
+        info = getattr(params, "clientInfo", None) if params else None
+        name = getattr(info, "name", None)
+        return name or default
+    except Exception:
+        return default
