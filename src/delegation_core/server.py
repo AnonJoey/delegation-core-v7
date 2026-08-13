@@ -1031,10 +1031,41 @@ async def graph_list(name: str = "") -> str:
     return json.dumps(graphbridge.list_graphs(_vault.cfg, name=name or None))
 
 
+# A GRAPH_REPORT.md is a whole markdown document, and on this machine the two
+# largest are 335,350 and 319,254 characters — both past the MCP tool-result cap,
+# so graph_report returned nothing readable for precisely the graphs big enough
+# to be worth a report. Paged rather than summarised: unlike graph_list's
+# vault_paths, every line here is content the caller explicitly asked for.
+# Only the MCP path pages. graphbridge.get_report() still returns the document
+# whole for the dashboard and the CLI, which render it locally and have no cap.
+GRAPH_REPORT_PAGE_CHARS = 30_000
+
+
+def _page_report(result: dict, offset: int, page_chars: int = GRAPH_REPORT_PAGE_CHARS) -> dict:
+    """Cut one page out of a get_report() result, leaving error results alone."""
+    report = result.get("report")
+    if report is None:
+        return result
+    total = len(report)
+    start = min(max(offset, 0), total)
+    page = report[start:start + page_chars]
+    result["report"] = page
+    result["offset"] = start
+    result["total_chars"] = total
+    if start + len(page) < total:
+        result["next_offset"] = start + len(page)
+        result["truncated"] = True
+    return result
+
+
 @mcp.tool()
-async def graph_report(name: str) -> str:
-    """Return the full GRAPH_REPORT.md for a previously built graph by name (see graph_list)."""
-    return json.dumps(graphbridge.get_report(_vault.cfg, name))
+async def graph_report(name: str, offset: int = 0) -> str:
+    """Return the GRAPH_REPORT.md for a previously built graph by name (see graph_list).
+
+    Long reports are paged. When `truncated` is true, call again with
+    offset=`next_offset` to read on; `total_chars` is the report's full length.
+    """
+    return json.dumps(_page_report(graphbridge.get_report(_vault.cfg, name), offset))
 
 
 @mcp.tool()
