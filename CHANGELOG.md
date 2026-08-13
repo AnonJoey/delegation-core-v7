@@ -2,6 +2,143 @@
 
 ## Unreleased
 
+### Fixed
+
+- **`graph_list` and `graph_report` were both too large to return.** Measured on
+  this machine's registry, `graph_list` answered with 181,666 characters, past
+  the MCP tool-result cap — the tool was unusable through the one interface it
+  exists for. One field caused it: `vault_paths` is the only unbounded entry in
+  a registry record, holding a path per filed vault article, and the six graphs
+  here carry 3,391 between them (openclaw 1,441, hermes-agent 1,053). Nothing
+  read the array — the CLI prints counts, the dashboard reads `node_count`, and
+  `graph_preview` had already settled on `vault_notes_filed` for this same field.
+  It now returns that count; measured after, 1,580 characters, a 99.1%
+  reduction. The paths stay reachable through `graph_list(name=...)`, which
+  returns one graph's record whole.
+
+  `graph_report` had the same problem and no summary available, since every line
+  of a report is content the caller asked for: openclaw's is 335,321 characters
+  and hermes-agent's 319,254, both past the cap, so the largest graphs were
+  exactly the ones that returned nothing. It is paged instead — 30,000 characters
+  a page with `next_offset`/`total_chars`/`truncated`, and openclaw's twelve
+  pages reassemble byte-identical to the document. Reports under a page come back
+  whole and unflagged. Only the MCP path pages: `graphbridge.get_report()` still
+  returns the full text for the dashboard and CLI, which render it locally with
+  no cap.
+
+### Changed
+
+- **`task_status` says whether a vanished job was lost or never existed.** A
+  missing `job_id` answered `{"error": "Job 'x' not found."}` and nothing more.
+  Under stdio that was almost always a typo; under the daemon it is almost always
+  a restart, and the two call for opposite responses — re-run the tool, or go
+  check whether the work already finished. The response now carries
+  `job_store_started`, the one fact that separates them, with the reasoning
+  spelled out for the agent reading it. It deliberately gained no `status` key:
+  `daemon.next_poll_wait()` identifies not-found by that key's *absence*, and any
+  value there reads as neither done nor error, which would leave the CLI polling
+  a nonexistent job until its timeout. Confirmed by calling `next_poll_wait` on
+  such a payload — it returns a wait instead of raising — and pinned by a test.
+
+- **The vault graph drew 13 edges instead of 2962.** `/api/vault/graph` defaulted
+  to *including* graph_build articles, while `_build_vault_graph`'s own
+  signature, its docstring and the frontend all assumed the opposite — and since
+  the frontend passes no `generated` parameter, that one line decided every
+  graph the dashboard ever drew. Nodes are capped at the 1500 most recent, and
+  3427 of this vault's 3629 notes are generated articles, so the cap filled with
+  articles that carry no wikilinks between them and crowded out the hand-written
+  notes holding all of them. Measured on the live vault: 238 nodes / 2962 edges
+  excluded, against 1500 nodes / 13 edges included. On screen that was a canvas
+  with six dots and no lines, which is how it was found. The frontend's own
+  "N code-graph articles are under Code" caption had never once been shown.
+
+- **The version was wrong in five places at once.** `pyproject.toml` said
+  0.10.0, `__init__.py`'s docstring said 0.10.0, its `__version__` said 0.9.0,
+  the installed editable metadata said 0.7.0, and `index.html` hardcoded
+  "Orchestrator v0.9.0" into the header users actually look at. This is the
+  third recorded drift, each previously re-synced by hand under a comment
+  promising lockstep. Now: one literal in `__init__.py`, no copy in the
+  docstring, the header served from `/api/status`, and
+  `test_version_consistency.py` failing the suite when it drifts again.
+  Deriving it from `importlib.metadata` was tried and rejected — an editable
+  install freezes metadata at install time, which is why it read 0.7.0.
+
+- **A client hanging up mid-response logged two tracebacks.** The disconnect
+  raised out of `_send_json`, was logged at ERROR with a traceback, and then the
+  handler tried to send a 500 down the same dead socket — raising again, out of
+  the handler entirely and into socketserver's "Exception occurred during
+  processing of request". Cheap under a sidecar whose stderr nobody read; these
+  handlers now run in the daemon, where it lands in the journal beside real
+  faults. A disconnect is logged at debug and not answered.
+
+### Changed
+
+- **The daemon serves the dashboard's JSON API; the Tauri app stops spawning a
+  sidecar.** The sidecar was correct under stdio: `mcp.run()` serves one
+  transport at a time, so a dashboard could not attach to the MCP server and
+  needed a process of its own. It paid for that separation with a second
+  `VaultManager` — measured here, opening the dashboard took GPU use from 3826
+  to 6055 MiB, the extra 2314 MiB being a second resident copy of BGE-m3, plus a
+  second ChromaDB opener on the index the daemon already had open. That is the
+  duplication the move to a daemon exists to remove, still in place on the one
+  client the transport rearchitecture was originally *for*.
+
+  The daemon holds a warm `VaultManager`, so it now serves those routes itself
+  on `dashboard_port` (8788, loopback; 0 disables). No handler changed: they
+  read `_cfg`/`_vault`/`_tracker` as module globals, and `serve_in_process()`
+  points those at the daemon's instances instead of building new ones. The Tauri
+  app probes that port with a real `GET /api/status` — a bare TCP connect would
+  accept any process squatting the port — and only spawns the sidecar when
+  nothing answers, so a machine running no daemon keeps working unchanged.
+  Verified against the live daemon: one process, one 2314 MiB BGE copy, both
+  8787 and 8788 served, `/api/vault/search` answering off the real 3629-note
+  vault.
+
+  Note the exposure this changes: the dashboard API has no auth of its own (it
+  is loopback-bound behind the CORS allowlist added in v0.8.1), and it now
+  listens whenever the daemon runs rather than only while the dashboard app is
+  open. Any local process can read the vault through it. The MCP transport's
+  bearer token does not cover these routes.
+
+- **`reindex`, `maintain` and `ingest` hand their work to the running daemon.**
+  Moving the server to a single HTTP daemon gave one owner of the index and one
+  resident copy of BGE — for *clients*. The CLI kept building its own
+  `VaultManager`, so the common path through the product was still the one that
+  reintroduced the second writer: the hooks fire exactly these three commands as
+  detached processes (`session_export.py` after writing a transcript,
+  `session_start_brief.py` for maintenance and a backstop reindex). The daemon's
+  journal shows the consequence minutes into any session — *"Index changed on
+  disk by another process — reopening"*.
+
+  Measured on this vault (3627 notes, incremental, nothing to do): the old path
+  took 7.9s wall and pushed GPU use from 4060 to 6383 MiB — a second 2.3 GiB
+  copy of BGE-m3 loaded to index nothing. Routed, the same command takes 0.99s
+  and GPU use does not move. `--local` forces the old in-process path, and a
+  machine with no daemon listening still falls back to it automatically, so an
+  install without the service keeps working.
+
+  A daemon call that *fails* deliberately does not fall back: retrying locally
+  would start the concurrent writer this removes, against a daemon that is
+  already unwell. A daemon that *disappears* mid-call does fall back — that is a
+  restart, not a failure. `ingest` resolves its path before sending it, since
+  the daemon's working directory is not the shell's.
+
+  Two bugs surfaced in the first real run rather than in review. Polling read
+  `"error" in status`, but `jobs.submit()` seeds every job with `error=None`, so
+  a *finished* reindex was reported as a lost job while the daemon's log showed
+  it completing. And obeying `check_again_in_seconds` — floored at 30s, written
+  for an agent that spends a turn per poll — turned 70ms of work into 10.6s of
+  waiting; the interval now starts at 250ms and grows. Both are pinned by tests.
+
+### Fixed
+
+- **Stale session files were skipped forever instead of deleted.**
+  `list_connected_clients()` only unlinked files whose pid was gone, so a stale
+  session belonging to the *live* daemon sat in `~/.delegation_core/sessions/`
+  permanently. Harmless while every client was a long-lived editor; since the
+  CLI now connects once per routed command — several times a day via the hooks —
+  it was a file per invocation with no reader.
+
 ### Added
 
 - **`vault_health_detail()` — the findings behind the health counts.** The
