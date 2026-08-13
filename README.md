@@ -1,9 +1,10 @@
 # delegation-core
 
-A local MCP delegation server: an Obsidian vault (semantic search via BGE + ChromaDB), an
+A local MCP delegation server: a markdown vault (semantic search via BGE + ChromaDB), an
 optional local LLM (llama.cpp) for summarization/synthesis, and a vendored code-graph
 pipeline — all usable either as an MCP server (Claude Desktop/Code) or directly from a
-terminal via the `delegation-core` CLI.
+terminal via the `delegation-core` CLI. It runs as one HTTP daemon that every client shares,
+so the model and the index are loaded once per machine rather than once per client.
 
 The idea: push retrieval, classification, and compression work onto a local, zero-marginal-cost
 model instead of spending an LLM agent's tokens on it. See `AGENT_GUIDE.md` for the full
@@ -66,9 +67,21 @@ delegation-core to start automatically (systemd/launchd/Task Scheduler).
 
 ## Using it as an MCP server
 
-Register it in Claude Desktop's config or `~/.claude.json` (Claude Code). Once connected,
-31 tools are available — `search_vault`, `write_note`, `graph_build`, `graph_affected`,
-`process_create`, and more. Full protocol and tool reference: `AGENT_GUIDE.md`.
+delegation-core runs as a single HTTP daemon on `127.0.0.1:8787`, and every MCP client
+connects to that one process. Point your clients at it with:
+
+```bash
+delegation-core clients          # writes the http entry + bearer token into known clients
+```
+
+This is a one-time migration for anyone upgrading from v0.10 or earlier, which spoke stdio:
+a leftover `{"command": ..., "args": ["run"]}` entry spawns a second server that fights the
+daemon for the port, the ChromaDB index, and the GPU. One daemon means one resident copy of
+BGE-m3 instead of one per client.
+
+Once connected, ask the running server what it can do — `capabilities()` reports the live
+tool list from `mcp.list_tools()` rather than a count written down here that drifts. Full
+protocol and tool reference: `AGENT_GUIDE.md`.
 
 ## Using it as a CLI
 
@@ -109,10 +122,12 @@ pip install -e ".[dev]"
 pytest tests/ -q
 ```
 
-Tests are a starter suite (config, vault helpers, the graph registry/folder-resolution logic,
-the git hook installer, process tracking) — fast, offline, no ChromaDB/BGE/llama.cpp
-dependency. They don't yet cover `organizer.py`'s synthesis pipeline or `vault.py`'s
-ChromaDB-backed search, which would need heavier fixtures.
+579 tests — fast and offline, with no ChromaDB/BGE/llama.cpp dependency (the heavier
+collaborators are faked). They cover config, vault helpers and browsing, search scoping,
+note rename/delete, the daemon's request routing, the dashboard API's routes and CORS,
+client tracking, the graph registry/folder-resolution logic, the git hook installer, and
+process tracking. `organizer.py`'s synthesis pipeline is still the notable gap — it needs a
+real model to say anything useful.
 
 ## More detail
 

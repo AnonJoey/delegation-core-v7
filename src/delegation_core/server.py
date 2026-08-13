@@ -531,14 +531,12 @@ async def workspace_apply(name: str) -> str:
 @mcp.tool()
 async def list_mcp_clients() -> str:
     """
-    List MCP client surfaces currently connected to this delegation-core process
+    List MCP client surfaces currently connected to this delegation-core daemon
     (Claude Code, Claude Desktop, Codex, etc. — whichever has delegation-core
-    configured and has been active in the last two minutes). Each running
-    `delegation-core run` instance is its own connection with its own client
-    name/version, first/last-active timestamps, and tool-call count — there is
-    no single shared session to introspect since delegation-core runs over
-    stdio per-client. Use this to answer "what's connected right now" instead
-    of guessing from config files.
+    configured and has been active in the last two minutes). One daemon serves
+    every client, and each connection is its own MCP session with its own client
+    name/version, first/last-active timestamps, and tool-call count. Use this to
+    answer "what's connected right now" instead of guessing from config files.
     """
     return json.dumps({"clients": _list_connected_clients()})
 

@@ -1,12 +1,18 @@
 """
 dashboard_api.py — local JSON HTTP API for the Tauri dashboard.
 
-Deliberately NOT part of the MCP server: FastMCP's mcp.run() serves one transport
-at a time (stdio here), so it can't also serve HTTP for a UI in the same process.
-This is a separate, small process — stdlib http.server only, no new dependency —
-that the Tauri app's Rust backend spawns as a sidecar and talks to over
-127.0.0.1. It reuses Config/VaultManager/graphbridge/client_tracking/ProcessTracker
-directly; none of this goes through the MCP protocol.
+Since v0.11 these routes are served from inside the daemon, on the daemon's own
+warm objects — see serve_in_process(). Stdlib http.server only, no new
+dependency; it reuses Config/VaultManager/graphbridge/client_tracking/
+ProcessTracker directly, and none of this goes through the MCP protocol.
+
+It started as a separate process the Tauri app spawned as a sidecar, which stdio
+forced: mcp.run() serves one transport at a time, so the MCP server could not
+also serve HTTP for a UI. That separation bought its independence with a second
+VaultManager — a second resident BGE-m3 (2314 MiB, measured) plus a second
+ChromaDB opener on the index the server already held. The sidecar entry point
+below (run()) still works and is still what a Tauri install without the service
+falls back to; the daemon is simply the path that does not pay twice.
 
 Bound to 127.0.0.1 only (never a public interface) since it has no auth — it's
 meant to be reached exclusively by the local Tauri webview.
@@ -52,7 +58,7 @@ anything:
     Fixed with Path.relative_to(); the identical bug existed in server.py's
     relink_folder tool too (fixed there in the same pass).
 
-Also runnable standalone (without Tauri) via:
+The sidecar path is also runnable standalone (without Tauri) via:
   delegation-core dashboard-api [--port N]
 
 When spawned by the Tauri app, --parent-pid <tauri pid> is passed and a watchdog
@@ -334,72 +340,85 @@ class _Handler(BaseHTTPRequestHandler):
         self.end_headers()
 
     def do_GET(self):
-        parsed = urlparse(self.path)
-        query = parse_qs(parsed.query)
+        self._serve(self._route_get)
 
+    def do_POST(self):
+        self._serve(self._route_post)
+
+    def _serve(self, route) -> None:
+        """Run one request's routing under the error handling every verb shares.
+
+        do_GET and do_POST carried byte-identical except: clauses. Both needed
+        updating when the disconnect case was split out of the 500 path, and a
+        third verb would have had to remember to copy them a third time.
+        """
+        parsed = urlparse(self.path)
         try:
-            if parsed.path == "/api/status":
-                self._send_json(_status(_cfg, _vault))
-            elif parsed.path == "/api/clients":
-                from .client_tracking import list_connected_clients
-                self._send_json({"clients": list_connected_clients()})
-            elif parsed.path == "/api/mcp/windows":
-                # The MCP servers the *LLM provider's* client has mounted — i.e. what
-                # Claude can reach. Distinct from /api/clients, which lists the client
-                # surfaces attached to this delegation-core process. Both are "MCP
-                # connections"; they point in opposite directions.
-                from .windows import list_windows
-                self._send_json(list_windows())
-            elif parsed.path == "/api/vault/notes":
-                self._handle_vault_notes(parse_qs(parsed.query))
-            elif parsed.path == "/api/vault/backlinks":
-                self._handle_vault_backlinks(parse_qs(parsed.query))
-            elif parsed.path == "/api/vault/find":
-                self._handle_vault_find(parse_qs(parsed.query))
-            elif parsed.path == "/api/vault/tree":
-                self._handle_vault_tree()
-            elif parsed.path == "/api/vault/note":
-                self._handle_vault_note(query)
-            elif parsed.path == "/api/vault/search":
-                self._handle_vault_search(query)
-            elif parsed.path == "/api/vault/graph":
-                q = parse_qs(parsed.query)
-                # Defaults to excluding generated articles, which is what
-                # _build_vault_graph's own signature, its docstring and the
-                # frontend all already assumed. This line said ["1"] and was the
-                # only one that disagreed, and since the frontend sends no
-                # `generated` param it decided every graph the dashboard drew.
-                #
-                # The effect was not subtle. Nodes are capped at the 1500 most
-                # recent, and 3427 of this vault's 3629 notes are graph_build
-                # articles — so the cap filled with generated articles, which
-                # carry no wikilinks between them, and crowded out the
-                # hand-written notes that hold all of them. Measured on the live
-                # vault: 238 nodes / 2962 edges excluded, against 1500 nodes /
-                # **13** edges included. The dashboard rendered the latter: a
-                # near-empty canvas, which is what sent us looking.
-                include_generated = (q.get("generated") or ["0"])[0] != "0"
-                self._send_json(_build_vault_graph(_cfg, include_generated=include_generated))
-            elif parsed.path == "/api/graphs":
-                from . import graphbridge
-                self._send_json(graphbridge.list_graphs(_cfg))
-            elif parsed.path == "/api/graphs/get":
-                self._handle_graphs_get(query)
-            elif parsed.path == "/api/graphs/affected":
-                self._handle_graphs_affected(query)
-            elif parsed.path == "/api/processes":
-                self._handle_processes_list(query)
-            elif parsed.path == "/api/processes/get":
-                self._handle_processes_get(query)
-            elif parsed.path == "/api/config":
-                self._handle_config_get()
-            else:
-                self._send_json({"error": f"not found: {parsed.path}"}, status=404)
+            route(parsed)
         except (BrokenPipeError, ConnectionResetError):
             self._log_disconnect(parsed.path)
         except Exception as e:
             logger.exception("Request failed: %s", parsed.path)
             self._send_error_response(parsed.path, e)
+
+    def _route_get(self, parsed) -> None:
+        query = parse_qs(parsed.query)
+        if parsed.path == "/api/status":
+            self._send_json(_status(_cfg, _vault))
+        elif parsed.path == "/api/clients":
+            from .client_tracking import list_connected_clients
+            self._send_json({"clients": list_connected_clients()})
+        elif parsed.path == "/api/mcp/windows":
+            # The MCP servers the *LLM provider's* client has mounted — i.e. what
+            # Claude can reach. Distinct from /api/clients, which lists the client
+            # surfaces attached to this delegation-core process. Both are "MCP
+            # connections"; they point in opposite directions.
+            from .windows import list_windows
+            self._send_json(list_windows())
+        elif parsed.path == "/api/vault/notes":
+            self._handle_vault_notes(query)
+        elif parsed.path == "/api/vault/backlinks":
+            self._handle_vault_backlinks(query)
+        elif parsed.path == "/api/vault/find":
+            self._handle_vault_find(query)
+        elif parsed.path == "/api/vault/tree":
+            self._handle_vault_tree()
+        elif parsed.path == "/api/vault/note":
+            self._handle_vault_note(query)
+        elif parsed.path == "/api/vault/search":
+            self._handle_vault_search(query)
+        elif parsed.path == "/api/vault/graph":
+            # Defaults to excluding generated articles, which is what
+            # _build_vault_graph's own signature, its docstring and the
+            # frontend all already assumed. This line said ["1"] and was the
+            # only one that disagreed, and since the frontend sends no
+            # `generated` param it decided every graph the dashboard drew.
+            #
+            # The effect was not subtle. Nodes are capped at the 1500 most
+            # recent, and 3427 of this vault's 3629 notes are graph_build
+            # articles — so the cap filled with generated articles, which
+            # carry no wikilinks between them, and crowded out the
+            # hand-written notes that hold all of them. Measured on the live
+            # vault: 238 nodes / 2962 edges excluded, against 1500 nodes /
+            # **13** edges included. The dashboard rendered the latter: a
+            # near-empty canvas, which is what sent us looking.
+            include_generated = (query.get("generated") or ["0"])[0] != "0"
+            self._send_json(_build_vault_graph(_cfg, include_generated=include_generated))
+        elif parsed.path == "/api/graphs":
+            from . import graphbridge
+            self._send_json(graphbridge.list_graphs(_cfg))
+        elif parsed.path == "/api/graphs/get":
+            self._handle_graphs_get(query)
+        elif parsed.path == "/api/graphs/affected":
+            self._handle_graphs_affected(query)
+        elif parsed.path == "/api/processes":
+            self._handle_processes_list(query)
+        elif parsed.path == "/api/processes/get":
+            self._handle_processes_get(query)
+        elif parsed.path == "/api/config":
+            self._handle_config_get()
+        else:
+            self._send_json({"error": f"not found: {parsed.path}"}, status=404)
 
     def _log_disconnect(self, path: str) -> None:
         """A client that hung up is not an error, and must not be answered.
@@ -471,34 +490,27 @@ class _Handler(BaseHTTPRequestHandler):
             return None
         return data
 
-    def do_POST(self):
-        parsed = urlparse(self.path)
-        try:
-            if parsed.path == "/api/vault/note/rename":
-                self._handle_note_rename()
-            elif parsed.path == "/api/vault/note/create":
-                self._handle_note_create()
-            elif parsed.path == "/api/vault/note/save":
-                self._handle_note_save()
-            elif parsed.path == "/api/processes/create":
-                self._handle_processes_create()
-            elif parsed.path == "/api/processes/update":
-                self._handle_processes_update()
-            elif parsed.path == "/api/llama/start":
-                self._handle_llama_start()
-            elif parsed.path == "/api/llama/stop":
-                self._handle_llama_stop()
-            elif parsed.path == "/api/config/update":
-                self._handle_config_update()
-            elif parsed.path == "/api/system/purge_orphans":
-                self._handle_purge_orphans()
-            else:
-                self._send_json({"error": f"not found: {parsed.path}"}, status=404)
-        except (BrokenPipeError, ConnectionResetError):
-            self._log_disconnect(parsed.path)
-        except Exception as e:
-            logger.exception("Request failed: %s", parsed.path)
-            self._send_error_response(parsed.path, e)
+    def _route_post(self, parsed) -> None:
+        if parsed.path == "/api/vault/note/rename":
+            self._handle_note_rename()
+        elif parsed.path == "/api/vault/note/create":
+            self._handle_note_create()
+        elif parsed.path == "/api/vault/note/save":
+            self._handle_note_save()
+        elif parsed.path == "/api/processes/create":
+            self._handle_processes_create()
+        elif parsed.path == "/api/processes/update":
+            self._handle_processes_update()
+        elif parsed.path == "/api/llama/start":
+            self._handle_llama_start()
+        elif parsed.path == "/api/llama/stop":
+            self._handle_llama_stop()
+        elif parsed.path == "/api/config/update":
+            self._handle_config_update()
+        elif parsed.path == "/api/system/purge_orphans":
+            self._handle_purge_orphans()
+        else:
+            self._send_json({"error": f"not found: {parsed.path}"}, status=404)
 
     def _handle_processes_list(self, query) -> None:
         status = (query.get("status") or ["active"])[0]
