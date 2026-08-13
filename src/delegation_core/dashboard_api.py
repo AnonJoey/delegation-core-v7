@@ -1,12 +1,18 @@
 """
 dashboard_api.py — local JSON HTTP API for the Tauri dashboard.
 
-Deliberately NOT part of the MCP server: FastMCP's mcp.run() serves one transport
-at a time (stdio here), so it can't also serve HTTP for a UI in the same process.
-This is a separate, small process — stdlib http.server only, no new dependency —
-that the Tauri app's Rust backend spawns as a sidecar and talks to over
-127.0.0.1. It reuses Config/VaultManager/graphbridge/client_tracking/ProcessTracker
-directly; none of this goes through the MCP protocol.
+Since v0.11 these routes are served from inside the daemon, on the daemon's own
+warm objects — see serve_in_process(). Stdlib http.server only, no new
+dependency; it reuses Config/VaultManager/graphbridge/client_tracking/
+ProcessTracker directly, and none of this goes through the MCP protocol.
+
+It started as a separate process the Tauri app spawned as a sidecar, which stdio
+forced: mcp.run() serves one transport at a time, so the MCP server could not
+also serve HTTP for a UI. That separation bought its independence with a second
+VaultManager — a second resident BGE-m3 (2314 MiB, measured) plus a second
+ChromaDB opener on the index the server already held. The sidecar entry point
+below (run()) still works and is still what a Tauri install without the service
+falls back to; the daemon is simply the path that does not pay twice.
 
 Bound to 127.0.0.1 only (never a public interface) since it has no auth — it's
 meant to be reached exclusively by the local Tauri webview.
@@ -52,7 +58,7 @@ anything:
     Fixed with Path.relative_to(); the identical bug existed in server.py's
     relink_folder tool too (fixed there in the same pass).
 
-Also runnable standalone (without Tauri) via:
+The sidecar path is also runnable standalone (without Tauri) via:
   delegation-core dashboard-api [--port N]
 
 When spawned by the Tauri app, --parent-pid <tauri pid> is passed and a watchdog
