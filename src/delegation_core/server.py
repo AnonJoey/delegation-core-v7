@@ -823,7 +823,20 @@ async def task_status(job_id: str) -> str:
     """
     job = jobs.get(job_id)
     if not job:
-        return json.dumps({"error": f"Job '{job_id}' not found."})
+        # Deliberately carries no "status" key: daemon.next_poll_wait() keys on
+        # its absence to tell not-found from a real job state, and a "status"
+        # here would read as neither done nor error and send the CLI back round
+        # the poll loop until it timed out. The extra fields below are additive
+        # for that reason — they explain the shape without changing it.
+        return json.dumps({
+            "error": f"Job '{job_id}' not found.",
+            "job_store_started": jobs.STARTED_AT.isoformat(),
+            "hint": ("Job ids live in this daemon's memory and do not survive a restart. "
+                     "If this job was submitted before job_store_started, the daemon "
+                     "restarted and the work's outcome is UNKNOWN, not failed — confirm "
+                     "with vault_stats()/vault_inbox_status() before re-running, since "
+                     "the job may well have completed."),
+        })
     if job["status"] == "running":
         from datetime import datetime as dt
         elapsed = (dt.now() - dt.fromisoformat(job["started"])).total_seconds()
@@ -1009,9 +1022,13 @@ async def graph_build(path: str, name: str = "", force: bool = False,
 
 
 @mcp.tool()
-async def graph_list() -> str:
-    """List previously built code graphs: name, source path, node/edge/community counts, last built."""
-    return json.dumps(graphbridge.list_graphs(_vault.cfg))
+async def graph_list(name: str = "") -> str:
+    """List previously built code graphs: name, source path, node/edge/community counts, last built.
+
+    Vault note paths are returned as a count (`vault_notes_filed`). Pass `name` to
+    get that one graph's entry with the full `vault_paths` list.
+    """
+    return json.dumps(graphbridge.list_graphs(_vault.cfg, name=name or None))
 
 
 @mcp.tool()
