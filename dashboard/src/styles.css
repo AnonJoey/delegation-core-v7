@@ -238,10 +238,28 @@ body {
   border-color: rgba(244, 63, 94, 0.9);
 }
 
+/* The telemetry ribbon is the widest thing in the topbar and the only one that
+   can give ground: the brand block and the window controls are both
+   flex-shrink:0, so without min-width:0 here the row overflows and pushes
+   minimise/maximise/close off the right edge. That is not hypothetical — at 900px,
+   the app's own declared minWidth, the controls were unreachable and the window
+   could only be closed from the keyboard. Shrinking with a horizontal scroll
+   keeps every field readable while the controls stay put. */
 .topbar-telemetry {
   display: flex;
   align-items: center;
   gap: 12px;
+  min-width: 0;
+}
+
+.status-fields {
+  min-width: 0;
+  overflow-x: auto;
+  scrollbar-width: none;
+}
+
+.status-fields::-webkit-scrollbar {
+  display: none;
 }
 
 .status-fields {
@@ -690,6 +708,37 @@ body {
 .dock-panel .task-list-pane,
 .dock-panel .search-results-pane,
 .dock-panel .folder-list-pane { flex: 1; min-height: 0; overflow-y: auto; }
+
+/* The vault navigator stacks three rows in one 260px column: filter, folders,
+   notes. Both lists were written as fixed-width columns for the old three-column
+   main area, so their widths and dividers have to go — left as-is they keep a
+   260px note list and a right border inside a 260px dock, which clips the notes
+   and draws a rule down the middle of the panel.
+
+   Folders take what they need up to a third of the dock and the note list takes
+   the rest: the folder tree is a short, stable list, while the note list is the
+   one that grows with the vault and is scrolled most. */
+.dock-panel .notes-toolbar {
+  flex: 0 0 auto;
+  padding: 8px 10px;
+  background: transparent;
+}
+
+.dock-panel .folder-list-pane {
+  width: auto;
+  flex: 0 1 auto;
+  max-height: 34%;
+  border-right: none;
+  border-bottom: 1px solid var(--border-subtle);
+}
+
+.dock-panel .note-list-pane {
+  width: auto;
+  flex: 1 1 auto;
+  min-height: 0;
+  border-right: none;
+  background: transparent;
+}
 
 .dock-panel .search-studio-hero { padding: 12px 14px; }
 .dock-panel .search-studio-hero h2 { font-size: 13px; margin: 0 0 4px; }
