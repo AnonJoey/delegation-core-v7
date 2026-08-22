@@ -123,9 +123,126 @@ def test_narrowed_search_over_fetches_to_survive_the_threshold_cut(vm):
     assert vm.collection.last_kwargs["n_results"] > 5
 
 
-def test_unscoped_search_does_not_over_fetch(vm):
+def test_every_search_over_fetches_now_that_notes_are_chunked(vm):
+    """Was `n_results == limit` when no `where` was set. v0.12 made a second cut
+    unexpressible in the query: a note is many ::chunk_N rows and search()
+    collapses them, so asking for exactly `limit` rows can return one long note's
+    chunks and nothing else. Over-fetch is unconditional now."""
     vm.search("q", limit=5)
-    assert vm.collection.last_kwargs["n_results"] == 5
+
+    assert vm.collection.last_kwargs["n_results"] > 5
+
+
+def test_the_over_fetch_is_bounded_at_both_ends(vm):
+    """Not unbounded: every returned row carries up to vault_chunk_size of
+    document, so a big limit must not turn one query into a pathological fetch.
+    A floor keeps small limits (search's own default is 5) from being answered
+    entirely out of one long note; a ceiling caps the worst case."""
+    fetched = []
+    for limit in (1, 5, 10, 20, 100):
+        vm.search("q", limit=limit)
+        fetched.append(vm.collection.last_kwargs["n_results"])
+
+    assert min(fetched) >= 20, "a small limit must still get a usable floor of rows"
+    assert max(fetched) <= 60, "the over-fetch must be capped, not proportional forever"
+    assert fetched == sorted(fetched), "the fetch must not shrink as the limit grows"
+    assert fetched[1] < fetched[3], "and it must still scale with the limit in between"
+    # The cap is below some reachable limits, so a caller asking for more notes
+    # than the cap can be short-changed. That predates chunking (the scoped path
+    # has capped at 60 since scoping landed) and every in-repo caller asks for
+    # 20 or fewer; pinned here so a later change to the cap is a deliberate one.
+    for limit in (1, 5, 10, 20):
+        vm.search("q", limit=limit)
+        assert vm.collection.last_kwargs["n_results"] >= limit
+
+
+# ── chunk collapsing (v0.12) ─────────────────────────────────────────────────
+
+@pytest.fixture
+def chunked(tmp_path):
+    """One long note that matched on eight of its chunks, plus four other notes.
+
+    The chunk rows deliberately outrank every other note, which is exactly the
+    situation that used to fill the whole result list with one transcript.
+    Distances descend within the long note so "best-scoring chunk" is a real
+    choice and not an accident of list order.
+    """
+    manager = VaultManager(Config(vault_path=str(tmp_path / "vault")))
+    manager._ensure_ready = lambda: None
+    long_rows = [
+        row("Reference/transcript.md", "Reference",
+            doc=f"chunk {i} body", dist=0.01 * (i + 1))
+        for i in range(8)
+    ]
+    # chunk_3 is the closest match, and it is not the first row of the note.
+    long_rows[3]["dist"] = 0.001
+    others = [row(f"Decisions/other{i}.md", "Decisions", doc=f"other {i}", dist=0.2 + i * 0.01)
+              for i in range(4)]
+    manager.collection = StubCollection(sorted(long_rows + others, key=lambda r: r["dist"]))
+    return manager
+
+
+def test_search_collapses_a_note_s_chunks_into_a_single_hit(chunked):
+    """Eight rows of one note used to be eight results. A long transcript would
+    otherwise take the entire result list and push every other note out."""
+    paths = [h["path"] for h in chunked.search("q", limit=5)]
+
+    assert paths.count("Reference/transcript.md") == 1
+    assert len(paths) == len(set(paths))
+
+
+def test_collapsing_still_fills_the_result_list_with_distinct_notes(chunked):
+    """Dedup must reach further down the over-fetched rows, not just shorten the
+    list — the whole point of the floor on n_results."""
+    hits = chunked.search("q", limit=5)
+
+    assert [h["path"] for h in hits] == [
+        "Reference/transcript.md",
+        "Decisions/other0.md",
+        "Decisions/other1.md",
+        "Decisions/other2.md",
+        "Decisions/other3.md",
+    ]
+
+
+def test_a_returned_path_is_never_a_chunk_id(chunked):
+    """Callers feed a hit's path straight back to the filesystem — merger, linker
+    and the dashboard all do — so `Reference/transcript.md::chunk_3` would be a
+    path that opens nothing."""
+    assert all("::" not in h["path"] for h in chunked.search("q", limit=5))
+
+
+def test_the_snippet_is_the_best_scoring_chunk_of_the_note(chunked):
+    """Not the first chunk: the passage that actually matched is the one worth
+    showing. Verified against the raw ranking rather than against the query."""
+    raw = chunked.collection.query(query_texts=["q"], n_results=60)
+    best_doc = next(doc for doc, meta in zip(raw["documents"][0], raw["metadatas"][0])
+                    if meta["path"] == "Reference/transcript.md")
+
+    hit = next(h for h in chunked.search("q", limit=5)
+               if h["path"] == "Reference/transcript.md")
+
+    assert hit["snippet"] == best_doc == "chunk 3 body"
+
+
+def test_the_similarity_reported_is_the_best_chunk_s(chunked):
+    hit = next(h for h in chunked.search("q", limit=5)
+               if h["path"] == "Reference/transcript.md")
+
+    assert hit["similarity"] == 0.999
+
+
+def test_rows_without_a_path_are_not_collapsed_together(tmp_path):
+    """`seen_paths` keys on metadata['path']; rows that carry none (index_note
+    falls back to a timestamp id for those) must not all dedup into one."""
+    manager = VaultManager(Config(vault_path=str(tmp_path / "vault")))
+    manager._ensure_ready = lambda: None
+    manager.collection = StubCollection([
+        {"doc": f"pathless {i}", "dist": 0.1,
+         "meta": {"title": f"t{i}", "folder": "Decisions"}} for i in range(3)
+    ])
+
+    assert len(manager.search("q", limit=5)) == 3
 
 
 # ── legacy rows / context budget ─────────────────────────────────────────────

@@ -99,8 +99,12 @@ def test_the_embedding_function_survives_a_reopen(tmp_path, monkeypatch):
     write must not pay that, and on a full GPU the rebuild can fail outright."""
     built = []
 
-    def fake_builder(model):
-        built.append(model)
+    def fake_builder(model, max_seq_length=None, batch_size=None):
+        # v0.12 added the two execution caps to the factory's signature. A double
+        # that predates them makes _init raise, so the collection never opens and
+        # this test reads "never built" as "not rebuilt" — passing vacuously.
+        built.append({"model": model, "max_seq_length": max_seq_length,
+                      "batch_size": batch_size})
         return object()
 
     monkeypatch.setattr("delegation_core.vault.make_bge_embedding_function", fake_builder)
@@ -123,7 +127,45 @@ def test_the_embedding_function_survives_a_reopen(tmp_path, monkeypatch):
 
     manager = VaultManager(Config(vault_path=str(tmp_path / "vault")))
     manager._init()
+    assert manager.collection is not None, "the fixture never got as far as opening"
     (manager.cfg.chroma_path / "chroma.sqlite3").write_bytes(b"changed")
     manager._ensure_ready()
 
     assert len(built) == 1, f"the embedding function was rebuilt on reopen: {built}"
+
+
+def test_the_configured_execution_caps_reach_the_embedding_function(tmp_path, monkeypatch):
+    """The config fields exist but stay inert until they are passed here, and an
+    uncapped encode is what exhausted a 16 GB card mid-reindex. Asserted against
+    the values this Config carries, not against the shipped defaults."""
+    built = []
+
+    def fake_builder(model, max_seq_length=None, batch_size=None):
+        built.append({"model": model, "max_seq_length": max_seq_length,
+                      "batch_size": batch_size})
+        return object()
+
+    monkeypatch.setattr("delegation_core.vault.make_bge_embedding_function", fake_builder)
+
+    class FakeCollection:
+        def count(self):
+            return 0
+
+    class FakeClient:
+        def get_or_create_collection(self, **kwargs):
+            return FakeCollection()
+
+    import sys
+    import types
+
+    fake_chromadb = types.ModuleType("chromadb")
+    fake_chromadb.Settings = lambda **kw: None
+    fake_chromadb.PersistentClient = lambda **kw: FakeClient()
+    monkeypatch.setitem(sys.modules, "chromadb", fake_chromadb)
+
+    cfg = Config(vault_path=str(tmp_path / "vault"))
+    cfg.embed_max_seq_length = 777
+    cfg.embed_batch_size = 3
+    VaultManager(cfg)._init()
+
+    assert built == [{"model": cfg.bge_model, "max_seq_length": 777, "batch_size": 3}]

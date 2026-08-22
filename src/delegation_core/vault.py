@@ -16,6 +16,16 @@ v0.3 improvements:
     has not changed since the last reindex run. State stored in
     {vault}/.chroma_index.json as {rel_path: mtime}.
   - force=True bypasses mtime check (full reindex).
+
+v0.12 improvements:
+  - Vault notes are chunked into "<rel path>::chunk_N" rows, the way ingest.py
+    has always chunked external files. One row per note meant everything past
+    the embedding model's input ceiling was silently unindexed.
+  - index_note deletes a note's existing rows before upserting its new ones —
+    upsert alone leaves the tail of a shortened note answering searches.
+  - .chroma_index.json carries a schema stamp; a mismatch forces one full
+    re-index, without which an incremental run would skip every note and the
+    chunking change would never reach the index.
 """
 
 import json
@@ -26,12 +36,23 @@ from datetime import datetime
 from pathlib import Path, PurePosixPath, PureWindowsPath
 
 from .config import Config
-from .embeddings import make_bge_embedding_function
+from .embeddings import chunk_text, make_bge_embedding_function
 from .linker import frontmatter_aliases
 
 logger = logging.getLogger("vault")
 
 _INVALID_FILENAME_CHARS = re.compile(r'[<>:"/\\|?*\x00-\x1f]')
+
+# v0.12: a vault note is stored as one row per chunk, keyed "<rel path>::chunk_N".
+# Anchored at the end because "::" is a legal character in a POSIX filename — an
+# unanchored search would mistake a note actually named "notes::chunk_2 draft.md"
+# for a chunk of "notes" and, in the orphan sweep, delete it as an orphan of a
+# base path that never existed.
+_CHUNK_SUFFIX_RE = re.compile(r"::chunk_\d+$")
+# The same shape, but only for a *non-zero* chunk: every indexed document has
+# exactly one row that this does NOT match (::chunk_0, or a legacy bare path),
+# which is what makes counting distinct documents an id-only scan in get_stats().
+_EXTRA_CHUNK_SUFFIX_RE = re.compile(r"::chunk_(?!0$)\d+$")
 
 # v6 health de-pollution: `[[...]]` occurs in ingested content that is NOT a
 # wikilink — bash `[[ -f "$x" ]]` test syntax, imported Obsidian path-links
@@ -278,7 +299,14 @@ class VaultManager:
                 # routinely full, so the rebuild can fail where the first one
                 # succeeded.
                 if self.ef is None:
-                    self.ef = make_bge_embedding_function(self.cfg.bge_model)
+                    # The caps are passed here or nowhere: the config fields exist
+                    # but stay inert until they reach the embedding function, and
+                    # an uncapped encode is what OOM'd a 16GB card mid-reindex.
+                    self.ef = make_bge_embedding_function(
+                        self.cfg.bge_model,
+                        max_seq_length=self.cfg.embed_max_seq_length,
+                        batch_size=self.cfg.embed_batch_size,
+                    )
                 client = chromadb.PersistentClient(
                     path=str(self.cfg.chroma_path),
                     settings=chromadb.Settings(anonymized_telemetry=False),
@@ -375,6 +403,13 @@ class VaultManager:
         Rows indexed before `kind` existed carry no marker; `reindex(force=True)`
         backfills them. Until then they behave as unscoped and are matched by a
         path fallback.
+
+        Since v0.12 a note occupies one row per chunk, so the k nearest rows can
+        be k pieces of the same note — a long transcript would otherwise fill the
+        whole result list with itself and push every other note out. Results are
+        collapsed by note path, keeping each note's best-scoring chunk (rows come
+        back sorted by distance, so the first one seen wins) and that chunk's
+        snippet, which is the passage that actually matched.
         """
         self._ensure_ready()
         if not self.collection:
@@ -393,9 +428,14 @@ class VaultManager:
             where = {"kind": scope[:-1] if scope == "notes" else scope}
 
         want = max(limit, 1)
-        # Over-fetch only to absorb the similarity-threshold cut, which `where`
-        # cannot express.
-        n_results = min(want * 3, 60) if where else want
+        # Over-fetch unconditionally now, not just when `where` is set: the cut
+        # that the query cannot express used to be only the similarity threshold,
+        # but chunking added a second one — several rows collapsing into a single
+        # note. A floor of 20 keeps small limits (search's default is 5, and
+        # merge/relink call it with 5) from being answered entirely out of one
+        # long note's chunks; the cap keeps a query off a pathological fetch,
+        # since every returned row carries up to vault_chunk_size of document.
+        n_results = min(max(want * 4, 20), 60)
 
         try:
             kwargs = {"query_texts": [query], "n_results": n_results}
@@ -403,6 +443,7 @@ class VaultManager:
                 kwargs["where"] = where
             res = self.collection.query(**kwargs)
             hits = []
+            seen_paths: set[str] = set()
             docs  = (res.get("documents") or [[]])[0]
             metas = (res.get("metadatas") or [[]])[0]
             dists = (res.get("distances") or [[]])[0]
@@ -410,12 +451,20 @@ class VaultManager:
                 sim = round(1 - dist, 3)
                 if sim < self.cfg.search_threshold:
                     continue
+                # The doc id carries the chunk index; metadata['path'] never
+                # does, which is what lets callers feed a hit's path straight
+                # back to the filesystem (merger, linker, the dashboard all do).
+                path = meta.get("path", "")
+                if path:
+                    if path in seen_paths:
+                        continue
+                    seen_paths.add(path)
                 kind = meta.get("kind") or (
                     "external" if str(meta.get("is_external", "")).lower() == "true"
                     else self.classify_path(meta.get("path", ""))[0])
                 hits.append({
                     "title":      meta.get("title", "Untitled"),
-                    "path":       meta.get("path", ""),
+                    "path":       path,
                     "folder":     meta.get("folder", ""),
                     "kind":       kind,
                     "snippet":    doc[:max(snippet_chars, 0)],
@@ -444,11 +493,19 @@ class VaultManager:
         note was unreachable through the default scope from the moment it was
         written until the next full reindex backfilled it. search()'s docstring
         treats missing `kind` as a legacy condition; these paths kept creating it.
+
+        v0.12 — vault notes are chunked here, and the absence of doc_id is what
+        selects that. All 21 call expressions of this method hand over a whole
+        note; ingest.py is the single one that has already split its input, and
+        it is also the single one that passes an explicit doc_id, so gating on
+        `not doc_id` chunks the twenty write paths that need it without touching
+        any of them. Before this, one note was one row: bge-m3 stops reading at
+        8192 tokens, so a 122k-token graph report was 6.7% indexed and the rest
+        of it could not be found by any query.
         """
         self._ensure_ready()
         if not self.collection:
             return
-        doc_id = doc_id or metadata.get("path", str(datetime.now().timestamp()))
         # Only vault-relative paths can be classified. External content scopes on
         # is_external, and an absolute path must never be stamped: classify_path
         # grades anything it cannot recognise as hand-written, which would file
@@ -470,9 +527,51 @@ class VaultManager:
             metadata = {**metadata, "kind": kind}
             if graph:
                 metadata["graph"] = graph
+
+        # A vault note: no caller-supplied id, and a relative path to key the
+        # chunks by. Absolute and is_external rows are left alone — those belong
+        # to ingest.py, which owns their chunk ids, and the where-delete below
+        # would reap the siblings it just wrote.
+        chunkable = (
+            not doc_id
+            and bool(raw_path)
+            and not absolute
+            and str(metadata.get("is_external", "")).lower() != "true"
+        )
+        if chunkable:
+            chunks = chunk_text(content,
+                                max_chars=self.cfg.vault_chunk_size,
+                                overlap=self.cfg.vault_chunk_overlap)
+            total = str(len(chunks))
+            # ::chunk_0 even when there is exactly one chunk, unlike ingest.py's
+            # bare-path special case. If the key shape depended on the content,
+            # every cleanup path would need two rules and a note crossing the
+            # one-chunk boundary would leave the other shape behind.
+            ids = [f"{raw_path}::chunk_{i}" for i in range(len(chunks))]
+            metas = [{**metadata, "chunk": str(i), "total_chunks": total}
+                     for i in range(len(chunks))]
+        else:
+            ids = [doc_id or metadata.get("path", str(datetime.now().timestamp()))]
+            chunks = [content]
+            metas = [metadata]
+
         try:
             with _chroma_write_lock:
-                self.collection.upsert(ids=[doc_id], documents=[content], metadatas=[metadata])
+                if chunkable:
+                    # upsert replaces, it never removes. A note edited from 12
+                    # chunks down to 3 would keep ::chunk_3..11 verbatim from the
+                    # old revision — text that exists in no file, answering
+                    # searches forever, and invisible to the orphan sweep because
+                    # the note itself is still on disk. organizer's heal pass
+                    # exists to shorten notes, so this is the common case, not the
+                    # exotic one. Failure here is logged rather than fatal: a
+                    # stale sibling is worse than nothing, but not indexing the
+                    # note at all is worse still.
+                    try:
+                        self.collection.delete(where={"path": raw_path})
+                    except Exception as e:
+                        logger.warning("Stale-chunk cleanup failed for %s: %s", raw_path, e)
+                self.collection.upsert(ids=ids, documents=chunks, metadatas=metas)
                 # Our own write moves the fingerprint; adopt it, or the next call
                 # reads it as a foreign change and reopens on every single write.
                 self._disk_state = self._read_disk_state()
@@ -482,17 +581,29 @@ class VaultManager:
     def delete_notes(self, rel_paths: list[str]) -> int:
         """Drop notes from ChromaDB and the incremental index state by vault-relative path.
 
-        Counterpart to index_note: doc IDs for vault notes are the relative path,
-        so removing a note's file without this leaves a stale row that keeps
-        surfacing in search until the next full reindex runs its orphan sweep.
-        Returns the number of IDs submitted for deletion.
+        Counterpart to index_note: removing a note's file without this leaves
+        stale rows that keep surfacing in search until the next full reindex runs
+        its orphan sweep.
+
+        Deletion goes through `where={"path": ...}` rather than a list of ids
+        because since v0.12 a note is many rows and only the note itself knows
+        how many: deleting id "Reference/a.md" now removes nothing at all, and
+        reconstructing "Reference/a.md::chunk_N" needs a chunk count this method
+        is never given. The metadata path is the one thing every row of a note
+        shares — including the pre-v0.12 whole-note row, which the same call
+        reaps. One `$in` query covers the whole batch; graph_build passes the
+        entire stale wiki of a graph here, which is hundreds of paths.
+
+        Returns the number of note paths submitted for deletion (not rows: the
+        row count is not knowable without a second round-trip, and every caller
+        uses this as "how many notes did I ask to drop").
         """
         self._ensure_ready()
         if not self.collection or not rel_paths:
             return 0
         try:
             with _chroma_write_lock:
-                self.collection.delete(ids=list(rel_paths))
+                self.collection.delete(where={"path": {"$in": list(rel_paths)}})
                 self._disk_state = self._read_disk_state()
         except Exception as e:
             logger.warning("Delete error: %s", e)
@@ -504,6 +615,18 @@ class VaultManager:
         return len(rel_paths)
 
     # ── incremental index state ───────────────────────────────────────────────
+
+    #: Row shape the saved mtimes certify. 1 = one row per note (pre-v0.12),
+    #: 2 = one row per ::chunk_N. Bump this whenever a change makes existing
+    #: rows wrong rather than merely stale — reindex_vault discards the whole
+    #: state on a mismatch, which turns the next ordinary incremental run into
+    #: one full re-embed and then stamps the new number, so it costs exactly one
+    #: pass and never re-fires. Without it the chunking fix ships inert: every
+    #: note's mtime still matches, so `delegation-core reindex` writes nothing.
+    _INDEX_SCHEMA = 2
+    #: Reserved key inside .chroma_index.json. Can never collide with a note:
+    #: keys there are vault-relative paths, which always end in ".md".
+    _SCHEMA_KEY = "__schema__"
 
     def _index_state_path(self) -> Path:
         return self.cfg.vault / ".chroma_index.json"
@@ -535,13 +658,23 @@ class VaultManager:
         force=True: re-indexes every note regardless of mtime.
 
         Also removes orphan ChromaDB rows whose vault path no longer exists on
-        disk. External chunk IDs (containing '::') are never touched.
+        disk. Externally ingested rows are never touched.
         """
         self._ensure_ready()
         if not self.collection:
             return 0
 
         state = {} if force else self._load_index_state()
+        # A state file written under an older row shape certifies nothing about
+        # the rows in ChromaDB now, so the mtimes in it must not be allowed to
+        # skip anything. Popped either way, so the reserved key is never walked
+        # as if it were a note path; re-stamped at the save below, which is what
+        # keeps this a one-time cost. Old files carry no stamp at all and read
+        # as 0 — the upgrade case this exists for.
+        if state.pop(self._SCHEMA_KEY, 0) != self._INDEX_SCHEMA:
+            if state:
+                logger.info("Index state schema changed — re-indexing every note once")
+            state = {}
         count = 0
         skipped = 0
         on_disk: set[str] = set()
@@ -583,19 +716,47 @@ class VaultManager:
                 # each orphan candidate rather than trusting on_disk alone, or a note
                 # written mid-reindex gets its just-created ChromaDB row deleted here
                 # (file survives, but silently drops out of search_vault).
-                existing_ids = self.collection.get(include=[]).get("ids") or []
-                orphans = [i for i in existing_ids if "::" not in i and i not in on_disk
-                          and not (self.cfg.vault / i).exists()]
+                #
+                # Vault-vs-external is decided on the path, not on '::' as it
+                # was before v0.12: now that vault notes are chunked too, "'::'
+                # in the id" exempts every note in the vault from the sweep and
+                # deleted notes stay searchable forever. It is also not decided
+                # on `kind` — rows written before that field existed carry none,
+                # and a destructive sweep must not read "no marker" as "not a
+                # note". What holds regardless of vintage is that ingest keys its
+                # rows by absolute source path while a vault note is always
+                # relative, which is the same test index_note uses to decide
+                # whether a path can be classified at all.
+                existing = self.collection.get(include=["metadatas"])
+                existing_ids = existing.get("ids") or []
+                existing_metas = existing.get("metadatas") or []
+                orphans = []
+                orphan_bases = set()
+                for pos, i in enumerate(existing_ids):
+                    meta = (existing_metas[pos] if pos < len(existing_metas) else None) or {}
+                    if str(meta.get("is_external", "")).lower() == "true":
+                        continue
+                    base = _CHUNK_SUFFIX_RE.sub("", i)
+                    if not base or (PurePosixPath(base).is_absolute()
+                                    or PureWindowsPath(base).is_absolute()):
+                        continue
+                    if base in on_disk or (self.cfg.vault / base).exists():
+                        continue
+                    orphans.append(i)
+                    orphan_bases.add(base)
                 if orphans:
                     self.collection.delete(ids=orphans)
                     self._disk_state = self._read_disk_state()
-                # Remove orphan entries from saved state
-                for o in orphans:
+                # Remove orphan entries from saved state — keyed by the note's
+                # path, so popping the chunk id would leave every entry behind.
+                for o in orphan_bases:
                     state.pop(o, None)
-                logger.info("Reindex dropped %d orphan rows", len(orphans))
+                logger.info("Reindex dropped %d orphan rows (%d notes)",
+                            len(orphans), len(orphan_bases))
         except Exception as e:
             logger.warning("Orphan cleanup failed: %s", e)
 
+        state[self._SCHEMA_KEY] = self._INDEX_SCHEMA
         self._save_index_state(state)
         if skipped:
             logger.info("Reindex: %d indexed, %d unchanged (skipped)", count, skipped)
@@ -955,7 +1116,9 @@ class VaultManager:
             # research/Client/…, meetings/…/2024-2025/…). Obsidian resolves links
             # by basename across the whole vault, so a non-recursive scan misses
             # subfolder notes and falsely counts every link to them as broken.
-            # Matches ChromaDB's recursive index (total_notes ⇒ indexed_notes).
+            # Matches ChromaDB's recursive index — note that since v0.12 the
+            # comparable figure is get_stats()['indexed_notes'] (distinct notes),
+            # not ['indexed_rows'], which counts one row per chunk.
             for f in fp.rglob("*.md"):
                 try:
                     content = f.read_text(encoding="utf-8")
@@ -1205,9 +1368,37 @@ class VaultManager:
             # uses rglob), so a non-recursive count here made folder_counts
             # undercount vs indexed_notes for any folder with subfolder notes.
             folder_counts[folder] = len(list(p.rglob("*.md"))) if p.exists() else 0
+        rows, docs = self._index_counts()
         return {
-            "indexed_notes": self.collection.count() if self.collection else 0,
+            # Documents, not rows. collection.count() answered this until v0.12
+            # and then started overstating it by ~39% on this vault the moment
+            # notes were chunked (3,661 notes → ~5,098 rows), with heartbeat(),
+            # vault_stats() and the dashboard header all repeating the inflated
+            # number as "notes indexed". Both are reported now rather than one
+            # being quietly redefined.
+            "indexed_notes": docs,
+            "indexed_rows": rows,
             "vault_path": str(self.cfg.vault),
             "embed_model": self.cfg.bge_model,
             "folder_counts": folder_counts,
         }
+
+    def _index_counts(self) -> tuple[int, int]:
+        """(rows, distinct documents) in the collection.
+
+        Distinct documents are counted by discarding every ``::chunk_N`` id with
+        N > 0: each document keeps exactly one row this does not match — its
+        ::chunk_0, or, for a row written before chunking existed, its bare path.
+        An ids-only get() is what makes that affordable; measured on 5k rows it
+        costs ~8 ms against ~40 ms to pull the metadatas, and this runs on the
+        dashboard's health poll.
+        """
+        if not self.collection:
+            return 0, 0
+        rows = self.collection.count()
+        try:
+            ids = self.collection.get(include=[]).get("ids") or []
+        except Exception as e:
+            logger.warning("Could not count distinct indexed notes: %s", e)
+            return rows, rows
+        return rows, sum(1 for i in ids if not _EXTRA_CHUNK_SUFFIX_RE.search(i))

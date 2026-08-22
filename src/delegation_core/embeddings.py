@@ -157,23 +157,196 @@ def detect_device() -> str:
         return "cpu"
 
 
-def make_bge_embedding_function(model_name: str):
+def _effective_max_seq_length(model_name: str, requested: int | None) -> int | None:
+    """Resolve the sequence-length cap to apply, or None for "leave the model alone".
+
+    MODEL_PROFILES already records each model's real input window, and until now that
+    field was display-only — cli.py prints it in the model table and nothing else read
+    it. It is the one number on hand that can catch a config asking for more than the
+    weights can do: raising max_seq_length past a model's trained window does not
+    extend the window, it hands the encoder positions its embeddings cannot represent.
+    So a request above a *measured* ceiling is clamped down to it. An unmeasured model
+    carries max_seq=None (DEFAULT_PROFILE), and a ceiling nobody has verified is not a
+    ceiling worth enforcing, so those pass through exactly as configured.
+    """
+    if not requested or requested <= 0:
+        return None
+    ceiling = profile_for(model_name).get("max_seq")
+    if ceiling and requested > ceiling:
+        logger.warning(
+            "Configured max_seq_length=%d exceeds %s's %d-token window — clamping to %d",
+            requested, model_name, ceiling, ceiling,
+        )
+        return ceiling
+    return requested
+
+
+def _is_out_of_memory(exc: BaseException) -> bool:
+    """True for an accelerator out-of-memory failure.
+
+    Matched by class *name* and message rather than by importing
+    torch.cuda.OutOfMemoryError, so this module keeps working — and keeps its
+    lazy-import discipline — on a box where torch is CPU-only or absent.
+    """
+    if type(exc).__name__ in ("OutOfMemoryError", "CudaOutOfMemoryError"):
+        return True
+    return "out of memory" in str(exc).lower()
+
+
+#: Cache of the generated subclass, keyed by the base class it was built from.
+_LIMITED_EF_CLASSES: dict[type, type] = {}
+
+
+def _limited_embedding_function_class(base: type) -> type:
+    """Subclass SentenceTransformerEmbeddingFunction so the execution limits actually
+    reach the model. Neither limit can be passed through the documented route:
+
+      * STEF forwards **kwargs straight into SentenceTransformer.__init__, which
+        (sentence-transformers 5.5.1) accepts neither `max_seq_length` nor
+        `batch_size` and has no **kwargs of its own — both are a TypeError, not a
+        silent no-op. max_seq_length is a *post-construction* property on the model.
+      * STEF.__call__ never passes batch_size to .encode() at all, so the model's own
+        default of 32 applies no matter what anyone configured.
+
+    Built lazily and cached per base class instead of declared at module scope,
+    because the chromadb import is deliberately inside make_bge_embedding_function
+    (importing chromadb at module import time costs seconds on every CLI invocation)
+    and the base has to be whatever that import returned.
+
+    A subclass rather than a delegating wrapper, so name()/get_config()/
+    default_space()/build_from_config() stay byte-for-byte the base's. chromadb 1.5.9
+    serialises the embedding function into the collection config and validates it
+    against schemas/embedding_functions/sentence_transformer.json, which declares
+    additionalProperties=false — a get_config() carrying two extra keys would raise
+    inside _serialize_config's try, and the except there quietly rewrites the whole
+    entry to {"type": "legacy"}. The cost of inheriting build_from_config unchanged
+    is that an EF chromadb rehydrates from that stored config comes back as a plain
+    STEF without the limits; nothing in this project does that (vault.py always hands
+    get_or_create_collection an EF it built itself), but it is the reason not to
+    depend on the stored config for these values.
+    """
+    cached = _LIMITED_EF_CLASSES.get(base)
+    if cached is not None:
+        return cached
+
+    import numpy as np
+
+    class LimitedSentenceTransformerEmbeddingFunction(base):  # type: ignore[misc, valid-type]
+        """STEF plus a sequence-length cap and a batch-size cap."""
+
+        def __init__(self, model_name, device, normalize_embeddings,
+                     max_seq_length=None, batch_size=None, **kwargs):
+            super().__init__(model_name=model_name, device=device,
+                             normalize_embeddings=normalize_embeddings, **kwargs)
+            self.max_seq_length = max_seq_length or None
+            self.batch_size = batch_size or None
+            model = getattr(self, "_model", None) if self.max_seq_length else None
+            if self.max_seq_length and model is None:
+                logger.warning(
+                    "Embedding backend %s exposes no _model — max_seq_length=%d not applied",
+                    type(self).__mro__[1].__name__, self.max_seq_length,
+                )
+            elif model is not None:
+                # STEF caches SentenceTransformer instances in a class-level dict keyed
+                # by model name, so this mutates the one shared model rather than a copy.
+                # That is the behaviour we want — every EF over this model should honour
+                # the cap — but it does mean the last cap constructed wins if two ever
+                # disagree, which is why the value is resolved once, up in the factory.
+                model.max_seq_length = self.max_seq_length
+
+        def _encode(self, documents: list[str]):
+            # Reimplements the base's __call__ body rather than delegating to it: the
+            # EmbeddingFunction protocol's __init_subclass__ wraps every __call__ it
+            # sees in validate/normalize, so super().__call__() would run that wrapper
+            # a second time — and .encode() is the only seam batch_size can enter by.
+            encode_kwargs = {}
+            if self.batch_size:
+                encode_kwargs["batch_size"] = self.batch_size
+            vectors = self._model.encode(
+                documents,
+                convert_to_numpy=True,
+                normalize_embeddings=self.normalize_embeddings,
+                **encode_kwargs,
+            )
+            return [np.array(v, dtype=np.float32) for v in vectors]
+
+        def __call__(self, input):
+            try:
+                return self._encode(list(input))
+            except Exception as e:
+                # make_bge_embedding_function's fallback only covers OOM while the
+                # weights are being *placed*. The OOM that motivated these limits hit
+                # mid-reindex — inside encode, where nothing caught it and the reindex
+                # died with the vault half indexed. The caps above are the actual fix;
+                # this is the net under them, because how much VRAM is free depends on
+                # what else is running (llama.cpp shares this GPU) and no static cap is
+                # right on every machine. One move to cpu, permanent for this process:
+                # a retry on the same device is the same failure, and a model that
+                # bounces back to the GPU per call would just OOM again on the next one.
+                if self.device == "cpu" or not _is_out_of_memory(e):
+                    raise
+                logger.warning(
+                    "Embedding encode ran out of memory on %s (%s) — moving the model "
+                    "to cpu for the rest of this process", self.device, e,
+                )
+                self._model.to("cpu")
+                self.device = "cpu"
+                try:
+                    import torch
+                    torch.cuda.empty_cache()
+                except Exception:
+                    pass    # freeing the cache is opportunistic; failing to is not fatal
+                return self._encode(list(input))
+
+    _LIMITED_EF_CLASSES[base] = LimitedSentenceTransformerEmbeddingFunction
+    return LimitedSentenceTransformerEmbeddingFunction
+
+
+def make_bge_embedding_function(model_name: str, max_seq_length: int | None = None,
+                                batch_size: int | None = None):
     """Build a chromadb-compatible BGE embedding function.
 
     Uses SentenceTransformerEmbeddingFunction with normalize_embeddings=True,
     which is required for BGE models to produce correct cosine similarities.
     Automatically selects CUDA when available.
+
+    max_seq_length and batch_size cap what a single encode call asks of the device.
+    Transformer attention costs batch x seq^2, so bge-m3's advertised 8192-token
+    window at .encode()'s default batch of 32 is enough to exhaust a 16 GB card
+    partway through a reindex — observed in production. Both default to None,
+    meaning "leave the model's own default alone", so every caller that predates
+    them behaves exactly as before.
     """
     from chromadb.utils.embedding_functions import SentenceTransformerEmbeddingFunction
 
-    device = detect_device()
-    logger.info("Loading BGE model: %s (device=%s)", model_name, device)
-    try:
-        return SentenceTransformerEmbeddingFunction(
+    max_seq_length = _effective_max_seq_length(model_name, max_seq_length)
+    batch_size = batch_size or None
+
+    def build(on_device: str):
+        """One construction attempt. Both call sites below go through here so the
+        cpu fallback cannot drift into loading the model without the limits — an
+        unlimited cpu encode is slower than the failure it replaced, not safer."""
+        if max_seq_length is None and batch_size is None:
+            return SentenceTransformerEmbeddingFunction(
+                model_name=model_name,
+                device=on_device,
+                normalize_embeddings=True,
+            )
+        limited = _limited_embedding_function_class(SentenceTransformerEmbeddingFunction)
+        return limited(
             model_name=model_name,
-            device=device,
+            device=on_device,
             normalize_embeddings=True,
+            max_seq_length=max_seq_length,
+            batch_size=batch_size,
         )
+
+    device = detect_device()
+    logger.info("Loading BGE model: %s (device=%s, max_seq_length=%s, batch_size=%s)",
+                model_name, device, max_seq_length or "model default",
+                batch_size or "model default")
+    try:
+        return build(device)
     except Exception as e:
         # detect_device() only checks whether CUDA/MPS *exists*, not whether
         # there's free memory for it right now — a concurrently-running
@@ -184,11 +357,7 @@ def make_bge_embedding_function(model_name: str):
         if device == "cpu":
             raise
         logger.warning("BGE load failed on %s (%s) — falling back to cpu", device, e)
-        return SentenceTransformerEmbeddingFunction(
-            model_name=model_name,
-            device="cpu",
-            normalize_embeddings=True,
-        )
+        return build("cpu")
 
 
 def chunk_text(text: str, max_chars: int = 4000, overlap: int = 200) -> list[str]:
@@ -196,12 +365,39 @@ def chunk_text(text: str, max_chars: int = 4000, overlap: int = 200) -> list[str
 
     Used by IngestManager for external files that exceed the effective embedding window.
     Short texts (≤ max_chars) are returned as a single-element list unchanged.
+
+    Neither size is trusted, because both arrive from user-editable config
+    (ingest_chunk_size/ingest_chunk_overlap, vault_chunk_size/vault_chunk_overlap).
+    An overlap at or above max_chars makes the stride `max_chars - overlap` zero or
+    negative and the loop then appends forever: chunk_text("x" * 10000, 100, 100)
+    grew until the OOM killer took the process (exit 137). A typo in a config file
+    must not be able to do that, so the overlap is clamped to half of max_chars —
+    half rather than max_chars-1 because a stride of 1 character is barely less
+    ruinous than a stride of 0, just slower to notice.
     """
+    if max_chars <= 0:
+        logger.warning("chunk_text got max_chars=%d — returning the text unsplit", max_chars)
+        return [text]
     if len(text) <= max_chars:
         return [text]
+    if not 0 <= overlap <= max_chars // 2:
+        clamped = max(0, min(overlap, max_chars // 2))
+        logger.warning(
+            "chunk_text overlap=%d is out of range for max_chars=%d — clamping to %d",
+            overlap, max_chars, clamped,
+        )
+        overlap = clamped
     chunks: list[str] = []
     start = 0
     while start < len(text):
         chunks.append(text[start:start + max_chars])
+        # Stop as soon as a chunk reaches the end of the text. Without this the loop
+        # takes one more stride and emits a tail that lies wholly inside the previous
+        # chunk's overlap: chunk_text("x" * 7601) returned lengths [4000, 3801, 1],
+        # and that 1-character duplicate became its own ChromaDB row with its own
+        # embedding — a full vector of index spent on content its predecessor
+        # already covers, and a spurious near-empty result competing in search.
+        if start + max_chars >= len(text):
+            break
         start += max_chars - overlap
     return chunks

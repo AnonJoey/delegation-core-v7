@@ -110,6 +110,28 @@ class Config:
     ingest_chunk_size: int = 4000
     ingest_chunk_overlap: int = 200
 
+    # ── v0.12: vault note chunking ───────────────────────────────────────────
+    # Until v0.12 a vault note was indexed as ONE ChromaDB row holding the whole
+    # file. Every embedding model has a hard input ceiling, so anything past it
+    # was silently dropped: measured on a real vault, a 122k-token code-graph
+    # report was 6.7% represented in the index and a 60k-token transcript 13.6%.
+    # The remainder was unsearchable with nothing anywhere reporting it missing.
+    # Notes are now chunked the way ingest.py has always chunked external files.
+    # Sized in CHARACTERS (chunk_text splits on characters) — see
+    # embed_max_seq_length for the token ceiling these must stay under.
+    vault_chunk_size: int = 4000
+    vault_chunk_overlap: int = 200
+
+    # ── v0.12: embedding execution limits ────────────────────────────────────
+    # Both pinned explicitly rather than inherited from the model card. bge-m3
+    # advertises 8192, and transformer attention costs batch x seq^2: a batch of
+    # 8 at 8192 asks roughly 32 GB of attention buffer, which OOMs a 16 GB card
+    # mid-reindex — observed in production, not theorised. With chunking above,
+    # no chunk comes near this ceiling, so lowering it costs no recall.
+    # 0 means "leave the model's own default alone".
+    embed_max_seq_length: int = 2048
+    embed_batch_size: int = 8
+
     # ── v0.3: recursive note splitting ───────────────────────────────────────
     # Files larger than split_min_chars trigger the three-tier split strategy.
     # PDFs with > 1 extractable page are always split regardless of char count.
