@@ -161,6 +161,33 @@ def _confidence(top_sim: float, model_name: str) -> str:
     return "high" if top_sim >= high else "medium" if top_sim >= medium else "low"
 
 
+def _default_scope() -> str:
+    """The scope to search when the caller did not name one.
+
+    An explicit `default_search_scope` in config.json wins. Otherwise it is
+    decided from the vault's own composition: 'notes' once generated articles
+    are the majority — there, an unscoped search is mostly answered by machine
+    output and the user's own writing loses — and 'all' when they are not, since
+    a vault whose authoritative material was ingested has nothing to gain from a
+    filter that hides exactly that. Anything unreadable falls back to 'notes',
+    the historical behaviour, so a broken health pass narrows the search rather
+    than silently widening it.
+    """
+    try:
+        configured = (getattr(_vault.cfg, "default_search_scope", "") or "").strip()
+    except Exception:
+        configured = ""
+    if configured:
+        return configured
+    try:
+        health = _vault.get_health_summary()
+        total = health.get("total_notes") or 0
+        generated = health.get("generated_notes") or 0
+        return "notes" if total and generated > total * 0.5 else "all"
+    except Exception:
+        return "notes"
+
+
 async def _run_or_queue(task_name: str, make_result) -> str:
     """Run local-model work inline, or hand back a job_id when the queue is busy.
 
@@ -207,7 +234,7 @@ async def _run_or_queue(task_name: str, make_result) -> str:
 
 @mcp.tool()
 async def search_vault(query: str, limit: int = 5, use_local: bool = False,
-                        scope: str = "notes", graph: str = "", snippet_chars: int = 0) -> str:
+                        scope: str = "", graph: str = "", snippet_chars: int = 0) -> str:
     """
     CALL THIS FIRST before answering any question that could have prior context.
     Semantic search the Obsidian vault using BGE embeddings.
@@ -221,16 +248,22 @@ async def search_vault(query: str, limit: int = 5, use_local: bool = False,
     'all' (everything). graph='<name>' restricts to one built code graph.
     Each hit carries its 'kind'.
 
-    The default is 'notes' because a vault carrying code graphs is mostly not the
-    user's writing: this one holds 3692 generated articles against 187
-    hand-written notes, and under scope='all' a search for the exact title of a
-    note written minutes earlier returned two unrelated generated articles
-    instead. Widen deliberately — use 'generated' or graph='<name>' for questions
-    about a codebase, 'external' for ingested files, 'all' to sweep everything.
+    Leaving scope unset picks it per vault rather than shipping one answer for
+    every machine. A vault carrying code graphs is mostly not the user's writing
+    — one holds 3692 generated articles against 187 hand-written notes, and
+    under scope='all' a search for the exact title of a note written minutes
+    earlier returned two unrelated generated articles instead. But a vault whose
+    authoritative material is ingested is the mirror image: a fixed 'notes'
+    default hid 6,637 external files from the search path every agent uses, and
+    3 of 4 probe queries returned a raw transcript where 'all' returned the
+    authoritative document. So the default is 'notes' when generated articles
+    dominate the vault and 'all' when they do not; set default_search_scope in
+    config.json to pin one. Pass scope explicitly to override either way.
     Every response names the scope it used.
     snippet_chars caps snippet length (0 = default); lower it when you only need
     titles and paths, since in agent mode every snippet is spent from your context.
     """
+    scope = scope or _default_scope()
     hits = _vault.search(query, limit=limit, scope=scope, graph=graph,
                          snippet_chars=snippet_chars or 800)
     # Stating the scope on every response, not only on a miss: a caller reading
@@ -364,11 +397,21 @@ async def compress(source: str, raw_content: str, use_local: bool = False) -> st
         return json.dumps(payload)
 
     async def _compress(engine) -> str:
+        # synthesis_lang is honoured by organizer and exposed in config, but the
+        # compression prompt was hardcoded English and never read it. The local
+        # model then chose per call: two consecutive calls over Portuguese
+        # conversations came back one in Portuguese and one in English. Across a
+        # batch that produces a bilingual vault by accident, and nothing reports
+        # it — the compression "succeeded" every time.
+        _lang = {"pt": "Responda em português do Brasil.",
+                 "en": "Answer in English."}.get(
+                     (getattr(engine.cfg, "synthesis_lang", "en") or "en").lower(), "")
         try:
             result = await engine.invoke(
                 f"Extract only key facts, decisions, and action items. No preamble.\n"
+                f"{_lang}\n"
                 f"Source: {source}\n\n{raw_content[:limit]}",
-                system="Compression Engine. Be extremely concise.",
+                system=f"Compression Engine. Be extremely concise. {_lang}".strip(),
                 max_tokens=engine.budget("compress", 1200),
                 temperature=0.2,
                 task="compress",

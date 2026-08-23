@@ -254,7 +254,13 @@ def cmd_status(_args):
     try:
         import chromadb
         client = chromadb.PersistentClient(path=str(cfg.chroma_path))
-        col = client.get_collection("vault_bge")
+        # cfg.collection_name, not the historical literal: every other caller
+        # derives the name from the embedding model, so on any install using
+        # something other than bge-base this looked up a collection that does
+        # not exist and reported "not initialized — run: delegation-core
+        # reindex" over a perfectly healthy index — recommending a rebuild that
+        # costs hours on a real vault.
+        col = client.get_collection(cfg.collection_name)
         table.add_row("ChromaDB", f"[green]✓[/green]  {col.count()} notes indexed")
     except Exception:
         table.add_row("ChromaDB", "[dim]not initialized — run: delegation-core reindex[/dim]")
@@ -827,6 +833,26 @@ def cmd_embed_model(args):
     console.print("  [dim]Reinicie o servidor MCP para o cliente pegar a troca.[/dim]")
 
 
+def _source_row_count(vault, source: str) -> int:
+    """How many rows this ingest source still has in the collection.
+
+    Used to tell "the index was rebuilt and this source is gone" from "the
+    source is indexed and merely unchanged" — the two cases a reindex must
+    treat differently. Counting is deliberately cheap and ids-only; the answer
+    only has to distinguish zero from non-zero. Any failure reads as 0, which
+    errs toward re-ingesting: costly, but never silently leaves a source out.
+    """
+    try:
+        vault._ensure_ready()
+        if not vault.collection:
+            return 0
+        got = vault.collection.get(where={"source_folder": source},
+                                   limit=1, include=[])
+        return len(got.get("ids") or [])
+    except Exception:
+        return 0
+
+
 def _reindex_everything(console, cfg):
     """Rebuild the vault index AND replay every ingested external folder.
 
@@ -856,18 +882,29 @@ def _reindex_everything(console, cfg):
 
     ingest = IngestManager(vault)
     total = 0
+    recovered = 0
     for source, meta in registry.items():
-        # force=True: reindex exists to REBUILD. v0.12 gave ingest a per-file
-        # mtime+size cache, so without this every file compares as unchanged and
-        # the command re-embeds nothing — precisely when it is being run to
-        # recover, after a Chroma rebuild or an embed-model switch left the new
-        # collection with zero external rows while the registry insists they are
-        # all indexed.
-        result = ingest.ingest(source, recursive=meta.get("recursive", True), force=True)
+        # Force this source only when its rows are actually gone.
+        #
+        # Both extremes are wrong. Never forcing means v0.12's per-file
+        # mtime+size cache makes every file compare as unchanged, so the command
+        # re-embeds nothing — exactly when it is being run to recover, after a
+        # Chroma rebuild or a model switch left the new collection empty while
+        # the registry insists everything is indexed. Always forcing costs a
+        # full re-embed of the corpus on every invocation: 4.8 hours for 6,637
+        # files in one field report, which is how a recovery command stops being
+        # run at all.
+        #
+        # An empty row count is precisely the condition that distinguishes them.
+        missing = _source_row_count(vault, source) == 0
+        recovered += missing
+        result = ingest.ingest(source, recursive=meta.get("recursive", True),
+                               force=missing)
         total += result.get("indexed", 0)
     if registry:
-        console.print(f"  [green]✓[/green]  {total} arquivos externos reingeridos "
-                      f"de {len(registry)} fonte(s)")
+        note = f" ({recovered} recuperada(s) do zero)" if recovered else " (nenhuma faltando)"
+        console.print(f"  [green]✓[/green]  {total} arquivo(s) externo(s) reindexado(s) "
+                      f"de {len(registry)} fonte(s){note}")
 
 
 def cmd_doctor(_args):

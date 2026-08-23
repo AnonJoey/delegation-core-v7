@@ -176,8 +176,23 @@ def _parse_transcript(transcript_path: str) -> list[dict]:
     return messages
 
 
+def _session_date(messages: list[dict]) -> str:
+    """The date the session STARTED, from its first timestamped message.
+
+    Not "today": a session resumed across midnight, or exported the morning
+    after, would otherwise be dated by when the export ran rather than by when
+    the conversation happened — and, while the filename carried that date, it
+    also produced a second note for a session already in the vault.
+    """
+    for m in messages:
+        ts = (m.get("ts") or "")[:10]
+        if len(ts) == 10 and ts[4] == "-":
+            return ts
+    return datetime.now().strftime("%Y-%m-%d")
+
+
 def _format_markdown(messages: list[dict], session_id: str, cwd: str) -> str:
-    date_str = datetime.now().strftime("%Y-%m-%d")
+    date_str = _session_date(messages)
     time_str = datetime.now().strftime("%H:%M")
     short_id = session_id[:8]
 
@@ -190,6 +205,7 @@ def _format_markdown(messages: list[dict], session_id: str, cwd: str) -> str:
         "---",
         f"title: {_yaml_quote_scalar(f'Raw transcript — {topic}')}",
         f"date: {date_str}",
+        f"exported_at: {datetime.now().isoformat(timespec='seconds')}",
         f"session_id: {session_id}",
         f"cwd: {cwd}",
         f"messages: {len(messages)}",
@@ -259,16 +275,21 @@ def main():
         sys.stderr.write("session_export: no messages found in transcript — skipping\n")
         sys.exit(0)
 
-    date_str = datetime.now().strftime("%Y-%m-%d")
     short_id = session_id[:8]
-    filename = f"{date_str}-transcript-{short_id}.md"
+    # The session id alone — no date prefix. The name has to be STABLE across
+    # exports of the same session, and a date makes it change the moment a
+    # session is resumed on another day. Combined with the old "skip if it
+    # exists" guard, that produced a fresh partial copy per day instead of one
+    # note per session: a field install had 111 transcripts for 47 real
+    # sessions, 891 duplicate chunks competing in every search. The date lives
+    # in frontmatter, where it can be the session's own start date.
+    filename = f"transcript-{short_id}.md"
     dest = sessions_dir / filename
 
-    # Don't overwrite if a file for this session already exists
-    if dest.exists():
-        sys.stderr.write(f"session_export: {filename} already exists — skipping\n")
-        sys.exit(0)
-
+    # No existence guard: re-exporting the same session must REPLACE its note,
+    # since the later export is the more complete one. The write below is atomic
+    # (.tmp + os.replace), so a crash mid-write cannot truncate the existing
+    # note either.
     content = _format_markdown(messages, session_id, cwd)
     try:
         tmp = dest.with_suffix(".tmp")

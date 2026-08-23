@@ -132,6 +132,16 @@ class Config:
     embed_max_seq_length: int = 2048
     embed_batch_size: int = 8
 
+    # ── v0.12: default search scope ──────────────────────────────────────────
+    # "" means adaptive — decided per vault from how much of it is generated.
+    # A fixed "notes" default was right for the vault it was measured on (3,692
+    # generated articles against 187 hand-written notes) and exactly wrong for a
+    # vault whose authoritative material is ingested: one field deployment had
+    # 6,637 external files invisible to the default every agent uses, and 3 of 4
+    # probe queries returned a raw transcript where scope='all' returned the
+    # authoritative document. Set explicitly to pin one scope for this machine.
+    default_search_scope: str = ""
+
     # ── v0.12: subkind ranking weights (raw vs curated) ──────────────────────
     # Dampens raw verbose transcripts/chat dumps so authoritative curated notes
     # rank higher when semantic similarity is close. Default 1.0 for curated.

@@ -96,6 +96,13 @@ def launchd_plist_text() -> str:
   <key>RunAtLoad</key><true/>
   <key>KeepAlive</key>
   <dict><key>SuccessfulExit</key><false/></dict>
+  <!-- Processes under launchd inherit maxfiles 256. This daemon walks tens of
+       thousands of files during ingest and holds a ChromaDB/SQLite index open
+       while doing it, so the default is a ceiling it has no reason to sit
+       under. Raising it is free; hitting it produces failures that look like
+       corruption rather than exhaustion. -->
+  <key>SoftResourceLimits</key>
+  <dict><key>NumberOfFiles</key><integer>16384</integer></dict>
 </dict>
 </plist>
 """
