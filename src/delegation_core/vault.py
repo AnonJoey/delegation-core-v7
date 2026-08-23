@@ -91,6 +91,37 @@ def _countable_wikilinks(content: str) -> list[str]:
     return out
 
 
+#: A note's filename begins with the date it was written — write_note builds
+#: `{date}-{safe title}.md`. Nobody writes that date when they link to the note:
+#: they write the title. So `[[Diagnóstico — notas do vault]]` never resolved
+#: against `2026-08-22-Diagnóstico — notas do vault.md`, and the vault
+#: accumulated "broken" links to notes that were sitting right there. Three of
+#: the first four broken links audited on this vault were this and nothing else.
+_DATE_PREFIX_RE = re.compile(r"^\d{4}-\d{2}-\d{2}[-_ ]")
+
+
+def link_names_for_stem(stem: str) -> set[str]:
+    """Every name a note with this filename stem can be linked by, lowercased.
+
+    The stem itself, plus the stem with its leading date stripped. Both are
+    returned so resolution stays additive — stripping the date never removes a
+    name, it only adds the one people actually type.
+
+    One function because the health pass and note_links() each built this set
+    themselves, and a set built twice is a set that disagrees with itself: the
+    backlinks panel called nine live targets missing while the health count did
+    not, which is the exact class of drift this centralises away.
+    """
+    s = (stem or "").strip().lower()
+    if not s:
+        return set()
+    names = {s}
+    stripped = _DATE_PREFIX_RE.sub("", s).strip()
+    if stripped:
+        names.add(stripped)
+    return names
+
+
 def resolve_in_vault(vault_root: Path, rel_path: str) -> Path | None:
     """Resolve *rel_path* under *vault_root*, or None if it escapes.
 
@@ -196,9 +227,26 @@ def compose_note(title: str, content: str, date_str: str) -> str:
         ("ai_generated", "true"),
     ]
 
+    # An alias carrying the untruncated title, when the filename could not.
+    # safe_filename cuts the stem at 50 characters, so a note titled "Palworld —
+    # mapa completo dos locais de mods no sistema" lands on disk as
+    # "...-Palworld — mapa completo dos locais de mods no.md" and a link written
+    # with the real title finds nothing. Stripping the date prefix at resolution
+    # time handles the common case; it cannot restore characters the filename
+    # never held. Added only when truncation actually happened, so the ordinary
+    # note does not carry an alias identical to its own name.
+    if len(safe_filename(title)) < len(safe_filename(title, max_len=10**6)):
+        generated.append(("aliases", "\n  - " + yaml_quote_scalar(title)))
+
+    # A block-list value carries its own newline, so it must not get the space a
+    # scalar needs after the colon — "aliases: \n" leaves trailing whitespace on
+    # a line that every YAML linter and half the diff tools flag.
+    def _emit(k, v):
+        return f"{k}:{v}" if v.startswith("\n") else f"{k}: {v}"
+
     m = _LEADING_FRONTMATTER_RE.match(body)
     if not m:
-        block = "\n".join(f"{k}: {v}" for k, v in generated)
+        block = "\n".join(_emit(k, v) for k, v in generated)
         return f"---\n{block}\n---\n\n{body}"
 
     supplied = m.group(1)
@@ -208,7 +256,7 @@ def compose_note(title: str, content: str, date_str: str) -> str:
         for line in supplied.splitlines()
         if ":" in line and line[:1] not in (" ", "\t", "-")
     }
-    additions = [f"{k}: {v}" for k, v in generated if k not in have]
+    additions = [_emit(k, v) for k, v in generated if k not in have]
     merged = supplied + ("\n" + "\n".join(additions) if additions else "")
     return f"---\n{merged}\n---\n\n{body[m.end():].lstrip(chr(10))}"
 
@@ -1088,7 +1136,8 @@ class VaultManager:
         for f in self.cfg.vault.rglob("*.md"):
             if any(part.startswith(".") for part in f.relative_to(self.cfg.vault).parts):
                 continue
-            targets.setdefault(f.name[:-3].strip().lower(), f)
+            for name in link_names_for_stem(f.name[:-3]):
+                targets.setdefault(name, f)
         for folder in self.cfg.vault_folders:
             root = self.cfg.vault / folder
             if not root.exists():
@@ -1138,7 +1187,8 @@ class VaultManager:
         # Iterate distinct files, not by_stem keys: an aliased note appears under
         # every one of its names, which listed it once per alias.
         # A link may address this note by stem or by any alias it declares.
-        own_names = {own_stem} | {a.lower() for a in frontmatter_aliases(own_text)}
+        own_names = link_names_for_stem(own_stem) | {
+            a.lower() for a in frontmatter_aliases(own_text)}
 
         # Iterate distinct files, not by_stem keys: an aliased note appears under
         # every one of its names, which listed it once per alias.
@@ -1305,7 +1355,7 @@ class VaultManager:
                 # .strip() trailing whitespace so resolution matches _countable_wikilinks,
                 # which strips link targets (a few ingested files have trailing-space names).
                 note_stem = f.name[:-3].strip()
-                resolvable.add(note_stem.lower())
+                resolvable.update(link_names_for_stem(note_stem))
                 resolvable.update(a.lower() for a in frontmatter_aliases(content))
                 notes.append({"stem": note_stem, "folder": folder, "content": content})
 
@@ -1318,9 +1368,7 @@ class VaultManager:
         for f in self.cfg.vault.rglob("*.md"):
             if any(part.startswith(".") for part in f.relative_to(self.cfg.vault).parts):
                 continue
-            stem = f.name[:-3].strip().lower()
-            if stem not in resolvable:
-                resolvable.add(stem)
+            resolvable.update(link_names_for_stem(f.name[:-3]))
 
         # Folder names (and the vault's own name) used as markers, lowercased.
         folder_markers = {f.lower() for f in self.cfg.vault_folders}

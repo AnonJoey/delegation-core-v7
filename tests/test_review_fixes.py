@@ -294,3 +294,54 @@ def test_the_cap_is_reasserted_per_encode_not_only_at_construction():
     assert "self._model.max_seq_length = self.max_seq_length" in body, (
         "the cap must be re-applied on the encode path, not just at construction"
     )
+
+
+# ── links are written by title; filenames are written by machine ─────────────
+
+def test_a_note_resolves_by_its_title_without_the_date_prefix():
+    """write_note builds "{date}-{safe title}.md" but nobody types the date when
+    linking — they type the title. Three of the first four broken links audited
+    on a real vault were this and nothing else: the target was sitting right
+    there under a dated filename."""
+    from delegation_core.vault import link_names_for_stem
+    names = link_names_for_stem("2026-08-22-Diagnóstico — notas do vault")
+    assert "diagnóstico — notas do vault" in names
+    assert "2026-08-22-diagnóstico — notas do vault" in names, "the real stem must survive"
+
+
+def test_stripping_the_date_never_removes_a_name():
+    from delegation_core.vault import link_names_for_stem
+    assert link_names_for_stem("no date here") == {"no date here"}
+    assert link_names_for_stem("") == set()
+
+
+def test_a_date_like_run_inside_a_title_is_not_stripped():
+    """Anchored at the start and followed by a separator, so a note *about* a
+    date keeps its name."""
+    from delegation_core.vault import link_names_for_stem
+    assert link_names_for_stem("notes on 2026-08-22 outage") == {"notes on 2026-08-22 outage"}
+
+
+def test_a_truncated_title_is_preserved_as_an_alias():
+    """safe_filename cuts the stem at 50 characters, and stripping the date
+    cannot restore characters the filename never held. The alias can."""
+    from delegation_core.vault import compose_note
+    long_title = "Palworld — mapa completo dos locais de mods no sistema (2026-08-18)"
+    out = compose_note(long_title, "## Summary\nx", "2026-08-18")
+    assert "aliases:" in out
+    assert long_title in out
+    assert "aliases: \n" not in out, "a block list must not leave a trailing space"
+
+
+def test_a_short_title_gets_no_redundant_alias():
+    from delegation_core.vault import compose_note
+    out = compose_note("Nota curta", "## Summary\nx", "2026-08-18")
+    assert "aliases:" not in out
+
+
+def test_a_caller_supplied_alias_block_still_wins():
+    from delegation_core.vault import compose_note
+    content = '---\naliases:\n  - "Meu Nome"\n---\n\n## Summary\nx'
+    out = compose_note("A" * 80, content, "2026-08-18")
+    assert out.count("aliases:") == 1
+    assert "Meu Nome" in out
