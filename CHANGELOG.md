@@ -1,5 +1,26 @@
 # Changelog
 
+## v0.12.3 — 2026-08-23
+
+### Fixed
+
+- **The service manager killed the daemon mid-write.** The generated systemd unit
+  set no `TimeoutStopSec`, so it inherited a stop ceiling far shorter than the
+  daemon's normal work — a full reindex or a relink pass runs for minutes.
+  Observed rather than theorised: a restart issued during a relink hit the 10s
+  ceiling on the reporting machine, SIGKILLed the process with ChromaDB
+  mid-operation, and the next two starts died with SIGSEGV inside
+  `chromadb_rust_bindings` on a tokio-rt-worker thread. Only the third came up.
+  The index survived, but that interruption is exactly what leaves HNSW segments
+  without their SQLite rows — the ghost-row failure this project already had to
+  defend search against. `TimeoutStopSec=600` now, and `ExitTimeOut` on the
+  launchd plist, whose default 20 seconds has the same problem.
+
+  This matters most during an upgrade, since the runbook asks for the daemon to
+  be stopped before the mandatory reindex.
+
+Tests: 692 → 694.
+
 ## v0.12.2 — 2026-08-23
 
 ### Fixed

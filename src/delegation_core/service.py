@@ -75,6 +75,21 @@ Type=simple
 ExecStart={_executable()} run
 Restart=on-failure
 RestartSec=5
+# The daemon writes to a ChromaDB index that cannot be interrupted safely, and
+# its normal work — a full reindex, a relink pass — runs for minutes. systemd's
+# default stop timeout is far shorter than that, and when it expires the daemon
+# is SIGKILLed mid-write.
+#
+# Observed, not theorised: a restart issued during a relink hit the 10s ceiling
+# on this machine, SIGKILLed the process with ChromaDB mid-operation, and the
+# next two starts died with SIGSEGV inside chromadb_rust_bindings on a
+# tokio-rt-worker thread. Only the third came up. The index survived, but the
+# same interruption is what leaves HNSW segments without their SQLite rows —
+# the ghost-row failure this project has already had to defend search against.
+#
+# Ten minutes is longer than any observed shutdown and still bounded, so a
+# genuinely wedged process is still reaped rather than hanging the stop forever.
+TimeoutStopSec=600
 
 [Install]
 WantedBy=default.target
@@ -103,6 +118,11 @@ def launchd_plist_text() -> str:
        corruption rather than exhaustion. -->
   <key>SoftResourceLimits</key>
   <dict><key>NumberOfFiles</key><integer>16384</integer></dict>
+  <!-- launchd's default is 20 seconds between SIGTERM and SIGKILL. This daemon
+       writes to a ChromaDB index during work that runs for minutes, and being
+       killed mid-write is what leaves HNSW segments without their SQLite rows.
+       The systemd unit carries the same reasoning at TimeoutStopSec. -->
+  <key>ExitTimeOut</key><integer>600</integer>
 </dict>
 </plist>
 """

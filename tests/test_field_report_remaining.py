@@ -136,3 +136,22 @@ def test_compress_injects_the_configured_language():
         "the prompt was hardcoded English while organizer honoured the setting, "
         "so a batch produced a bilingual vault by accident"
     )
+
+
+# ── the daemon must be allowed to finish writing before it is killed ─────────
+
+def test_the_systemd_unit_allows_a_long_shutdown():
+    """A restart issued during a relink hit systemd's 10s stop ceiling, SIGKILLed
+    the daemon with ChromaDB mid-write, and the next two starts died with SIGSEGV
+    inside chromadb_rust_bindings. Only the third came up."""
+    from delegation_core.service import systemd_unit_text
+    unit = systemd_unit_text()
+    assert "TimeoutStopSec=" in unit
+    value = int(unit.split("TimeoutStopSec=")[1].split()[0])
+    assert value >= 300, "shorter than a real reindex is no protection at all"
+
+
+def test_the_launchd_plist_allows_a_long_shutdown():
+    from delegation_core.service import launchd_plist_text
+    plist = launchd_plist_text()
+    assert "ExitTimeOut" in plist, "launchd's default is 20s between SIGTERM and SIGKILL"
