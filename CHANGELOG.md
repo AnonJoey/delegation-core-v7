@@ -1,5 +1,101 @@
 # Changelog
 
+## v0.12.1 — 2026-08-23
+
+Nineteen defects against v0.12.0, from three independent passes: a field report
+from a production install, a correctness review of the v0.12 diff, and an audit
+of the work those two produced. Four of them lost or hid data.
+
+### Fixed — data loss and silent failure
+
+- **Legacy-collection adoption ignored the vectors it was adopting.** The rename
+  of a pre-derivation collection to the model-derived name fired whenever the
+  expected collection was absent, without checking what had embedded the rows.
+  The common upgrade is also a model change: bge-base's 768-dim rows adopted
+  under bge-m3's 1024-dim function fail every query and upsert, and the original
+  index no longer sits under the name a downgrade would look for. Gated on the
+  vectors' measured dimension; an unmeasured model is left alone.
+
+- **`reindex` stopped re-ingesting external files.** v0.12's per-file mtime cache
+  made everything compare unchanged while the command still reported files
+  reingested — breaking precisely the recovery case it exists for. It now forces
+  the sources whose rows are actually gone, and only those: forcing all of them
+  costs a full re-embed on every invocation (4.8 hours for 6,637 files on the
+  reporting install), which is how a recovery command stops being run at all.
+
+- **A failed index write was recorded as a success.** `index_note` deletes a
+  note's rows before writing its new ones, so a failure mid-way left the note
+  with no rows — and `reindex_vault` stamped its mtime anyway, hiding it from
+  every later incremental run. It returns a status now; the stamp waits on it.
+
+- **Shortened notes kept their old tail.** `upsert` replaces and never removes,
+  so a note edited from twelve chunks to three left nine holding text from the
+  previous revision, answering searches with content in no file and invisible to
+  the orphan sweep because the note still existed on disk.
+
+- **Dataless detection condemned healthy filesystems.** `st_blocks == 0` is also
+  true of btrfs/ext4 inline-extent files and of mounts that report no block
+  count; there, every file graded as cloud-evicted and ingest indexed nothing.
+  It must now also fail to read a byte.
+
+- **Whitespace-only extraction passed the empty-text guard.** A file of blank
+  lines is a truthy string, so it reached the classifier — an LLM handed blank
+  text picks an arbitrary folder — and wrote an empty note into the vault.
+
+### Fixed — wrong answers
+
+- **`health_detail` answered from its first call for the life of the process**,
+  while its docstring promised the opposite. Repair a broken link, ask again,
+  and the same stale list came back.
+
+- **`search_vault`'s scope defaulted to `notes` on every install.** Right for the
+  vault it was measured on and exactly wrong for one whose authoritative corpus
+  is ingested: 6,637 external files hidden from the path every agent uses. Now
+  decided from the vault's composition, with `default_search_scope` to pin it.
+
+- **`status` looked up a hardcoded collection name**, so any install not on
+  bge-base reported a healthy index as uninitialised and advised a rebuild
+  costing hours. Its row count also no longer calls itself a note count.
+
+- **`compress` ignored `synthesis_lang`.** The prompt was hardcoded English while
+  organizer honoured the setting, so the local model chose per call — a batch
+  produced a bilingual vault by accident, reported as success every time.
+
+- **The out-of-memory matcher accepted any message containing "out of memory".**
+  Its handler moves the model to cpu permanently, so a coincidental match left
+  the process an order of magnitude slower with one log line to explain it.
+
+- **The sequence cap was set only at construction**, on a SentenceTransformer
+  shared across every embedding function over that model — the last one built
+  decided the sequence length for all of them.
+
+### Fixed — cost and hygiene
+
+- `delete_notes` was the one unbatched bulk delete, and its failure was silent.
+- The over-fetch cap could return fewer results than the caller asked for.
+- `vault_chunk_size` in characters overran the token window of smaller models,
+  reintroducing silent truncation at smaller scale. Derived from the model now.
+- `chunk_text` looped forever when overlap met or exceeded chunk size, and
+  emitted a redundant single-character tail chunk.
+- `ingest_forget` matched by string prefix and could delete a newer source's rows.
+- `collection.get()` is paged; ghost rows with null metadata no longer break search.
+- The transcript filename carried a date, so a session resumed on another day
+  wrote a second partial note: 111 transcripts for 47 sessions on one install.
+- The generated launchd plist let the daemon inherit `maxfiles 256`.
+- `status` shows where the running code loads from, since an editable install
+  serves the daemon out of a live working tree and nothing said so.
+
+### Documentation
+
+- `AGENT_GUIDE.md` described the old fixed search scope, and the installed copy
+  had drifted from the versioned one — the copy governing behaviour was the one
+  not under version control. All three copies are identical again.
+- The chunk collapse in `search()` applies to external rows, changing behaviour
+  that predates chunking. Recorded as a decision rather than left as a side
+  effect.
+
+Tests: 612 → 683.
+
 ## Unreleased
 
 ### Fixed
