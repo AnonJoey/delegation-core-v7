@@ -258,7 +258,7 @@ creating a duplicate note.
 
 ---
 
-### `relink_folder(folder, threshold=0.70)`
+### `relink_folder(folder, threshold=0.70)` / `relink_folder_bg(folder, ...)`
 Walk any vault subfolder and additively inject `[[wikilinks]]` into existing notes based on
 semantic similarity. Use after bulk imports or vault growth to materialise connections that
 did not exist at ingestion time. Strictly additive — never removes existing links.
@@ -267,6 +267,12 @@ Supports sub-paths (`meetings/Client/2026`).
 ```json
 → { "folder": "Reference", "relinked": 12, "links_added": 34 }
 ```
+
+**Use `relink_folder_bg` on any folder of real size.** The synchronous tool embeds
+every note in the folder against every other; on a 31-note folder that ran past the
+MCP client's 300-second idle timeout, which aborts the call and drops the connection
+while the server keeps working on a job nobody is listening for. The `_bg` variant
+returns a `job_id` immediately — poll it with `task_status`.
 
 **Run after a large maintenance pass** to densify the knowledge graph. Also called implicitly
 by `run_maintenance` for each processed folder.
@@ -395,7 +401,8 @@ Apply these without exception when delegation-core is online.
 | Vault needs rebuilding after bulk import | `vault_reindex_bg` → poll `task_status` |
 | Two notes might be duplicates | `vault_find_similar` |
 | User needs live/external web information | `search_vault` first, then `search_web` if vault empty |
-| User wants to cross-link an existing vault folder | `relink_folder` |
+| User wants to cross-link an existing vault folder (small) | `relink_folder` |
+| User wants to cross-link an existing vault folder (large) | `relink_folder_bg` → poll `task_status` |
 | User has an external folder to make searchable (small) | `ingest_folder` |
 | User has an external folder to make searchable (large) | `ingest_folder_bg` → poll `task_status` |
 | `heartbeat().vault_health.needs_repair > 5` | `run_maintenance_bg()` — heal pass runs automatically |
@@ -846,7 +853,8 @@ External folder (small)  → ingest_folder(<path>)
 External folder (large)  → ingest_folder_bg(<path>) → task_status(<id>)
 Check ingest status      → ingest_status()
 Search web               → search_web(<query>) → write_note if useful
-Cross-link a folder      → relink_folder(<folder>)
+Cross-link a folder      → relink_folder(<folder>)   [pequena]
+Cross-link a folder      → relink_folder_bg(<folder>) → task_status(<id>)   [grande]
 Vault repair backlog     → vault_health.needs_repair > 5 → run_maintenance_bg()
 Which links are broken   → vault_health_detail()   [nunca conte por script]
 Graph a codebase         → graph_preview(<path>, exclude=[...]) → graph_build_bg(same exclude)

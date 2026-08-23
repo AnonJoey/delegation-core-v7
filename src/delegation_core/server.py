@@ -161,6 +161,28 @@ def _confidence(top_sim: float, model_name: str) -> str:
     return "high" if top_sim >= high else "medium" if top_sim >= medium else "low"
 
 
+def _vault_subfolder_error(folder: str) -> str | None:
+    """Reject a folder argument that escapes the vault. None when it is safe.
+
+    relative_to(), not a string prefix check — str(target).startswith(str(root))
+    is bypassable whenever a sibling directory's name happens to start with the
+    vault root's own name (vault at .../vault and .../vault-old also exists:
+    "../vault-old/x" resolves outside the vault while the string still starts
+    with ".../vault"). Found and fixed in dashboard_api.py's identical check
+    first (2026-07-23 dashboard review); this is the same bug.
+
+    One function because every entry point taking a folder has to make this
+    check, and the one that forgets is a path-traversal hole rather than a bug
+    with a wrong number in it.
+    """
+    vault_root = _vault.cfg.vault.resolve()
+    try:
+        (vault_root / folder).resolve().relative_to(vault_root)
+    except ValueError:
+        return f"Invalid folder path: {folder}"
+    return None
+
+
 def _default_scope() -> str:
     """The scope to search when the caller did not name one.
 
@@ -811,18 +833,9 @@ async def relink_folder(
     folder: vault-relative subpath (e.g. 'meetings/Client/2026' or 'meetings')
     days: restrict to notes modified within last N days (None = all)
     """
-    vault_root = _vault.cfg.vault.resolve()
-    target = (vault_root / folder).resolve()
-    # relative_to(), not a string prefix check — str(target).startswith(str(vault_root))
-    # is bypassable whenever a sibling directory's name happens to start with
-    # the vault root's own name (vault at .../vault, and e.g. .../vault-old
-    # exists: "../vault-old/x" resolves outside the vault but the string still
-    # starts with ".../vault"). Found + fixed in dashboard_api.py's identical
-    # check first (2026-07-23 dashboard code review); this is the same bug.
-    try:
-        target.relative_to(vault_root)
-    except ValueError:
-        return json.dumps({"error": f"Invalid folder path: {folder}"})
+    err = _vault_subfolder_error(folder)
+    if err:
+        return json.dumps({"error": err})
     loop = asyncio.get_running_loop()
     try:
         results = await loop.run_in_executor(
@@ -833,6 +846,33 @@ async def relink_folder(
     except Exception as e:
         return json.dumps({"error": f"relink_folder failed: {e}"})
     return json.dumps(results)
+
+
+@mcp.tool()
+async def relink_folder_bg(
+    folder: str,
+    days: int | None = None,
+    min_similarity: float | None = None,
+    max_links_per_note: int = 8,
+) -> str:
+    """Cross-link a vault subfolder in the background. Returns a job_id immediately.
+
+    Prefer this over relink_folder on any folder of real size. The synchronous
+    tool embeds and compares every note in the folder against every other, which
+    on a 31-note folder ran past the MCP client's 300-second idle timeout: the
+    call was aborted client-side and the connection dropped, while the server
+    kept working and finished the job nobody was listening for any more. Work
+    that legitimately outlasts the caller's patience needs a job id, not a
+    longer wait — the same reason run_maintenance and ingest_folder have one.
+    """
+    err = _vault_subfolder_error(folder)
+    if err:
+        return json.dumps({"error": err})
+    job_id = jobs.submit("relink_folder", _relink_folder, _vault, folder,
+                         days=days, min_similarity=min_similarity,
+                         max_links_per_note=max_links_per_note)
+    return json.dumps({"job_id": job_id, "folder": folder, "status": "running",
+                       "message": "Relink started. Call task_status(job_id) to check progress."})
 
 
 @mcp.tool()
