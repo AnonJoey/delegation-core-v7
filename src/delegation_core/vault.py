@@ -311,6 +311,18 @@ class VaultManager:
                     path=str(self.cfg.chroma_path),
                     settings=chromadb.Settings(anonymized_telemetry=False),
                 )
+                try:
+                    existing_cols = [c.name for c in client.list_collections()]
+                    if self.cfg.collection_name not in existing_cols:
+                        for legacy_name in ("vault_bge", "vault_custom"):
+                            if legacy_name in existing_cols:
+                                leg = client.get_collection(legacy_name)
+                                logger.info("Renaming legacy collection %s to %s", legacy_name, self.cfg.collection_name)
+                                leg.modify(name=self.cfg.collection_name)
+                                break
+                except Exception as e:
+                    logger.warning("Legacy collection rename check failed: %s", e)
+
                 self.collection = client.get_or_create_collection(
                     name=self.cfg.collection_name,
                     embedding_function=self.ef,
@@ -369,15 +381,29 @@ class VaultManager:
         return "note", ""
 
     @classmethod
-    def note_metadata(cls, rel_path: str, title: str, folder: str) -> dict:
-        """Build the metadata row for a vault note, including its search scope.
+    def classify_subkind(cls, rel_path: str, content: str = "") -> str:
+        """Return subkind ('transcript', 'chat', 'generated', or 'curated') for a note."""
+        kind, _ = cls.classify_path(rel_path)
+        if kind == "generated":
+            return "generated"
+        p_lower = str(rel_path).lower()
+        if "transcript-" in p_lower or "session-transcript" in content[:600]:
+            return "transcript"
+        if "chat-" in p_lower or "claude-ai-export" in content[:600]:
+            return "chat"
+        return "curated"
+
+    @classmethod
+    def note_metadata(cls, rel_path: str, title: str, folder: str, content: str = "") -> dict:
+        """Build the metadata row for a vault note, including its search scope and subkind.
 
         Classmethod because it derives everything from the path — callers that
         only stand in for a VaultManager (write paths, tests) can use it without
         a live ChromaDB collection behind them.
         """
         kind, graph = cls.classify_path(rel_path)
-        meta = {"title": title, "path": rel_path, "folder": folder, "kind": kind}
+        subkind = cls.classify_subkind(rel_path, content)
+        meta = {"title": title, "path": rel_path, "folder": folder, "kind": kind, "subkind": subkind}
         if graph:
             meta["graph"] = graph
         return meta
@@ -448,9 +474,22 @@ class VaultManager:
             metas = (res.get("metadatas") or [[]])[0]
             dists = (res.get("distances") or [[]])[0]
             for doc, meta, dist in zip(docs, metas, dists):
-                sim = round(1 - dist, 3)
-                if sim < self.cfg.search_threshold:
+                # Ghost row defensive guard: skip orphaned HNSW vectors lacking SQLite metadata
+                if not meta:
                     continue
+                sim = round(1 - dist, 3)
+
+                # Subkind weighting: prioritize curated notes over raw transcripts/dumps
+                subkind = meta.get("subkind") or (
+                    "external" if str(meta.get("is_external", "")).lower() == "true"
+                    else ("generated" if meta.get("kind") == "generated" else "curated")
+                )
+                weights = getattr(self.cfg, "subkind_weights", {}) or {}
+                weight = weights.get(subkind, 1.0)
+                effective_sim = round(sim * weight, 3)
+                if effective_sim < self.cfg.search_threshold:
+                    continue
+
                 # The doc id carries the chunk index; metadata['path'] never
                 # does, which is what lets callers feed a hit's path straight
                 # back to the filesystem (merger, linker, the dashboard all do).
@@ -467,8 +506,9 @@ class VaultManager:
                     "path":       path,
                     "folder":     meta.get("folder", ""),
                     "kind":       kind,
+                    "subkind":    subkind,
                     "snippet":    doc[:max(snippet_chars, 0)],
-                    "similarity": sim,
+                    "similarity": effective_sim,
                 })
                 if len(hits) >= want:
                     break
@@ -524,7 +564,8 @@ class VaultManager:
         )
         if classifiable:
             kind, graph = self.classify_path(metadata.get("path", ""))
-            metadata = {**metadata, "kind": kind}
+            subkind = metadata.get("subkind") or self.classify_subkind(metadata.get("path", ""), content)
+            metadata = {**metadata, "kind": kind, "subkind": subkind}
             if graph:
                 metadata["graph"] = graph
 
@@ -648,7 +689,29 @@ class VaultManager:
         except Exception as e:
             logger.warning("Could not save index state: %s", e)
 
-    # ── reindex ───────────────────────────────────────────────────────────────
+    def _paged_get(self, limit: int = 5000, **kwargs) -> dict:
+        """Safely fetch all matching rows from ChromaDB in batches to prevent SQLite variable limits."""
+        if not self.collection:
+            return {"ids": [], "metadatas": []}
+        offset = 0
+        all_ids = []
+        all_metas = []
+        try:
+            while True:
+                chunk = self.collection.get(limit=limit, offset=offset, **kwargs)
+                ids = chunk.get("ids") or []
+                if not ids:
+                    break
+                all_ids.extend(ids)
+                if "metadatas" in kwargs.get("include", []):
+                    all_metas.extend(chunk.get("metadatas") or [])
+                if len(ids) < limit:
+                    break
+                offset += len(ids)
+            return {"ids": all_ids, "metadatas": all_metas}
+        except TypeError:
+            # Fallback for test mocks or custom wrappers
+            return self.collection.get(**kwargs)
 
     def reindex_vault(self, force: bool = False) -> int:
         """Reindex markdown notes in configured vault folders.
@@ -727,7 +790,7 @@ class VaultManager:
                 # rows by absolute source path while a vault note is always
                 # relative, which is the same test index_note uses to decide
                 # whether a path can be classified at all.
-                existing = self.collection.get(include=["metadatas"])
+                existing = self._paged_get(include=["metadatas"])
                 existing_ids = existing.get("ids") or []
                 existing_metas = existing.get("metadatas") or []
                 orphans = []
@@ -745,7 +808,10 @@ class VaultManager:
                     orphans.append(i)
                     orphan_bases.add(base)
                 if orphans:
-                    self.collection.delete(ids=orphans)
+                    # Delete in batches of 5000 to prevent SQLite variable limits
+                    batch_size = 5000
+                    for b in range(0, len(orphans), batch_size):
+                        self.collection.delete(ids=orphans[b:b + batch_size])
                     self._disk_state = self._read_disk_state()
                 # Remove orphan entries from saved state — keyed by the note's
                 # path, so popping the chunk id would leave every entry behind.
@@ -1397,7 +1463,7 @@ class VaultManager:
             return 0, 0
         rows = self.collection.count()
         try:
-            ids = self.collection.get(include=[]).get("ids") or []
+            ids = self._paged_get(include=[]).get("ids") or []
         except Exception as e:
             logger.warning("Could not count distinct indexed notes: %s", e)
             return rows, rows

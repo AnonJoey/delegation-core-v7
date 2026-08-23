@@ -33,10 +33,55 @@ SUPPORTED: frozenset[str] = frozenset({
 })
 
 
+class DatalessFileError(OSError):
+    """File is evicted to the cloud (iCloud, OneDrive, Dropbox) and has st_blocks==0."""
+    pass
+
+
+class UnreadableFileError(Exception):
+    """File could not be parsed or decoded."""
+    pass
+
+
+def is_dataless(path: Path) -> bool:
+    """Return True if a file exists on disk but its content is evicted to cloud storage."""
+    try:
+        st = path.stat()
+        if st.st_size > 0 and getattr(st, "st_blocks", 1) == 0:
+            return True
+        flags = getattr(st, "st_flags", 0)
+        if flags & 0x40000000:  # UF_DATALESS / SF_DATALESS on BSD/macOS
+            return True
+    except Exception:
+        pass
+    return False
+
+
+def materialize_if_dataless(path: Path, timeout: float = 10.0) -> bool:
+    """Attempt to trigger on-demand cloud file download if dataless. Returns True if readable."""
+    if not is_dataless(path):
+        return True
+    try:
+        import shutil, subprocess
+        if shutil.which("brctl"):
+            subprocess.run(["brctl", "download", str(path)], timeout=timeout, capture_output=True)
+    except Exception:
+        pass
+    try:
+        with open(path, "rb") as f:
+            f.read(1)
+        return not is_dataless(path)
+    except Exception as e:
+        logger.warning("Failed to materialize dataless file %s: %s", path.name, e)
+        return False
+
+
 def extract(path: Path) -> str | None:
     """
     Return extracted plain text from path.
-    Returns None if the format is unsupported or extraction fails.
+    Raises DatalessFileError if evicted to cloud and cannot be materialized.
+    Raises UnreadableFileError if parsing fails.
+    Returns None if format is unsupported.
     """
     suffix = path.suffix.lower()
     _map = {
@@ -56,12 +101,17 @@ def extract(path: Path) -> str | None:
     fn = _map.get(suffix)
     if fn is None:
         return None
+
+    if is_dataless(path) and not materialize_if_dataless(path):
+        raise DatalessFileError(f"File {path.name} is evicted to cloud storage (dataless)")
+
     try:
         result = fn(path)
-        return result if result and result.strip() else None
+        return result if result is not None else ""
     except Exception as e:
         logger.warning("Extraction failed for %s: %s", path.name, e)
-        return None
+        raise UnreadableFileError(f"Extraction failed for {path.name}: {e}") from e
+
 
 
 def format_label(path: Path) -> str:

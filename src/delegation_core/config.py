@@ -132,6 +132,17 @@ class Config:
     embed_max_seq_length: int = 2048
     embed_batch_size: int = 8
 
+    # ── v0.12: subkind ranking weights (raw vs curated) ──────────────────────
+    # Dampens raw verbose transcripts/chat dumps so authoritative curated notes
+    # rank higher when semantic similarity is close. Default 1.0 for curated.
+    subkind_weights: dict = field(default_factory=lambda: {
+        "curated": 1.0,
+        "chat": 0.98,
+        "transcript": 0.95,
+        "generated": 1.0,
+        "external": 1.0,
+    })
+
     # ── v0.3: recursive note splitting ───────────────────────────────────────
     # Files larger than split_min_chars trigger the three-tier split strategy.
     # PDFs with > 1 extractable page are always split regardless of char count.
