@@ -219,13 +219,35 @@ def effective_chunk_chars(model_name: str, requested_chars: int,
 def _is_out_of_memory(exc: BaseException) -> bool:
     """True for an accelerator out-of-memory failure.
 
-    Matched by class *name* and message rather than by importing
-    torch.cuda.OutOfMemoryError, so this module keeps working — and keeps its
-    lazy-import discipline — on a box where torch is CPU-only or absent.
+    Three tiers, narrowest first, because a false positive here is expensive:
+    the caller's response is to move the model to cpu permanently, so anything
+    this wrongly accepts leaves the process quietly ~20x slower with only a log
+    line to explain it.
+
+    1. isinstance against torch's real exception, but only if torch is ALREADY
+       imported. sys.modules is consulted rather than `import torch` so the
+       module keeps its lazy-import discipline and still works where torch is
+       absent — and if we are far enough along to be encoding on a GPU, torch is
+       loaded by definition.
+    2. Class name, for accelerator backends that define their own.
+    3. Message text — needed because older torch raised a plain RuntimeError
+       ("CUDA out of memory. Tried to allocate ...") — but requiring an
+       accelerator to be named alongside the phrase. A bare "out of memory" from
+       anywhere else in the stack used to be enough to trigger the fallback.
     """
+    import sys
+    torch = sys.modules.get("torch")
+    if torch is not None:
+        for name in ("OutOfMemoryError",):
+            exc_type = getattr(torch.cuda, name, None) if hasattr(torch, "cuda") else None
+            if exc_type is not None and isinstance(exc, exc_type):
+                return True
     if type(exc).__name__ in ("OutOfMemoryError", "CudaOutOfMemoryError"):
         return True
-    return "out of memory" in str(exc).lower()
+    text = str(exc).lower()
+    if "out of memory" not in text:
+        return False
+    return any(tag in text for tag in ("cuda", "gpu", "hip", "mps", "device"))
 
 
 #: Cache of the generated subclass, keyed by the base class it was built from.
@@ -297,6 +319,15 @@ def _limited_embedding_function_class(base: type) -> type:
             encode_kwargs = {}
             if self.batch_size:
                 encode_kwargs["batch_size"] = self.batch_size
+            # Re-assert the cap here, not only at construction. STEF keys cached
+            # SentenceTransformer instances by model name in a class-level dict,
+            # so every EF over one model shares an instance — and setting the cap
+            # only in __init__ meant the last EF constructed silently decided the
+            # sequence length for all of them. Applying it per encode makes each
+            # EF get its own cap whoever built last, and costs an attribute
+            # compare on a path that is about to run a transformer.
+            if self.max_seq_length and getattr(self._model, "max_seq_length", None) != self.max_seq_length:
+                self._model.max_seq_length = self.max_seq_length
             vectors = self._model.encode(
                 documents,
                 convert_to_numpy=True,
@@ -320,9 +351,16 @@ def _limited_embedding_function_class(base: type) -> type:
                 # bounces back to the GPU per call would just OOM again on the next one.
                 if self.device == "cpu" or not _is_out_of_memory(e):
                     raise
-                logger.warning(
-                    "Embedding encode ran out of memory on %s (%s) — moving the model "
-                    "to cpu for the rest of this process", self.device, e,
+                # ERROR, not WARNING, and it says what the consequence is. This
+                # is the one branch that permanently changes how fast the whole
+                # process runs; a line that reads as routine is how a machine
+                # ends up mysteriously an order of magnitude slower with nobody
+                # able to say when it started.
+                logger.error(
+                    "Embedding encode ran out of memory on %s (%s). Moving the model to "
+                    "cpu PERMANENTLY for this process — embedding will be far slower "
+                    "until it restarts. Lower embed_batch_size or embed_max_seq_length, "
+                    "or free the accelerator, to avoid this.", self.device, e,
                 )
                 self._model.to("cpu")
                 self.device = "cpu"

@@ -492,6 +492,16 @@ class VaultManager:
         collapsed by note path, keeping each note's best-scoring chunk (rows come
         back sorted by distance, so the first one seen wins) and that chunk's
         snippet, which is the passage that actually matched.
+
+        The collapse deliberately applies to EXTERNAL rows too, which changes
+        behaviour that predates chunking: ingest.py has always split external
+        files into ::chunk_N rows, so scope='external' and graph='<name>' could
+        previously answer a limit of 5 with five fragments of one file. They now
+        return five distinct documents. This is a decision, not a side effect —
+        `limit` means "how many documents do you want", and a caller asking for
+        five sources and receiving one source five times was never the useful
+        reading. Anything wanting the individual passages of a single document
+        should read it, not search for it.
         """
         self._ensure_ready()
         if not self.collection:

@@ -254,3 +254,43 @@ def test_health_detail_reflects_a_change_made_between_calls(tmp_path):
 
     second = vm.health_detail()
     assert second["broken_links"] == 0, "a second call must re-read the vault"
+
+
+# ── the OOM matcher must not condemn the process on a coincidence ────────────
+
+def test_a_generic_out_of_memory_is_not_an_accelerator_oom():
+    """The response to a match is moving the model to cpu permanently, so a
+    false positive leaves the process ~20x slower with one log line to explain
+    it. A bare "out of memory" from anywhere in the stack used to be enough."""
+    from delegation_core.embeddings import _is_out_of_memory
+    assert _is_out_of_memory(RuntimeError("sqlite: out of memory")) is False
+    assert _is_out_of_memory(RuntimeError("corrupt weights")) is False
+
+
+def test_a_real_cuda_oom_is_matched_by_message():
+    from delegation_core.embeddings import _is_out_of_memory
+    assert _is_out_of_memory(
+        RuntimeError("CUDA out of memory. Tried to allocate 32.00 GiB")) is True
+
+
+def test_a_real_oom_is_matched_by_class_name():
+    from delegation_core.embeddings import _is_out_of_memory
+
+    class OutOfMemoryError(Exception):
+        pass
+
+    assert _is_out_of_memory(OutOfMemoryError("whatever")) is True
+
+
+# ── the sequence cap must not be decided by whoever constructed last ────────
+
+def test_the_cap_is_reasserted_per_encode_not_only_at_construction():
+    """STEF caches one SentenceTransformer per model name, so every EF over a
+    model shares the instance. Setting the cap only in __init__ let the last EF
+    built silently decide the sequence length for all of them."""
+    source = (Path(__file__).resolve().parent.parent
+              / "src" / "delegation_core" / "embeddings.py").read_text(encoding="utf-8")
+    body = source[source.index("def _encode(self, documents"):][:1400]
+    assert "self._model.max_seq_length = self.max_seq_length" in body, (
+        "the cap must be re-applied on the encode path, not just at construction"
+    )

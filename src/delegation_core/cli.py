@@ -251,6 +251,19 @@ def cmd_status(_args):
             llama_str = f"[dim]offline — {on_demand}[/dim]  ({cfg.llama_url})"
     table.add_row("llama.cpp", llama_str)
 
+    # Where the running code actually comes from. An editable install serves the
+    # daemon straight out of a working tree, so an uncommitted edit is one
+    # service restart away from production and nothing anywhere says so. Showing
+    # the path does not prevent that, but it stops it being invisible.
+    try:
+        import delegation_core as _pkg
+        origin = Path(_pkg.__file__).resolve().parent
+        editable = not any(part == "site-packages" for part in origin.parts)
+        table.add_row("code", f"{origin}" + ("  [yellow](editable — live working tree)[/yellow]"
+                                             if editable else ""))
+    except Exception:
+        pass
+
     try:
         import chromadb
         client = chromadb.PersistentClient(path=str(cfg.chroma_path))
@@ -261,7 +274,10 @@ def cmd_status(_args):
         # reindex" over a perfectly healthy index — recommending a rebuild that
         # costs hours on a real vault.
         col = client.get_collection(cfg.collection_name)
-        table.add_row("ChromaDB", f"[green]✓[/green]  {col.count()} notes indexed")
+        # "rows", not "notes": since v0.12 a note is one row per chunk, so this
+        # number runs well ahead of the note count and calling it notes invites
+        # exactly the wrong conclusion about the size of the vault.
+        table.add_row("ChromaDB", f"[green]✓[/green]  {col.count()} rows indexed")
     except Exception:
         table.add_row("ChromaDB", "[dim]not initialized — run: delegation-core reindex[/dim]")
 
