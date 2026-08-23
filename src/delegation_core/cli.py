@@ -857,7 +857,13 @@ def _reindex_everything(console, cfg):
     ingest = IngestManager(vault)
     total = 0
     for source, meta in registry.items():
-        result = ingest.ingest(source, recursive=meta.get("recursive", True))
+        # force=True: reindex exists to REBUILD. v0.12 gave ingest a per-file
+        # mtime+size cache, so without this every file compares as unchanged and
+        # the command re-embeds nothing — precisely when it is being run to
+        # recover, after a Chroma rebuild or an embed-model switch left the new
+        # collection with zero external rows while the registry insists they are
+        # all indexed.
+        result = ingest.ingest(source, recursive=meta.get("recursive", True), force=True)
         total += result.get("indexed", 0)
     if registry:
         console.print(f"  [green]✓[/green]  {total} arquivos externos reingeridos "

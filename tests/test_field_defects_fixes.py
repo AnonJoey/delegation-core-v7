@@ -88,12 +88,27 @@ def test_ingest_counters_and_incremental(test_cfg, tmp_path):
     assert res1["skipped_unchanged"] == 0
     assert len(vault.indexed) == 1
 
-    # Second ingest: unchanged normal.txt should be skipped incrementally
+    # Second ingest: unchanged normal.txt should be skipped incrementally.
+    # `indexed` counts what was actually embedded on THIS run, so it drops to 0
+    # while skipped_unchanged accounts for the file. Counting the skip as an
+    # index made the reported number indistinguishable between "re-embedded N"
+    # and "embedded nothing, N were already present" — and the second is the
+    # case an operator running reindex for recovery has to be able to see.
     vault.indexed.clear()
     res2 = mgr.ingest(str(src))
-    assert res2["indexed"] == 1
+    assert res2["indexed"] == 0
     assert res2["skipped_unchanged"] == 1
     assert len(vault.indexed) == 0  # no re-embedding!
+    assert res2["indexed"] == len(vault.indexed), (
+        "the reported count must match what was actually embedded"
+    )
+
+    # force=True bypasses the cache — the recovery path the reindex command uses.
+    vault.indexed.clear()
+    res3 = mgr.ingest(str(src), force=True)
+    assert res3["indexed"] == 1
+    assert res3["skipped_unchanged"] == 0
+    assert len(vault.indexed) == 1
 
 
 def test_forget_strict_path_containment(test_cfg, tmp_path):

@@ -314,7 +314,13 @@ async def run(engine, vault_manager) -> dict:
     for f in inbox_files:
         try:
             raw_text = extract(f)
-            if not raw_text:
+            # .strip(), not just falsiness: extract() returns the file's bytes
+            # verbatim for text formats, so a file of nothing but blank lines is
+            # a truthy "\n\n\n" and sailed past a bare `if not raw_text`. It then
+            # reached classify() — an LLM handed blank text picks an arbitrary
+            # folder — and synthesize(), writing an empty note into the vault.
+            # ingest.py has always checked .strip() here; this path had not.
+            if not raw_text or not raw_text.strip():
                 results["errors"].append(f"{f.name}: extraction returned no text (scanned or protected?)")
                 shutil.move(str(f), str(failed / f.name))
                 continue

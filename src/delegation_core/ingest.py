@@ -142,8 +142,12 @@ class IngestManager:
                 c_info = cached_files[f_str]
                 if isinstance(c_info, (list, tuple)) and len(c_info) >= 2:
                     if c_info[0] == f_mtime and c_info[1] == f_size:
+                        # Counted as unchanged, NOT as indexed. Reporting a skip
+                        # as an index made "N arquivos reingeridos" indistinguishable
+                        # from "N arquivos already present" — the number stayed
+                        # plausible on a run that embedded nothing at all, which is
+                        # the one case where the operator needs to know.
                         skipped_unchanged.append(f_str)
-                        indexed.append(f_str)
                         new_cached_files[f_str] = [f_mtime, f_size]
                         continue
 

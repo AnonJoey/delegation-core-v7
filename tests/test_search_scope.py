@@ -144,16 +144,26 @@ def test_the_over_fetch_is_bounded_at_both_ends(vm):
         fetched.append(vm.collection.last_kwargs["n_results"])
 
     assert min(fetched) >= 20, "a small limit must still get a usable floor of rows"
-    assert max(fetched) <= 60, "the over-fetch must be capped, not proportional forever"
     assert fetched == sorted(fetched), "the fetch must not shrink as the limit grows"
     assert fetched[1] < fetched[3], "and it must still scale with the limit in between"
-    # The cap is below some reachable limits, so a caller asking for more notes
-    # than the cap can be short-changed. That predates chunking (the scoped path
-    # has capped at 60 since scoping landed) and every in-repo caller asks for
-    # 20 or fewer; pinned here so a later change to the cap is a deliberate one.
+    # The 4x multiplier is capped at 60 — that is the pathological-fetch guard,
+    # and it binds across the whole range in-repo callers actually use.
     for limit in (1, 5, 10, 20):
         vm.search("q", limit=limit)
+        assert vm.collection.last_kwargs["n_results"] <= 60
+
+    # But the cap never drops the fetch below the ask. A caller requesting 100
+    # used to be answered from 60 rows, which chunk collapsing then folded into
+    # even fewer notes — fewer results than the same call returned before
+    # chunking existed, with nothing in the response saying the fetch was
+    # capped. The multiplier stays bounded; the ask itself is honoured.
+    for limit in (1, 5, 10, 20, 100, 500):
+        vm.search("q", limit=limit)
         assert vm.collection.last_kwargs["n_results"] >= limit
+    vm.search("q", limit=100)
+    assert vm.collection.last_kwargs["n_results"] == 100, (
+        "past the cap the fetch should track the ask exactly, not 4x it"
+    )
 
 
 # ── chunk collapsing (v0.12) ─────────────────────────────────────────────────

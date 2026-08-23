@@ -43,15 +43,38 @@ class UnreadableFileError(Exception):
     pass
 
 
+def _first_byte_readable(path: Path) -> bool:
+    """True when one byte comes back off the file without blocking on a download.
+
+    The discriminator between a genuinely evicted file and a filesystem that
+    simply does not report block counts: an evicted file raises (commonly
+    EDEADLK, "Resource deadlock avoided", under launchd) or yields nothing,
+    while an inline-extent file on btrfs/ext4 reads back normally.
+    """
+    try:
+        with open(path, "rb") as f:
+            return bool(f.read(1))
+    except Exception:
+        return False
+
+
 def is_dataless(path: Path) -> bool:
     """Return True if a file exists on disk but its content is evicted to cloud storage."""
     try:
         st = path.stat()
-        if st.st_size > 0 and getattr(st, "st_blocks", 1) == 0:
-            return True
+        # st_blocks == 0 on a non-empty file means "evicted to the cloud" only
+        # where the filesystem allocates blocks for content at all. btrfs and
+        # ext4 store small files inline in metadata, and FUSE/network mounts
+        # frequently report no block count — on those, a bare st_blocks test
+        # grades an entire healthy tree as dataless, materialize fails to move
+        # the number, and ingest reports every file skipped_dataless while
+        # indexing nothing. The flag below is the authoritative macOS signal;
+        # st_blocks is a fallback, so it must also fail to actually read.
         flags = getattr(st, "st_flags", 0)
         if flags & 0x40000000:  # UF_DATALESS / SF_DATALESS on BSD/macOS
             return True
+        if st.st_size > 0 and getattr(st, "st_blocks", 1) == 0:
+            return not _first_byte_readable(path)
     except Exception:
         pass
     return False

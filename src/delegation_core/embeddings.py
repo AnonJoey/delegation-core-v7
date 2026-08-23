@@ -181,6 +181,41 @@ def _effective_max_seq_length(model_name: str, requested: int | None) -> int | N
     return requested
 
 
+#: Chars per token to assume when converting a token ceiling into a character
+#: budget. Deliberately a FLOOR, not an average: for the ratio to protect
+#: anything it has to hold for the densest text in the corpus, and dense text
+#: tokenizes at fewer characters per token. Portuguese and code-heavy markdown
+#: both sit below the ~4.0 that English prose averages, so 3.0 leaves margin.
+_CHARS_PER_TOKEN_FLOOR = 3.0
+
+
+def effective_chunk_chars(model_name: str, requested_chars: int,
+                          max_seq_length: int | None) -> int:
+    """Clamp a character-sized chunk to what the model's token window can hold.
+
+    Chunk size is configured in characters because chunk_text splits on
+    characters; the model's limit is in tokens. Nothing reconciled the two, so a
+    4000-character chunk — around 1000 English tokens, more in Portuguese — was
+    fine under bge-m3's window and silently cut in half under bge-base-en-v1.5,
+    whose window is 512. That is the very bug chunking exists to fix, returning
+    at a smaller scale: the tail of every chunk simply never reaches the index.
+
+    Returns the character budget to actually chunk with.
+    """
+    ceiling = _effective_max_seq_length(model_name, max_seq_length)
+    if not ceiling or requested_chars <= 0:
+        return requested_chars
+    budget = int(ceiling * _CHARS_PER_TOKEN_FLOOR)
+    if budget < requested_chars:
+        logger.info(
+            "Chunk size %d chars exceeds what %s can embed at %d tokens — "
+            "chunking at %d chars instead",
+            requested_chars, model_name, ceiling, budget,
+        )
+        return budget
+    return requested_chars
+
+
 def _is_out_of_memory(exc: BaseException) -> bool:
     """True for an accelerator out-of-memory failure.
 

@@ -36,7 +36,12 @@ from datetime import datetime
 from pathlib import Path, PurePosixPath, PureWindowsPath
 
 from .config import Config
-from .embeddings import chunk_text, make_bge_embedding_function
+from .embeddings import (
+    chunk_text,
+    effective_chunk_chars,
+    make_bge_embedding_function,
+    profile_for,
+)
 from .linker import frontmatter_aliases
 
 logger = logging.getLogger("vault")
@@ -312,14 +317,7 @@ class VaultManager:
                     settings=chromadb.Settings(anonymized_telemetry=False),
                 )
                 try:
-                    existing_cols = [c.name for c in client.list_collections()]
-                    if self.cfg.collection_name not in existing_cols:
-                        for legacy_name in ("vault_bge", "vault_custom"):
-                            if legacy_name in existing_cols:
-                                leg = client.get_collection(legacy_name)
-                                logger.info("Renaming legacy collection %s to %s", legacy_name, self.cfg.collection_name)
-                                leg.modify(name=self.cfg.collection_name)
-                                break
+                    self._adopt_legacy_collection(client)
                 except Exception as e:
                     logger.warning("Legacy collection rename check failed: %s", e)
 
@@ -337,6 +335,64 @@ class VaultManager:
             # change on the next call rather than being missed for the session.
             self._disk_state = self._read_disk_state()
             self._initialized = True  # only reached on successful init
+
+    def _adopt_legacy_collection(self, client) -> None:
+        """Rename a pre-derivation collection to the model-derived name, if compatible.
+
+        Older installs kept the index under one hardcoded name. The name is
+        derived from the embedding model now, so on upgrade those rows went
+        invisible and the server quietly built an empty collection beside them.
+
+        The adoption is gated on VECTOR DIMENSION, not merely on the old name
+        being present, because the common upgrade is also a model change. A
+        vault embedded with bge-base-en-v1.5 lives in a collection literally
+        named `vault_bge` and holds 768-dim vectors; adopted under bge-m3's
+        1024-dim embedding function, every query and upsert then fails on a
+        dimension mismatch — and the original index no longer sits under the
+        name a downgrade would look for, so the escape hatch is gone too.
+        MODEL_PROFILES annotates `vault_bge` as "historical name — do not
+        rename, it holds existing data", and Config.collection_name promises
+        the other index survives a model switch. Both hold only while this
+        check does.
+
+        An unmeasured model (no profile `dim`) is left alone rather than
+        adopted on faith: a wrong adoption is unrecoverable, a skipped one
+        costs a reindex.
+        """
+        existing = [c.name for c in client.list_collections()]
+        if self.cfg.collection_name in existing:
+            return
+        want_dim = profile_for(self.cfg.bge_model).get("dim")
+        for legacy_name in ("vault_bge", "vault_custom"):
+            if legacy_name not in existing:
+                continue
+            leg = client.get_collection(legacy_name)
+            probe = leg.get(limit=1, include=["embeddings"])
+            vectors = probe.get("embeddings")
+            have_dim = len(vectors[0]) if vectors is not None and len(vectors) else None
+            if have_dim is None:
+                logger.info("Legacy collection %s is empty — nothing to adopt", legacy_name)
+                return
+            if want_dim is None:
+                logger.warning(
+                    "Legacy collection %s holds %d-dim vectors and %s has no measured "
+                    "dimension — not adopting it. Reindex to build %s from scratch.",
+                    legacy_name, have_dim, self.cfg.bge_model, self.cfg.collection_name,
+                )
+                return
+            if have_dim != want_dim:
+                logger.warning(
+                    "Legacy collection %s holds %d-dim vectors but %s produces %d — "
+                    "not adopting it. The old index is intact under its own name: "
+                    "set bge_model back to reach it, or reindex to rebuild %s.",
+                    legacy_name, have_dim, self.cfg.bge_model, want_dim,
+                    self.cfg.collection_name,
+                )
+                return
+            logger.info("Adopting legacy collection %s as %s (%d-dim)",
+                        legacy_name, self.cfg.collection_name, have_dim)
+            leg.modify(name=self.cfg.collection_name)
+            return
 
     def _ensure_ready(self):
         if not self._initialized:
@@ -461,7 +517,11 @@ class VaultManager:
         # merge/relink call it with 5) from being answered entirely out of one
         # long note's chunks; the cap keeps a query off a pathological fetch,
         # since every returned row carries up to vault_chunk_size of document.
-        n_results = min(max(want * 4, 20), 60)
+        # The ceiling never drops below `want` itself: a caller asking for 100
+        # would otherwise be answered from 60 rows, collapse them by path, and
+        # receive fewer results than before chunking existed — silently, since
+        # nothing in the response says the fetch was capped.
+        n_results = min(max(want * 4, 20), max(60, want))
 
         try:
             kwargs = {"query_texts": [query], "n_results": n_results}
@@ -518,8 +578,16 @@ class VaultManager:
 
     # ── write / index ────────────────────────────────────────────────────────
 
-    def index_note(self, content: str, metadata: dict, doc_id: str = ""):
-        """Upsert content into ChromaDB.
+    def index_note(self, content: str, metadata: dict, doc_id: str = "") -> bool:
+        """Upsert content into ChromaDB. Returns True when the rows landed.
+
+        The return value matters because this method now DELETES a note's
+        existing rows before writing its new ones. If the delete lands and the
+        upsert then fails, the note has no rows at all — before chunking, a
+        failed write merely left the previous row in place, so the failure mode
+        was stale content rather than disappearance. reindex_vault stamps a
+        note's mtime as current only on True; stamping unconditionally would
+        make every later incremental run skip the note it just lost.
 
         doc_id: explicit ID for chunked external files (IngestManager).
         Defaults to metadata['path'] so vault notes are keyed by their vault-relative path.
@@ -545,7 +613,7 @@ class VaultManager:
         """
         self._ensure_ready()
         if not self.collection:
-            return
+            return False
         # Only vault-relative paths can be classified. External content scopes on
         # is_external, and an absolute path must never be stamped: classify_path
         # grades anything it cannot recognise as hand-written, which would file
@@ -580,8 +648,15 @@ class VaultManager:
             and str(metadata.get("is_external", "")).lower() != "true"
         )
         if chunkable:
+            # The configured size is in characters, the model's limit in tokens;
+            # reconcile them here or a chunk sized for one model gets quietly
+            # truncated by another (4000 chars against bge-base's 512-token
+            # window loses roughly half of every chunk).
             chunks = chunk_text(content,
-                                max_chars=self.cfg.vault_chunk_size,
+                                max_chars=effective_chunk_chars(
+                                    self.cfg.bge_model,
+                                    self.cfg.vault_chunk_size,
+                                    self.cfg.embed_max_seq_length),
                                 overlap=self.cfg.vault_chunk_overlap)
             total = str(len(chunks))
             # ::chunk_0 even when there is exactly one chunk, unlike ingest.py's
@@ -618,6 +693,8 @@ class VaultManager:
                 self._disk_state = self._read_disk_state()
         except Exception as e:
             logger.warning("Index error: %s", e)
+            return False
+        return True
 
     def delete_notes(self, rel_paths: list[str]) -> int:
         """Drop notes from ChromaDB and the incremental index state by vault-relative path.
@@ -642,9 +719,20 @@ class VaultManager:
         self._ensure_ready()
         if not self.collection or not rel_paths:
             return 0
+        paths = list(rel_paths)
         try:
             with _chroma_write_lock:
-                self.collection.delete(where={"path": {"$in": list(rel_paths)}})
+                # Batched like every other bulk delete here: one `$in` holding
+                # graph_build's several hundred paths is exactly the shape that
+                # trips SQLite's variable ceiling, and the failure is invisible —
+                # the except below logs and returns 0, while graphbridge and
+                # notewriter both discard the return, so a whole stale graph wiki
+                # would stay searchable with nobody told.
+                batch_size = 5000
+                for i in range(0, len(paths), batch_size):
+                    self.collection.delete(
+                        where={"path": {"$in": paths[i:i + batch_size]}}
+                    )
                 self._disk_state = self._read_disk_state()
         except Exception as e:
             logger.warning("Delete error: %s", e)
@@ -762,9 +850,22 @@ class VaultManager:
                     content = f.read_text(encoding="utf-8")
                     fm = self._parse_frontmatter(content)
                     title = fm.get("title") or f.name[:-3]
-                    self.index_note(content, self.note_metadata(rel, title, folder))
-                    state[rel] = mtime
-                    count += 1
+                    # `content` reaches note_metadata so classify_subkind can read
+                    # the frontmatter signals, not just the path. A transcript
+                    # whose nature shows only in `type: session-transcript` is
+                    # graded transcript when written and would be graded curated
+                    # here — the same note ranking differently depending on which
+                    # write path touched it last.
+                    ok = self.index_note(content, self.note_metadata(rel, title, folder, content))
+                    if ok:
+                        state[rel] = mtime
+                        count += 1
+                    else:
+                        # Leave it unstamped. Stamping a note whose rows were just
+                        # deleted but not rewritten hides it from every later
+                        # incremental run — the note would stay missing from search
+                        # until someone thought to force a full reindex.
+                        logger.warning("Index write failed for %s — left unstamped for retry", rel)
                 except Exception as e:
                     logger.warning("Could not index %s: %s", f.name, e)
 
