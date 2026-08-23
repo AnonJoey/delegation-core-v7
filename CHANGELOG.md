@@ -1,5 +1,48 @@
 # Changelog
 
+## v0.13.0 — 2026-08-23
+
+### Added
+
+- **Client scoping.** A vault organised by client had no way to say "only this
+  one". Probing a real deployment: a query for one client's retention metrics
+  returned ten results, six of them a different client; a query about team
+  structure mixed four clients plus raw audio; a query about revenue
+  architecture returned the same deck five times in five formats. `client:` in a
+  note's frontmatter is promoted to searchable metadata, and `search_vault`
+  takes a `client` parameter that composes with `scope` through `$and` rather
+  than replacing it.
+
+  Three things this needed that a narrower fix would have missed:
+
+  - **Normalisation on both sides.** One vault holds `Gazin` on 111 notes and
+    `gazin` on 13. ChromaDB's `where` is exact equality, so normalising only on
+    write leaves `client="Gazin"` matching nothing it just wrote — which reads
+    as "that client has no notes". One function runs on promotion and on query.
+    Names that folding cannot merge, because they are genuinely different
+    strings, go in `client_aliases` — a judgement about the data, so it is
+    configuration.
+  - **Reach for ingested files.** They are 92.8% of rows on the deployment that
+    asked for this; a filter blind to them covers a fourteenth of the corpus.
+    `client_path_roots` names parent directories explicitly and the client is
+    the segment directly beneath one — no root, no client, never a guess. Empty
+    by default, because a wrong label is worse than none: unlabelled still
+    surfaces in an unfiltered search, mislabelled is silently excluded from the
+    filter that should have found it.
+  - **A way to see the result.** `vault_stats()` now reports `clients` —
+    distinct documents per client, as the filter sees them. That is the
+    verification surface for a path-derivation rule, and it is how a caller
+    learns which names are valid: guessing a slug and getting nothing back is
+    indistinguishable from a client with no documents.
+
+  Every hit carries its `client` even unfiltered, so a caller can see that six
+  of ten belong to someone else — which is what tells it a filter was called
+  for. Index schema bumped to 3: existing rows have no `client`, so the filter
+  over an unmigrated index matches nothing and looks like an empty vault. The
+  bump forces the one reindex that makes the feature real rather than present.
+
+Tests: 694 → 714.
+
 ## v0.12.3 — 2026-08-23
 
 ### Fixed

@@ -256,7 +256,8 @@ async def _run_or_queue(task_name: str, make_result) -> str:
 
 @mcp.tool()
 async def search_vault(query: str, limit: int = 5, use_local: bool = False,
-                        scope: str = "", graph: str = "", snippet_chars: int = 0) -> str:
+                        scope: str = "", graph: str = "", snippet_chars: int = 0,
+                        client: str = "") -> str:
     """
     CALL THIS FIRST before answering any question that could have prior context.
     Semantic search the Obsidian vault using BGE embeddings.
@@ -282,12 +283,21 @@ async def search_vault(query: str, limit: int = 5, use_local: bool = False,
     dominate the vault and 'all' when they do not; set default_search_scope in
     config.json to pin one. Pass scope explicitly to override either way.
     Every response names the scope it used.
+
+    client='<name>' narrows to one client, composing with scope rather than
+    replacing it. Matching is normalised, so 'Gazin', 'gazin' and 'GAZIN' are
+    one client. It reaches ingested files too, when client_path_roots is
+    configured. Use it whenever a question is about one client and the vault
+    holds several — unfiltered, a query for one client's retention metrics came
+    back six-of-ten from another. Every hit carries its 'client', so an
+    unfiltered search still shows when a filter was called for.
+    vault_stats() lists the clients actually present in the index.
     snippet_chars caps snippet length (0 = default); lower it when you only need
     titles and paths, since in agent mode every snippet is spent from your context.
     """
     scope = scope or _default_scope()
     hits = _vault.search(query, limit=limit, scope=scope, graph=graph,
-                         snippet_chars=snippet_chars or 800)
+                         snippet_chars=snippet_chars or 800, client=client)
     # Stating the scope on every response, not only on a miss: a caller reading
     # three results has no way to tell a narrow search from an exhaustive one.
     scope_used = "generated" if graph else scope

@@ -16,6 +16,7 @@ from pathlib import Path
 
 from .config import CONFIG_DIR
 from .embeddings import chunk_text
+from .vault import client_from_path
 
 logger = logging.getLogger("ingest")
 
@@ -158,22 +159,31 @@ class IngestManager:
                     continue
 
                 chunks = chunk_text(content, max_chars=max_chars, overlap=overlap)
+                # Ingested files are the bulk of a real index — 92.8% of rows on
+                # the deployment that asked for client scoping — so a filter that
+                # skipped them would reach a fourteenth of the corpus and read as
+                # "that client has almost nothing". Derived from the configured
+                # roots only; no root, no client, never a guess.
+                client = client_from_path(
+                    f_str,
+                    getattr(self._cfg, "client_path_roots", None),
+                    getattr(self._cfg, "client_aliases", None),
+                )
                 for i, chunk in enumerate(chunks):
                     chunk_id = f"{f}::chunk_{i}" if len(chunks) > 1 else str(f)
-                    self._vault.index_note(
-                        chunk,
-                        {
-                            "title":         f.stem,
-                            "path":          f_str,
-                            "folder":        "_external",
-                            "source_folder": source_key,
-                            "ingested_at":   now,
-                            "is_external":   "true",
-                            "chunk":         str(i),
-                            "total_chunks":  str(len(chunks)),
-                        },
-                        doc_id=chunk_id,
-                    )
+                    meta = {
+                        "title":         f.stem,
+                        "path":          f_str,
+                        "folder":        "_external",
+                        "source_folder": source_key,
+                        "ingested_at":   now,
+                        "is_external":   "true",
+                        "chunk":         str(i),
+                        "total_chunks":  str(len(chunks)),
+                    }
+                    if client:
+                        meta["client"] = client
+                    self._vault.index_note(chunk, meta, doc_id=chunk_id)
                 indexed.append(f_str)
                 new_cached_files[f_str] = [f_mtime, f_size]
             except DatalessFileError as e:

@@ -401,6 +401,7 @@ Apply these without exception when delegation-core is online.
 | Vault needs rebuilding after bulk import | `vault_reindex_bg` → poll `task_status` |
 | Two notes might be duplicates | `vault_find_similar` |
 | User needs live/external web information | `search_vault` first, then `search_web` if vault empty |
+| A question is about one client and the vault holds several | `search_vault(..., client=...)` |
 | User wants to cross-link an existing vault folder (small) | `relink_folder` |
 | User wants to cross-link an existing vault folder (large) | `relink_folder_bg` → poll `task_status` |
 | User has an external folder to make searchable (small) | `ingest_folder` |
@@ -842,6 +843,8 @@ Had a meeting            → write_note(folder="Sessions", ...)
 Found a fix              → write_note(folder="Fixes", ...)
 Adding to existing note  → vault_update_note(<name>, <new content>)
 User asks recall         → search_vault(<query>)   [escopo adaptativo; veja default_search_scope]
+Pergunta sobre um cliente→ search_vault(<query>, client=<nome>)   [combina com scope]
+Que clientes existem     → vault_stats().clients
 Question about a codebase→ search_vault(<query>, graph=<name>) ou scope='generated'
 Rename a note            → vault_rename_note(<path>, <new title>)  (repoints links)
 Browse a folder          → vault_list_notes(<folder>)

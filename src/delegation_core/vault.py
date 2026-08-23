@@ -32,6 +32,7 @@ import json
 import logging
 import re
 import threading
+import unicodedata
 from datetime import datetime
 from pathlib import Path, PurePosixPath, PureWindowsPath
 
@@ -120,6 +121,72 @@ def link_names_for_stem(stem: str) -> set[str]:
     if stripped:
         names.add(stripped)
     return names
+
+
+def client_slug(value: str, aliases: dict | None = None) -> str:
+    """Normalise a client name to the single form the index is keyed by.
+
+    ChromaDB's `where` is exact equality, so an unnormalised key is a filter
+    that silently under-returns: one vault holds `Gazin` on 111 notes and
+    `gazin` on 13, and a query for either missed the other's rows without
+    saying so. Lowercased, accent-folded, and everything that is not
+    alphanumeric collapsed to a single hyphen.
+
+    THE SAME FUNCTION MUST RUN ON BOTH SIDES — promotion and query. A patch
+    that normalised only on the way in leaves `client="Gazin"` missing every
+    row it just normalised to `gazin`, which looks exactly like "that client
+    has no notes".
+
+    Folding cannot merge genuinely different strings: `Campo Incorporadora`
+    and `campo` slug apart, and deciding they are one client is a judgement
+    about the data, not about text. `aliases` carries those decisions —
+    {slug: canonical slug}, from config, empty by default.
+    """
+    if not value:
+        return ""
+    folded = unicodedata.normalize("NFKD", str(value))
+    folded = "".join(c for c in folded if not unicodedata.combining(c))
+    slug = re.sub(r"[^a-z0-9]+", "-", folded.lower()).strip("-")
+    if not slug:
+        return ""
+    return (aliases or {}).get(slug, slug)
+
+
+def client_from_path(path: str, roots: list[str] | None = None,
+                     aliases: dict | None = None) -> str:
+    """Derive a client from an external file's path, or "" when unsure.
+
+    92.8% of the rows in one real index are ingested files, so a client filter
+    blind to them reaches 7% of the corpus and reads as "almost nothing matched".
+    But a WRONG label is worse than none: an unlabelled document still surfaces
+    in an unfiltered search, while a mislabelled one is silently excluded from
+    the filter that should have found it.
+
+    So this guesses nothing. `roots` is an explicit, configured list of parent
+    directories, and the client is the single path segment directly beneath the
+    matching root — `/Work/Oksigen/Gazin/deck.pdf` under root `/Work/Oksigen`
+    gives `gazin`. No configured root matches, no client. Empty by default, so
+    an install that has not opted in cannot be mislabelled by this at all.
+    """
+    if not path or not roots:
+        return ""
+    try:
+        p = PurePosixPath(path)
+    except (TypeError, ValueError):
+        return ""
+    for root in roots:
+        if not root:
+            continue
+        try:
+            rel = p.relative_to(PurePosixPath(root))
+        except ValueError:
+            continue
+        parts = rel.parts
+        # Only a file *inside* a client directory counts. A file sitting
+        # directly in the root has no client segment to read.
+        if len(parts) >= 2:
+            return client_slug(parts[0], aliases)
+    return ""
 
 
 def resolve_in_vault(vault_root: Path, rel_path: str) -> Path | None:
@@ -513,7 +580,7 @@ class VaultManager:
         return meta
 
     def search(self, query: str, limit: int = 5, scope: str = "all",
-               graph: str = "", snippet_chars: int = 800) -> list[dict]:
+               graph: str = "", snippet_chars: int = 800, client: str = "") -> list[dict]:
         """Semantic search, optionally narrowed to one kind of indexed content.
 
         scope:
@@ -566,6 +633,16 @@ class VaultManager:
             where = {"is_external": "true"}
         elif scope in ("notes", "generated"):
             where = {"kind": scope[:-1] if scope == "notes" else scope}
+
+        # The client filter is orthogonal to scope, so it composes with it
+        # rather than replacing it — $and, not a second assignment. Normalised
+        # through the same function that wrote the values, which is the whole
+        # point: a query normalised differently from the index is a filter that
+        # matches nothing and reports it as "no results for that client".
+        client_key = client_slug(client, getattr(self.cfg, "client_aliases", None))
+        if client_key:
+            clause = {"client": client_key}
+            where = {"$and": [where, clause]} if where else clause
 
         want = max(limit, 1)
         # Over-fetch unconditionally now, not just when `where` is set: the cut
@@ -625,6 +702,10 @@ class VaultManager:
                     "folder":     meta.get("folder", ""),
                     "kind":       kind,
                     "subkind":    subkind,
+                    # Returned even when unfiltered: a caller looking at ten
+                    # results needs to see that six of them are another client's
+                    # before it can know a filter was called for.
+                    "client":     meta.get("client", ""),
                     "snippet":    doc[:max(snippet_chars, 0)],
                     "similarity": effective_sim,
                 })
@@ -695,6 +776,15 @@ class VaultManager:
             if graph:
                 metadata["graph"] = graph
 
+        # A caller-supplied client is normalised and kept — that is ingest's
+        # path-derived value, which must not be second-guessed by parsing
+        # frontmatter out of a PDF's extracted text.
+        aliases = getattr(self.cfg, "client_aliases", None) or {}
+        if "client" in metadata:
+            slug = client_slug(metadata["client"], aliases)
+            metadata = {**metadata, "client": slug} if slug else {
+                k: v for k, v in metadata.items() if k != "client"}
+
         # A vault note: no caller-supplied id, and a relative path to key the
         # chunks by. Absolute and is_external rows are left alone — those belong
         # to ingest.py, which owns their chunk ids, and the where-delete below
@@ -705,6 +795,18 @@ class VaultManager:
             and not absolute
             and str(metadata.get("is_external", "")).lower() != "true"
         )
+        # Promote `client:` from the note's own frontmatter, for any vault note
+        # carrying content. Gated on `chunkable`, NOT on `classifiable`:
+        # classifiable is false the moment a caller supplies `kind`, and
+        # note_metadata always supplies it — so gating there meant reindex and
+        # every write path that builds metadata properly promoted nothing, while
+        # the sloppier callers did. Silent, and exactly backwards.
+        if chunkable and content and "client" not in metadata:
+            declared = self._parse_frontmatter(content).get("client", "")
+            slug = client_slug(declared, aliases)
+            if slug:
+                metadata = {**metadata, "client": slug}
+
         if chunkable:
             # The configured size is in characters, the model's limit in tokens;
             # reconcile them here or a chunk sized for one model gets quietly
@@ -810,7 +912,11 @@ class VaultManager:
     #: one full re-embed and then stamps the new number, so it costs exactly one
     #: pass and never re-fires. Without it the chunking fix ships inert: every
     #: note's mtime still matches, so `delegation-core reindex` writes nothing.
-    _INDEX_SCHEMA = 2
+    #: 3 (v0.13): rows gained a `client` key. Existing rows do not have it, so
+    #: a client filter over an unmigrated index matches nothing and looks like
+    #: an empty vault — the bump is what makes the feature real rather than
+    #: merely present.
+    _INDEX_SCHEMA = 3
     #: Reserved key inside .chroma_index.json. Can never collide with a note:
     #: keys there are vault-relative paths, which always end in ".md".
     _SCHEMA_KEY = "__schema__"
@@ -1590,6 +1696,28 @@ class VaultManager:
 
     # ── stats ─────────────────────────────────────────────────────────────────
 
+    def _client_counts(self) -> dict:
+        """{client slug: distinct documents} over the whole index.
+
+        Documents, not rows, for the same reason indexed_notes is: a chunked
+        160-page deck would otherwise make one client look like a hundred.
+        """
+        if not self.collection:
+            return {}
+        try:
+            got = self._paged_get(include=["metadatas"])
+        except Exception as e:
+            logger.warning("Client count failed: %s", e)
+            return {}
+        seen: dict[str, set] = {}
+        for i, meta in zip(got.get("ids") or [], got.get("metadatas") or []):
+            slug = (meta or {}).get("client")
+            if not slug:
+                continue
+            seen.setdefault(slug, set()).add(_CHUNK_SUFFIX_RE.sub("", i))
+        return dict(sorted(((k, len(v)) for k, v in seen.items()),
+                           key=lambda kv: -kv[1]))
+
     def get_stats(self) -> dict:
         self._ensure_ready()
         folder_counts = {}
@@ -1609,6 +1737,14 @@ class VaultManager:
             # being quietly redefined.
             "indexed_notes": docs,
             "indexed_rows": rows,
+            # The clients actually present in the index, as the filter sees
+            # them. This is the verification surface for client_path_roots: a
+            # derivation rule that mislabels shows up here as a bucket nobody
+            # recognises, before anyone relies on the filter. It is also how a
+            # caller learns which names are valid — guessing at a normalised
+            # slug and getting nothing back is indistinguishable from a client
+            # with no documents.
+            "clients": self._client_counts(),
             "vault_path": str(self.cfg.vault),
             "embed_model": self.cfg.bge_model,
             "folder_counts": folder_counts,

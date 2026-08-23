@@ -142,6 +142,26 @@ class Config:
     # authoritative document. Set explicitly to pin one scope for this machine.
     default_search_scope: str = ""
 
+    # ── v0.13: client scoping ────────────────────────────────────────────────
+    # A vault organised by client had no way to say "only this one". Searching
+    # for one client's retention metrics returned six of ten results from
+    # another client, and there was no parameter that could exclude them.
+    # `client:` in a note's frontmatter is promoted to searchable metadata,
+    # normalised through client_slug so Gazin and gazin land in one bucket.
+    #
+    # client_path_roots makes the same filter reach INGESTED files, which are
+    # the bulk of a real index (92.8% of rows on the deployment that reported
+    # this). The client is the path segment directly under a listed root:
+    # "/Work/Oksigen" turns /Work/Oksigen/Gazin/deck.pdf into client "gazin".
+    # Empty by default — deriving a client from an unconfigured path shape would
+    # invent labels, and a wrong label silently excludes a document from the
+    # filter that should have found it, which is worse than no label at all.
+    client_path_roots: list = field(default_factory=list)
+    # {slug: canonical slug}, for names that normalisation cannot merge because
+    # they are genuinely different strings — "campo-incorporadora" -> "campo".
+    # That is a judgement about the data, so it is configuration, not code.
+    client_aliases: dict = field(default_factory=dict)
+
     # ── v0.12: subkind ranking weights (raw vs curated) ──────────────────────
     # Dampens raw verbose transcripts/chat dumps so authoritative curated notes
     # rank higher when semantic similarity is close. Default 1.0 for curated.
