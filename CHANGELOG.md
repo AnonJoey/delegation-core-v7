@@ -1,5 +1,33 @@
 # Changelog
 
+## v0.12.2 — 2026-08-23
+
+### Fixed
+
+- **A note could not be linked by the title it was written with.** `write_note`
+  builds `{date}-{safe title}.md`, and nobody types the date when linking — they
+  type the title, so `[[Diagnóstico — notas do vault]]` never resolved against
+  `2026-08-22-Diagnóstico — notas do vault.md`. Three of the first four broken
+  links audited on a real vault were this alone. Resolution now also accepts the
+  stem with its leading date stripped, additively, which makes the fix retroactive
+  across every note already on disk without touching a file. `safe_filename` also
+  cuts at 50 characters, and no resolution rule restores characters a filename
+  never held, so `compose_note` emits the untruncated title as an alias when
+  truncation actually occurred. The three call sites that each built this name set
+  themselves are one function now.
+
+### Added
+
+- **`relink_folder_bg`.** The synchronous tool embeds every note in a folder
+  against every other; on a 31-note folder that ran past the MCP client's
+  300-second idle timeout, aborting the call and dropping the connection while
+  the server carried on with a job nobody was listening for. Both relink calls
+  made while tidying a vault reported failure and had in fact succeeded. The
+  vault-containment check now lives in one function both entry points call — a
+  background variant that quietly omitted it would be a path-traversal hole.
+
+Tests: 683 → 692.
+
 ## v0.12.1 — 2026-08-23
 
 Nineteen defects against v0.12.0, from three independent passes: a field report
