@@ -1447,10 +1447,16 @@ class VaultManager:
 
         Always recomputed — the summary's five-minute cache holds counts only.
         """
-        detail = getattr(self, "_last_health_detail", None)
-        if detail is None or detail.get("_vault") != str(self.cfg.vault):
-            self._force_health_recompute()
-            detail = self._last_health_detail
+        # Unconditionally, as the docstring above has always promised. Reusing a
+        # populated _last_health_detail made this method answer from the first
+        # call for the entire life of the process: fix a broken link, ask again,
+        # and the same stale list comes back — which reads as "the fix did not
+        # work" and sends the reader off to re-fix something already correct.
+        # The summary's disk cache does not help either, since a cache hit
+        # returns before _last_health_detail is ever refreshed. This is the
+        # diagnostic path, not a hot one; it is called to get the truth.
+        self._force_health_recompute()
+        detail = self._last_health_detail
         capped = {"limit": limit}
         for key in ("broken_link_items", "orphan_items", "needs_repair_items",
                     "truncated_items", "folder_marker_items"):

@@ -227,3 +227,30 @@ def test_a_readable_file_is_never_dataless(tmp_path):
 
 def test_a_missing_file_is_not_dataless(tmp_path):
     assert is_dataless(tmp_path / "nope.md") is False
+
+
+# ── health_detail must answer from the vault, not from the first call ────────
+
+def test_health_detail_reflects_a_change_made_between_calls(tmp_path):
+    """It promised "Always recomputed" while reusing _last_health_detail for the
+    life of the process. Fix a broken link, ask again, and the same stale list
+    came back — which reads as "the fix did not work"."""
+    cfg = Config(vault_path=str(tmp_path), vault_folders=["Notes"])
+    (tmp_path / "Notes").mkdir()
+    src = tmp_path / "Notes" / "src.md"
+    src.write_text("see [[ghost]]", encoding="utf-8")
+
+    vm = VaultManager.__new__(VaultManager)
+    vm.cfg = cfg
+    vm.collection = None
+    vm._initialized = True
+    vm._ensure_ready = lambda: None
+
+    first = vm.health_detail()
+    assert first["broken_links"] == 1
+
+    # Give the link something to resolve to, exactly as a real fix would.
+    (tmp_path / "Notes" / "ghost.md").write_text("# ghost", encoding="utf-8")
+
+    second = vm.health_detail()
+    assert second["broken_links"] == 0, "a second call must re-read the vault"
