@@ -956,7 +956,7 @@ def _reindex_everything(console, cfg):
                       f"de {len(registry)} fonte(s){note}")
 
 
-def cmd_doctor(_args):
+def cmd_doctor(args):
     from rich.console import Console
     from rich.table import Table
     from . import doctor
@@ -966,6 +966,10 @@ def cmd_doctor(_args):
     if cfg is None:
         console.print("[yellow]Not configured.[/yellow] Run: delegation-core setup")
         sys.exit(1)
+
+    if getattr(args, "clean_orphans", False):
+        cleaned = doctor.clean_orphan_segments(cfg)
+        console.print(f"[green]✓[/green] Cleaned {cleaned} orphan segment directory(ies).")
 
     result = doctor.run_all(cfg)
     icon = {"ok": "[green]✓[/green]", "warn": "[yellow]![/yellow]",
@@ -1178,7 +1182,9 @@ def main():
     p_clients.add_argument("--show", action="store_true",
                            help="Print URL and token without writing anything")
     sub.add_parser("status",   help="Check vault, model, binary, llama.cpp, and feature config")
-    sub.add_parser("doctor",   help="Diagnose installation drift and vault hygiene problems")
+    p_doctor = sub.add_parser("doctor",   help="Diagnose installation drift and vault hygiene problems")
+    p_doctor.add_argument("--clean-orphans", action="store_true",
+                          help="Remove orphan ChromaDB segment directories on disk")
     p_reindex = sub.add_parser("reindex", help="Rebuild ChromaDB search index from vault folders")
     p_reindex.add_argument("--force", action="store_true",
                            help="Reindex every note, not just those changed since last run "

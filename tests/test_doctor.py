@@ -316,6 +316,38 @@ def test_unparseable_probe_output_skips_rather_than_guessing(monkeypatch, cfg):
     assert doctor.check_index_integrity(cfg)["status"] == "skip"
 
 
+# ── orphan segments ──────────────────────────────────────────────────────────
+
+def test_orphan_segments_detected_and_cleaned(cfg, tmp_path):
+    import sqlite3
+    chroma_dir = cfg.chroma_path
+    chroma_dir.mkdir(parents=True, exist_ok=True)
+    db_path = chroma_dir / "chroma.sqlite3"
+    with sqlite3.connect(db_path) as conn:
+        conn.execute("CREATE TABLE segments (id TEXT PRIMARY KEY, type TEXT, scope TEXT, collection TEXT)")
+        conn.execute("INSERT INTO segments VALUES ('valid-uuid-1', 'type', 'scope', 'col-1')")
+
+    (chroma_dir / "valid-uuid-1").mkdir()
+    (chroma_dir / "valid-uuid-1" / "data.bin").write_bytes(b"1234")
+
+    stale_dir = chroma_dir / "orphan-uuid-2"
+    stale_dir.mkdir()
+    (stale_dir / "old.bin").write_bytes(b"5678")
+
+    result = doctor.check_orphan_segments(cfg)
+    assert result["status"] == "warn"
+    assert "1 orphan segment" in result["detail"]
+    assert "clean-orphans" in result["fix"]
+
+    cleaned = doctor.clean_orphan_segments(cfg)
+    assert cleaned == 1
+    assert not stale_dir.exists()
+    assert (chroma_dir / "valid-uuid-1").exists()
+
+    result_clean = doctor.check_orphan_segments(cfg)
+    assert result_clean["status"] == "ok"
+
+
 # ── aggregate ────────────────────────────────────────────────────────────────
 
 def test_run_all_surfaces_the_worst_status(cfg):
@@ -327,4 +359,4 @@ def test_run_all_surfaces_the_worst_status(cfg):
 
     assert result["status"] == "error"
     assert result["counts"]["error"] >= 1
-    assert {c["check"] for c in result["checks"]} >= {"engine_mode", "vault_folders", "hook_drift"}
+    assert {c["check"] for c in result["checks"]} >= {"engine_mode", "vault_folders", "hook_drift", "orphan_segments"}

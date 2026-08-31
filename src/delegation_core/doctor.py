@@ -289,6 +289,114 @@ def check_index_integrity(cfg) -> dict:
             "detail": f"{result['count']} row(s), every search scope answers"}
 
 
+def check_orphan_segments(cfg) -> dict:
+    """Detect segment directories left behind on disk when collections were recreated."""
+    chroma_dir = cfg.chroma_path
+    db_path = chroma_dir / "chroma.sqlite3"
+
+    abandoned_dirs = []
+    if cfg.vault and cfg.vault.is_dir():
+        abandoned_dirs = [
+            p for p in cfg.vault.glob(".chroma*")
+            if p.is_dir() and p.resolve() != chroma_dir.resolve()
+        ]
+
+    if not db_path.exists():
+        if abandoned_dirs:
+            abandoned_mb = sum(
+                sum(f.stat().st_size for f in d.rglob("*") if f.is_file())
+                for d in abandoned_dirs
+            ) / (1024 * 1024)
+            return {
+                "check": "orphan_segments",
+                "status": "warn",
+                "detail": f"{len(abandoned_dirs)} abandoned legacy index directory(ies) ({abandoned_mb:.1f} MB)",
+                "fix": "run: delegation-core doctor --clean-orphans",
+            }
+        return {"check": "orphan_segments", "status": "ok", "detail": "no chroma database found"}
+
+    try:
+        import sqlite3
+        with sqlite3.connect(db_path) as conn:
+            cur = conn.cursor()
+            cur.execute("SELECT id FROM segments")
+            valid_ids = {row[0] for row in cur.fetchall()}
+    except Exception as e:
+        return {"check": "orphan_segments", "status": "warn",
+                "detail": f"could not query segments table: {e}"}
+
+    dirs = [d for d in chroma_dir.iterdir() if d.is_dir() and not d.name.startswith(".")]
+    orphans = [d for d in dirs if d.name not in valid_ids]
+
+    if not orphans and not abandoned_dirs:
+        return {"check": "orphan_segments", "status": "ok",
+                "detail": "no orphan segment directories on disk"}
+
+    total_bytes = 0
+    for o in orphans:
+        try:
+            total_bytes += sum(f.stat().st_size for f in o.rglob("*") if f.is_file())
+        except Exception:
+            pass
+    for d in abandoned_dirs:
+        try:
+            total_bytes += sum(f.stat().st_size for f in d.rglob("*") if f.is_file())
+        except Exception:
+            pass
+
+    size_mb = total_bytes / (1024 * 1024)
+    details = []
+    if orphans:
+        details.append(f"{len(orphans)} orphan segment directory(ies)")
+    if abandoned_dirs:
+        details.append(f"{len(abandoned_dirs)} abandoned legacy index directory(ies)")
+    return {
+        "check": "orphan_segments",
+        "status": "warn",
+        "detail": f"{', '.join(details)} ({size_mb:.1f} MB)",
+        "fix": "run: delegation-core doctor --clean-orphans",
+    }
+
+
+def clean_orphan_segments(cfg) -> int:
+    """Remove orphan segment directories on disk that are not referenced in SQLite."""
+    import shutil
+    import sqlite3
+    removed = 0
+
+    chroma_dir = cfg.chroma_path
+    if cfg.vault and cfg.vault.is_dir():
+        abandoned_dirs = [
+            p for p in cfg.vault.glob(".chroma*")
+            if p.is_dir() and p.resolve() != chroma_dir.resolve()
+        ]
+        for d in abandoned_dirs:
+            try:
+                shutil.rmtree(d)
+                removed += 1
+            except Exception:
+                pass
+
+    db_path = chroma_dir / "chroma.sqlite3"
+    if db_path.exists():
+        try:
+            with sqlite3.connect(db_path) as conn:
+                cur = conn.cursor()
+                cur.execute("SELECT id FROM segments")
+                valid_ids = {row[0] for row in cur.fetchall()}
+            dirs = [d for d in chroma_dir.iterdir() if d.is_dir() and not d.name.startswith(".")]
+            orphans = [d for d in dirs if d.name not in valid_ids]
+            for o in orphans:
+                try:
+                    shutil.rmtree(o)
+                    removed += 1
+                except Exception:
+                    pass
+        except Exception:
+            pass
+    return removed
+
+
 def run_all(cfg) -> dict:
     """Run every check. Returns {status, counts, checks[]} with the worst status on top."""
     checks = [
@@ -298,6 +406,7 @@ def run_all(cfg) -> dict:
         check_graph_extra(),
         check_ingest_registry(),
         check_graph_registry(cfg),
+        check_orphan_segments(cfg),
         check_index_integrity(cfg),
     ]
     counts = {s: sum(1 for c in checks if c["status"] == s)
