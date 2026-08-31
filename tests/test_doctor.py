@@ -348,6 +348,25 @@ def test_orphan_segments_detected_and_cleaned(cfg, tmp_path):
     assert result_clean["status"] == "ok"
 
 
+# ── fts integrity ────────────────────────────────────────────────────────────
+
+def test_fts_integrity_detected_and_rebuilt(cfg, tmp_path):
+    import sqlite3
+    chroma_dir = cfg.chroma_path
+    chroma_dir.mkdir(parents=True, exist_ok=True)
+    db_path = chroma_dir / "chroma.sqlite3"
+    with sqlite3.connect(db_path) as conn:
+        conn.execute("CREATE VIRTUAL TABLE embedding_fulltext_search USING fts5(string_value)")
+        conn.execute("INSERT INTO embedding_fulltext_search VALUES ('some content')")
+
+    result = doctor.check_fts_integrity(cfg)
+    assert result["status"] == "ok"
+    assert "healthy" in result["detail"]
+
+    rebuilt = doctor.rebuild_fts(cfg)
+    assert rebuilt is True
+
+
 # ── aggregate ────────────────────────────────────────────────────────────────
 
 def test_run_all_surfaces_the_worst_status(cfg):
@@ -359,4 +378,4 @@ def test_run_all_surfaces_the_worst_status(cfg):
 
     assert result["status"] == "error"
     assert result["counts"]["error"] >= 1
-    assert {c["check"] for c in result["checks"]} >= {"engine_mode", "vault_folders", "hook_drift", "orphan_segments"}
+    assert {c["check"] for c in result["checks"]} >= {"engine_mode", "vault_folders", "hook_drift", "orphan_segments", "fts_integrity"}

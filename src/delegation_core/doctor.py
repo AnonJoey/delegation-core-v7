@@ -1,5 +1,5 @@
 """
-doctor.py — Installation drift and vault hygiene checks.
+doctor.py: Installation drift and vault hygiene checks.
 
 Every check here exists because the condition it looks for went unnoticed on a
 live machine, sometimes for weeks:
@@ -9,7 +9,7 @@ live machine, sometimes for weeks:
 * That stale hook wrote transcripts to a hardcoded lowercase ``sessions/`` beside
   the vault's configured ``Sessions/``. Indexing, search and health accounting
   all iterate ``vault_folders``, so 29 transcripts spanning seven weeks were
-  invisible — no error anywhere, just absence.
+  invisible: no error anywhere, just absence.
 * The [graph] extra was never installed in the live venv, so graph_build failed
   on a missing import rather than on anything to do with graphs.
 * ``ingest_folder`` registry entries outlive the folders they point at, leaving
@@ -67,7 +67,7 @@ def check_hook_drift() -> dict:
                 "detail": f"{len(list(repo.glob('*.py')))} hook(s) match the source tree"}
     return {
         "check": "hook_drift", "status": "warn",
-        "detail": f"stale: {stale or '—'} · missing: {missing or '—'}",
+        "detail": f"stale: {stale or '-'} · missing: {missing or '-'}",
         "fix": f"cp {repo}/*.py {INSTALLED_HOOKS}/",
     }
 
@@ -119,7 +119,7 @@ def check_graph_extra() -> dict:
 def check_engine_mode(cfg) -> dict:
     if cfg.is_agent_mode:
         return {"check": "engine_mode", "status": "ok",
-                "detail": "agent — no local model is loaded; generation is delegated"}
+                "detail": "agent: no local model is loaded; generation is delegated"}
     missing = []
     if not Path(cfg.llama_binary).exists():
         missing.append(f"llama_binary {cfg.llama_binary}")
@@ -130,7 +130,7 @@ def check_engine_mode(cfg) -> dict:
                 "detail": f"engine_mode={cfg.engine_mode} but missing: {', '.join(missing)}",
                 "fix": 'set engine_mode to "agent", or fix the paths in config.json'}
     return {"check": "engine_mode", "status": "ok",
-            "detail": f"{cfg.engine_mode} — binary and model present"}
+            "detail": f"{cfg.engine_mode}: binary and model present"}
 
 
 def check_ingest_registry() -> dict:
@@ -176,7 +176,7 @@ def check_graph_registry(cfg) -> dict:
 
 #: The metadata filters search_vault puts on a query, copied from search()'s own
 #: branches. A scope that cannot be queried is a scope that answers nothing,
-#: however healthy the counts look. is_external is the *string* "true" — that is
+#: however healthy the counts look. is_external is the *string* "true": that is
 #: what ingest writes and what search queries; the boolean matches no row and
 #: would make this probe pass without testing anything.
 _SCOPE_FILTERS = ({"kind": "note"}, {"kind": "generated"}, {"is_external": "true"})
@@ -215,8 +215,8 @@ def check_index_integrity(cfg) -> dict:
     A filtered query is the only authoritative test. Comparing ids between
     chroma.sqlite3 and the vector segment looks rigorous and is not: records live
     in memory until Chroma flushes them, so a healthy server with pending writes
-    is indistinguishable from a corrupt index, and ``index_metadata.pickle`` — the
-    obvious place to read ids from — is a legacy artifact that current Chroma does
+    is indistinguishable from a corrupt index, and ``index_metadata.pickle`` (the
+    obvious place to read ids from) is a legacy artifact that current Chroma does
     not create for new collections at all.
 
     **The probe runs in a child process because it can take the interpreter with
@@ -224,7 +224,7 @@ def check_index_integrity(cfg) -> dict:
     (SIGSEGV, exit 139) on a live index after a bulk ingest; the coredump showed
     unbounded recursion inside chromadb_rust_bindings. It reproduced on a copy
     with no other process running, so it was the index state rather than
-    contention — but the state was never narrowed further. The obvious suspect,
+    contention, but the state was never narrowed further. The obvious suspect,
     a deep pending write log, was ruled out: a rebuild passed the same depth and
     opened normally.
 
@@ -252,15 +252,15 @@ def check_index_integrity(cfg) -> dict:
         # newly opened client died on this index while the running server kept
         # answering from memory, `reindex --force` died the same way without
         # touching a row, and a fresh path worked normally. The cause was never
-        # established — a deep pending write log looked responsible and was not:
+        # established: a deep pending write log looked responsible and was not:
         # a rebuild reproduced that depth and opened fine. So describe the
         # symptom and the exit, and claim no more than that.
         return {"check": "index_integrity", "status": "error",
                 "detail": f"opening the index crashed the probe (signal "
-                          f"{-completed.returncode}) — every new process that opens it "
+                          f"{-completed.returncode}): every new process that opens it "
                           "will crash the same way; a running server keeps working from "
                           "memory",
-                "fix": "do not restart the MCP server yet — back it up, then rebuild from "
+                "fix": "do not restart the MCP server yet: back it up, then rebuild from "
                        "a clean path and re-run the ingests in ingested_sources.json; "
                        "reindex --force crashes on this state too"}
     if completed.returncode != 0:
@@ -281,7 +281,7 @@ def check_index_integrity(cfg) -> dict:
 
     if result["broken"]:
         return {"check": "index_integrity", "status": "error",
-                "detail": "scope-filtered search fails — " + "; ".join(result["broken"]),
+                "detail": "scope-filtered search fails: " + "; ".join(result["broken"]),
                 "fix": "delegation-core reindex --force, then restart the MCP server "
                        "(it holds the old index in memory and will not re-read disk)"}
 
@@ -397,6 +397,45 @@ def clean_orphan_segments(cfg) -> int:
     return removed
 
 
+def check_fts_integrity(cfg) -> dict:
+    """Check whether Chroma SQLite FTS5 fulltext search table is healthy or malformed."""
+    db_path = cfg.chroma_path / "chroma.sqlite3"
+    if not db_path.exists():
+        return {"check": "fts_integrity", "status": "ok", "detail": "no chroma database found"}
+    try:
+        import sqlite3
+        with sqlite3.connect(db_path) as conn:
+            cur = conn.cursor()
+            cur.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='embedding_fulltext_search'")
+            if not cur.fetchall():
+                return {"check": "fts_integrity", "status": "ok", "detail": "no full-text search table"}
+            cur.execute("INSERT INTO embedding_fulltext_search(embedding_fulltext_search) VALUES('integrity-check')")
+    except Exception as e:
+        return {
+            "check": "fts_integrity",
+            "status": "error",
+            "detail": f"full-text search index is corrupt: {e}",
+            "fix": "run: delegation-core doctor --rebuild-fts",
+        }
+    return {"check": "fts_integrity", "status": "ok", "detail": "full-text search index is healthy"}
+
+
+def rebuild_fts(cfg) -> bool:
+    """Rebuild the Chroma SQLite FTS5 index from the documents table."""
+    db_path = cfg.chroma_path / "chroma.sqlite3"
+    if not db_path.exists():
+        return False
+    try:
+        import sqlite3
+        with sqlite3.connect(db_path) as conn:
+            cur = conn.cursor()
+            cur.execute("INSERT INTO embedding_fulltext_search(embedding_fulltext_search) VALUES('rebuild')")
+            conn.commit()
+        return True
+    except Exception:
+        return False
+
+
 def run_all(cfg) -> dict:
     """Run every check. Returns {status, counts, checks[]} with the worst status on top."""
     checks = [
@@ -407,6 +446,7 @@ def run_all(cfg) -> dict:
         check_ingest_registry(),
         check_graph_registry(cfg),
         check_orphan_segments(cfg),
+        check_fts_integrity(cfg),
         check_index_integrity(cfg),
     ]
     counts = {s: sum(1 for c in checks if c["status"] == s)

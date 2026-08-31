@@ -971,6 +971,13 @@ def cmd_doctor(args):
         cleaned = doctor.clean_orphan_segments(cfg)
         console.print(f"[green]✓[/green] Cleaned {cleaned} orphan segment directory(ies).")
 
+    if getattr(args, "rebuild_fts", False):
+        rebuilt = doctor.rebuild_fts(cfg)
+        if rebuilt:
+            console.print("[green]✓[/green] Rebuilt full-text search index successfully.")
+        else:
+            console.print("[red]✗[/red] Failed to rebuild full-text search index.")
+
     result = doctor.run_all(cfg)
     icon = {"ok": "[green]✓[/green]", "warn": "[yellow]![/yellow]",
             "error": "[red]✗[/red]", "skip": "[dim]-[/dim]"}
@@ -1185,6 +1192,8 @@ def main():
     p_doctor = sub.add_parser("doctor",   help="Diagnose installation drift and vault hygiene problems")
     p_doctor.add_argument("--clean-orphans", action="store_true",
                           help="Remove orphan ChromaDB segment directories on disk")
+    p_doctor.add_argument("--rebuild-fts", action="store_true",
+                          help="Rebuild SQLite full-text search index if corrupted")
     p_reindex = sub.add_parser("reindex", help="Rebuild ChromaDB search index from vault folders")
     p_reindex.add_argument("--force", action="store_true",
                            help="Reindex every note, not just those changed since last run "
