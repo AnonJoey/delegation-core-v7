@@ -4,6 +4,10 @@ rem delegation-core installer: Windows
 rem Double-click to run. Detects Python, installs dependencies,
 rem creates venv, installs package, then launches the setup wizard.
 
+chcp 65001 >nul 2>&1
+set "PYTHONIOENCODING=utf-8"
+set "PYTHONUTF8=1"
+
 set "VENV=%USERPROFILE%\.delegation_core\venv"
 set "SCRIPT_DIR=%~dp0"
 rem Remove trailing backslash
@@ -252,6 +256,9 @@ rem working config.json, so an upgrade must leave configuration untouched.
 if exist "%USERPROFILE%\.delegation_core\config.json" (
     echo  Existing config.json detected: preserved. Skipping setup wizard.
     echo.
+    rem Maintain background service registration and client configs on upgrades
+    "%VENV%\Scripts\delegation-core" service install >nul 2>&1
+    "%VENV%\Scripts\delegation-core" clients --claude-code >nul 2>&1
     echo  Upgrade complete. Restart delegation-core ^(or quit and reopen Claude^)
     echo  to load the new code.
     echo  To reconfigure manually later:  "%VENV%\Scripts\delegation-core" setup

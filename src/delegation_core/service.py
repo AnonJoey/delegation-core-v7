@@ -39,6 +39,8 @@ LAUNCHD_LABEL = "com.delegation-core"
 
 SYSTEMD_UNIT = Path.home() / ".config" / "systemd" / "user" / f"{SERVICE_NAME}.service"
 LAUNCHD_PLIST = Path.home() / "Library" / "LaunchAgents" / f"{LAUNCHD_LABEL}.plist"
+WIN_STARTUP_DIR = Path.home() / "AppData" / "Roaming" / "Microsoft" / "Windows" / "Start Menu" / "Programs" / "Startup"
+WIN_STARTUP_CMD = WIN_STARTUP_DIR / f"{SERVICE_NAME}.cmd"
 
 
 def _executable() -> str:
@@ -165,9 +167,19 @@ def install() -> dict:
             "schtasks", "/Create", "/TN", SERVICE_NAME, "/SC", "ONLOGON",
             "/TR", f'"{_executable()}" run', "/F",
         ])
-        return {"platform": system, "unit": f"Task Scheduler: {SERVICE_NAME}",
-                "status": "installed" if code == 0 else "failed", "detail": out,
-                "hint": "The task runs at logon; start it now with `schtasks /Run /TN delegation-core`."}
+        if code == 0:
+            return {"platform": system, "unit": f"Task Scheduler: {SERVICE_NAME}",
+                    "status": "installed", "detail": out,
+                    "hint": "The task runs at logon; start it now with `schtasks /Run /TN delegation-core`."}
+        try:
+            WIN_STARTUP_DIR.mkdir(parents=True, exist_ok=True)
+            WIN_STARTUP_CMD.write_text(f'@echo off\r\nstart "" /B "{_executable()}" run\r\n', encoding="utf-8")
+            return {"platform": system, "unit": str(WIN_STARTUP_CMD),
+                    "status": "installed", "detail": "Configured via user Startup folder (no elevation required)",
+                    "hint": "The script runs at logon from your Startup folder."}
+        except Exception as e:
+            return {"platform": system, "unit": f"Task Scheduler: {SERVICE_NAME}",
+                    "status": "failed", "detail": f"{out}; Startup folder fallback failed: {e}"}
 
     return {"platform": system, "status": "unsupported",
             "detail": f"No service integration for {system}. Run `{_executable()} run` yourself."}
@@ -191,7 +203,11 @@ def uninstall() -> dict:
 
     if system == "Windows":
         code, out = _run(["schtasks", "/Delete", "/TN", SERVICE_NAME, "/F"])
-        return {"platform": system, "status": "removed" if code == 0 else "not_installed",
+        cmd_existed = False
+        if WIN_STARTUP_CMD.exists():
+            WIN_STARTUP_CMD.unlink(missing_ok=True)
+            cmd_existed = True
+        return {"platform": system, "status": "removed" if (code == 0 or cmd_existed) else "not_installed",
                 "detail": out}
 
     return {"platform": system, "status": "unsupported"}
@@ -216,7 +232,9 @@ def status() -> dict:
                       manager_state="loaded" if code == 0 else "not loaded")
     elif system == "Windows":
         code, out = _run(["schtasks", "/Query", "/TN", SERVICE_NAME])
-        result.update(installed=code == 0, manager_state=out.splitlines()[-1] if out else "unknown")
+        startup_exists = WIN_STARTUP_CMD.exists()
+        result.update(installed=(code == 0 or startup_exists),
+                      manager_state=out.splitlines()[-1] if out else ("startup folder" if startup_exists else "unknown"))
     else:
         result.update(installed=False, manager_state="unsupported")
     return result
@@ -225,7 +243,7 @@ def status() -> dict:
 def _port_answers() -> bool:
     """Cheap liveness probe: is something listening on the configured port?
 
-    A TCP connect rather than an MCP handshake — this is a lifecycle question,
+    A TCP connect rather than an MCP handshake: this is a lifecycle question,
     and an unauthenticated probe cannot complete a handshake anyway now that the
     transport requires a token.
     """
