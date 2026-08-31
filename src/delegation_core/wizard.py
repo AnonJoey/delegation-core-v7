@@ -460,6 +460,9 @@ def _step_index(cfg: Config):
 # ── startup configuration ─────────────────────────────────────────────────────
 
 def _setup_startup(cfg: Config):
+    if cfg.is_agent_mode or not cfg.llama_binary or not cfg.llama_model:
+        console.print("  [dim]Agent mode (no local model): skipping background engine service.[/dim]\n")
+        return
     system = platform.system()
     console.print("  Configuring background startup...")
     try:

@@ -22,7 +22,7 @@ from delegation_core import cli
 # Top-level subcommands whose handler is cli.cmd_<name>; a dash in the command
 # becomes an underscore in the function name. Grouped commands (note, graph,
 # process) dispatch through their own sub-parsers and are not listed here.
-EXPECTED = ["setup", "run", "status", "doctor", "reindex", "maintain",
+EXPECTED = ["setup", "run", "service", "status", "doctor", "reindex", "maintain",
             "ingest", "relink", "search", "compress", "embed-model"]
 
 
