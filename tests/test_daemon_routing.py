@@ -514,3 +514,18 @@ def test_a_daemon_that_goes_away_mid_call_is_refused_too(monkeypatch):
     with pytest.raises(SystemExit) as exc:
         cli._delegate(cfg, _Args(local=False), "reindex_vault", {}, lambda m: None)
     assert exc.value.code == 0
+
+
+def test_delegate_passes_custom_timeout_and_fails_fatally_on_timeout(monkeypatch):
+    """If a delegated job exceeds its timeout, it exits with 1, never 0 (DC-32)."""
+    monkeypatch.setattr(daemon, "is_listening", lambda cfg, timeout=0.5: True)
+
+    def _timeout_boom(cfg, tool, arguments, timeout=None, on_wait=None):
+        assert timeout == 120.0
+        raise daemon.DaemonCallFailed(f"{tool} still running after 120s")
+
+    monkeypatch.setattr(daemon, "submit_and_wait", _timeout_boom)
+    cfg = _cfg()
+    with pytest.raises(SystemExit) as exc:
+        cli._delegate(cfg, _Args(local=False, timeout=120.0), "ingest_folder_bg", {}, lambda m: None)
+    assert exc.value.code == 1

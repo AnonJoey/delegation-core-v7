@@ -329,7 +329,8 @@ def _delegate(cfg, args, tool: str, arguments: dict, say) -> dict | None:
         return _fall_back(f"No daemon on {cfg.server_host}:{cfg.server_port}")
     try:
         say(f"Delegating to the daemon at {cfg.server_url} ...")
-        return daemon.submit_and_wait(cfg, tool, arguments)
+        timeout = getattr(args, "timeout", None)
+        return daemon.submit_and_wait(cfg, tool, arguments, timeout=timeout)
     except daemon.DaemonUnavailable as exc:
         return _fall_back(f"Daemon went away ({exc})")
     except daemon.DaemonCallFailed as exc:
@@ -1198,6 +1199,8 @@ def main():
     p_reindex.add_argument("--force", action="store_true",
                            help="Reindex every note, not just those changed since last run "
                                 "(needed to backfill new metadata fields)")
+    p_reindex.add_argument("--timeout", type=float, default=None,
+                           help="Maximum seconds to wait for daemon job to complete (default 3600s, 0 for unlimited)")
     _add_local_flag(p_reindex)
     p_maintain = sub.add_parser("maintain", help="Run inbox maintenance once and exit")
     _add_local_flag(p_maintain)
@@ -1223,6 +1226,8 @@ def main():
     p_ingest.add_argument("--no-recursive", action="store_true", help="Only index top-level files")
     p_ingest.add_argument("--force",        action="store_true", help="Re-index even if file mtime and size are unchanged")
     p_ingest.add_argument("--exclude",      default="", help="Comma-separated glob patterns to exclude (e.g. Logs,*.tmp)")
+    p_ingest.add_argument("--timeout",      type=float, default=None,
+                          help="Maximum seconds to wait for daemon job to complete (default 3600s, 0 for unlimited)")
     _add_local_flag(p_ingest)
 
     p_relink = sub.add_parser("relink", help="Add wikilinks to notes in a vault subfolder")

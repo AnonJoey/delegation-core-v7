@@ -255,7 +255,7 @@ def next_poll_wait(status: dict, job_id: str, tool: str, poll: _Poll) -> float |
 
 
 def submit_and_wait(cfg, tool: str, arguments: dict | None = None, *,
-                    on_wait=None, timeout: float = JOB_WAIT_TIMEOUT_SEC) -> dict:
+                    on_wait=None, timeout: float | None = JOB_WAIT_TIMEOUT_SEC) -> dict:
     """Call a ``*_bg`` tool, then poll ``task_status`` until the job finishes.
 
     Returns the finished job dict (``job["result"]`` is whatever the underlying
@@ -272,6 +272,8 @@ def submit_and_wait(cfg, tool: str, arguments: dict | None = None, *,
     if not is_listening(cfg):
         raise DaemonUnavailable(f"nothing listening on {cfg.server_host}:{cfg.server_port}")
 
+    effective_timeout = float("inf") if (timeout is None or timeout <= 0) else float(timeout)
+
     async def _session():
         async with _build_client(cfg, CALL_TIMEOUT_SEC) as client:
             submitted = _payload(await client.call_tool(tool, arguments or {}))
@@ -279,7 +281,7 @@ def submit_and_wait(cfg, tool: str, arguments: dict | None = None, *,
             if not job_id:
                 return submitted
 
-            poll = _Poll(timeout)
+            poll = _Poll(effective_timeout)
             while True:
                 status = _payload(
                     await client.call_tool("task_status", {"job_id": job_id}))
