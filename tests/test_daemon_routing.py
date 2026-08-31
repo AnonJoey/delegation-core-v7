@@ -18,6 +18,7 @@ import socket
 import pytest
 
 from delegation_core import cli, daemon, jobs
+from delegation_core import config as config_module
 from delegation_core.config import Config
 
 
@@ -408,3 +409,66 @@ def test_every_index_writing_command_offers_the_local_escape_hatch(command):
     )
     assert "--local" in result.stdout, (
         f"`delegation-core {command}` routes to the daemon with no way to opt out")
+
+
+# ── refusing the local path when this machine opted out ──────────────────────
+#
+# The fallback in `_delegate` is what keeps the CLI usable without the service,
+# and it is also the door the second writer walks through: under load the daemon
+# stops answering without dying, "no daemon" reads as true, and the hook-fired
+# reindex opens the same ChromaDB. These tests pin the opt-out — and pin that it
+# stays off by default, since a machine that never installed the service still
+# needs the local path.
+
+def test_fallback_is_allowed_by_default(monkeypatch, tmp_path):
+    """Default behaviour is unchanged: no daemon means do it here."""
+    monkeypatch.setattr(daemon, "is_listening", lambda cfg, timeout=0.5: False)
+    cfg = _cfg()
+    assert cfg.local_index_fallback_allowed() is True
+    assert cli._delegate(cfg, _Args(local=False), "reindex_vault", {}, lambda m: None) is None
+
+
+def test_config_flag_turns_the_local_path_off(monkeypatch):
+    monkeypatch.setattr(daemon, "is_listening", lambda cfg, timeout=0.5: False)
+    cfg = _cfg(allow_local_index_fallback=False)
+    with pytest.raises(SystemExit) as exc:
+        cli._delegate(cfg, _Args(local=False), "reindex_vault", {}, lambda m: None)
+    # 0, not 1: a hook that skipped on purpose has not failed, and a non-zero
+    # exit would surface as an error on every session start.
+    assert exc.value.code == 0
+
+
+def test_a_sentinel_file_turns_it_off_without_editing_json(monkeypatch, tmp_path):
+    """The switch survives an install; a patched hook does not."""
+    # config.py resolves CONFIG_DIR from its own globals at call time, so this
+    # one patch is the whole seam.
+    monkeypatch.setattr(config_module, "CONFIG_DIR", tmp_path)
+    cfg = _cfg()
+    assert cfg.local_index_fallback_allowed() is True
+    (tmp_path / "no_auto_reindex").touch()
+    assert cfg.local_index_fallback_allowed() is False
+
+
+def test_explicit_local_still_wins(monkeypatch):
+    """`--local` is an operator asking on purpose, not a hook guessing."""
+    monkeypatch.setattr(daemon, "is_listening", lambda cfg, timeout=0.5: False)
+    cfg = _cfg(allow_local_index_fallback=False)
+    assert cli._delegate(cfg, _Args(local=True), "reindex_vault", {}, lambda m: None) is None
+
+
+def test_a_daemon_that_goes_away_mid_call_is_refused_too(monkeypatch):
+    """The riskier door: the daemon answered the probe, then stopped answering.
+
+    This is the shape the field failure took — the socket was up, so the probe
+    said yes, and the fallback ran anyway once the call timed out.
+    """
+    monkeypatch.setattr(daemon, "is_listening", lambda cfg, timeout=0.5: True)
+
+    def _boom(*a, **k):
+        raise daemon.DaemonUnavailable("connection reset")
+
+    monkeypatch.setattr(daemon, "submit_and_wait", _boom)
+    cfg = _cfg(allow_local_index_fallback=False)
+    with pytest.raises(SystemExit) as exc:
+        cli._delegate(cfg, _Args(local=False), "reindex_vault", {}, lambda m: None)
+    assert exc.value.code == 0

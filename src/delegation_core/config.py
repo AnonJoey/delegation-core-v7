@@ -186,6 +186,20 @@ class Config:
     heal_per_run: int = 10
     never_merge_folders: list = field(default_factory=lambda: ["sessions"])
 
+    # ── v0.13.1: guard against a second index writer ─────────────────────────
+    # When no daemon answers, index commands do the work in this process. That
+    # is what keeps the CLI usable on a machine that never installed the
+    # service — and it is also how a hook-fired `reindex` becomes a second
+    # writer against an index the running daemon holds open, which is the
+    # sequence that corrupted an index in the field: under load the daemon
+    # stops answering without dying, "no daemon" reads as true, and two
+    # processes write the same ChromaDB.
+    #
+    # Turn this off on a machine where the daemon is the only writer. The
+    # fallback then refuses instead of writing. `--local` still wins, because
+    # that is an operator asking on purpose rather than a hook guessing.
+    allow_local_index_fallback: bool = True
+
     # ── v0.5.1: optional web search ──────────────────────────────────────────
     # Opt-in. Reaches the public internet via DuckDuckGo, so it is off by
     # default and its dependency (duckduckgo-search) ships as the [web] extra.
@@ -370,6 +384,18 @@ class Config:
         if input_chars >= self.hybrid_local_min_chars:
             return "offer"                       # big: surface the choice + cost
         return "agent"                           # light interactive → Claude
+
+    def local_index_fallback_allowed(self) -> bool:
+        """Whether a command may write the index in this process.
+
+        Two ways to say no, because they answer different needs: the config
+        flag is the durable setting, and a `no_auto_reindex` file in the state
+        directory is the switch you can flip without editing JSON — and, unlike
+        a patched hook, neither is erased by the next install.
+        """
+        if not self.allow_local_index_fallback:
+            return False
+        return not (CONFIG_DIR / "no_auto_reindex").exists()
 
     def is_configured(self) -> bool:
         return bool(self.vault_path and self.llama_binary and self.llama_model)

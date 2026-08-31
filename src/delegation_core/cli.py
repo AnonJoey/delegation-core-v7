@@ -307,16 +307,31 @@ def _delegate(cfg, args, tool: str, arguments: dict, say) -> dict | None:
         return None
 
     from . import daemon
+    from .config import CONFIG_DIR
+
+    def _fall_back(reason: str):
+        """Take the local path, or refuse it when this machine has opted out.
+
+        Refusing exits 0, not 1: a hook that skipped a reindex on purpose has
+        not failed, and a non-zero exit here would surface as an error on every
+        session start. The message names the switch so the skip is legible in
+        the log rather than looking like nothing happened.
+        """
+        if cfg.local_index_fallback_allowed():
+            say(f"{reason} — running in this process.")
+            return None
+        say(f"{reason} — refusing to write the index from this process.")
+        say("Local index fallback is off (config allow_local_index_fallback, or "
+            f"{CONFIG_DIR / 'no_auto_reindex'}). Start the daemon, or pass --local.")
+        sys.exit(0)
 
     if not daemon.is_listening(cfg):
-        say(f"No daemon on {cfg.server_host}:{cfg.server_port} — running in this process.")
-        return None
+        return _fall_back(f"No daemon on {cfg.server_host}:{cfg.server_port}")
     try:
         say(f"Delegating to the daemon at {cfg.server_url} ...")
         return daemon.submit_and_wait(cfg, tool, arguments)
     except daemon.DaemonUnavailable as exc:
-        say(f"Daemon went away ({exc}) — running in this process.")
-        return None
+        return _fall_back(f"Daemon went away ({exc})")
     except daemon.DaemonCallFailed as exc:
         # Deliberately fatal. Retrying locally would start the second writer the
         # daemon exists to prevent, on top of a daemon that is already unwell.
