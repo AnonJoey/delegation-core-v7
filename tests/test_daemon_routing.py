@@ -95,6 +95,24 @@ class _FakeConnectError(Exception):
 _FakeConnectError.__name__ = "ConnectError"
 
 
+class _FakeProtocolError(Exception):
+    def __init__(self):
+        super().__init__("Server disconnected")
+    __qualname__ = "RemoteProtocolError"
+
+
+_FakeProtocolError.__name__ = "RemoteProtocolError"
+
+
+class _FakeReadTimeout(Exception):
+    def __init__(self):
+        super().__init__("Read timed out")
+    __qualname__ = "ReadTimeout"
+
+
+_FakeReadTimeout.__name__ = "ReadTimeout"
+
+
 def test_connection_errors_are_recognised_through_wrapping():
     """FastMCP and anyio both re-wrap; a refused connection must stay
     recognisable as 'no daemon' rather than becoming a hard failure."""
@@ -102,6 +120,9 @@ def test_connection_errors_are_recognised_through_wrapping():
     wrapped.__cause__ = _FakeConnectError()
     assert daemon._is_connection_error(wrapped)
     assert daemon._is_connection_error(ExceptionGroup("tg", [_FakeConnectError()]))
+    assert daemon._is_connection_error(_FakeProtocolError())
+    assert daemon._is_connection_error(_FakeReadTimeout())
+    assert daemon._is_connection_error(TimeoutError("socket timed out"))
     assert not daemon._is_connection_error(ValueError("tool rejected the argument"))
 
 

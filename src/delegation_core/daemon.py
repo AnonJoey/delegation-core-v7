@@ -1,29 +1,29 @@
 """
-daemon.py — the client half of the HTTP transport.
+daemon.py: the client half of the HTTP transport.
 
 Why this exists
 ---------------
 v0.11 moved the MCP server from stdio to a single HTTP daemon so that one
 process owns the BGE model and the ChromaDB index. That fixed the *client* side
-of multi-writer — four editors no longer spawn four servers — but left the
+of multi-writer (four editors no longer spawn four servers) but left the
 *command line* side untouched: ``delegation-core reindex``, ``maintain`` and
 ``ingest`` still each build their own ``VaultManager``, load BGE onto the GPU
 again, and open a second ``PersistentClient`` against the same index directory
 while the daemon holds it open.
 
 That is not a theoretical race. The hooks fire exactly those commands as
-detached processes — ``hooks/session_export.py`` runs ``reindex`` after writing
+detached processes: ``hooks/session_export.py`` runs ``reindex`` after writing
 a transcript, ``hooks/session_start_brief.py`` runs ``maintain`` and a backstop
-``reindex`` — so the common path through the product is the one that
+``reindex``, so the common path through the product is the one that
 reintroduces the concurrent writer. ``VaultManager._reload_if_disk_changed()``
 exists to survive it: the running daemon notices the mtime change and reopens
 the collection, and this line shows up in the journal minutes after a session
-starts::
+starts:
 
-    [INFO] Index changed on disk by another process — reopening
+    [INFO] Index changed on disk by another process: reopening
 
-That guard stays — a person can always run the CLI while the daemon is down, or
-edit the vault from a shell — but it should be the safety net, not the design.
+That guard stays: a person can always run the CLI while the daemon is down, or
+edit the vault from a shell, but it should be the safety net, not the design.
 When the daemon is up, the work belongs to it.
 
 What routing buys, beyond correctness
@@ -37,7 +37,7 @@ Failure policy
 --------------
 A call that never reached a daemon (nothing listening, connection refused
 mid-flight) raises ``DaemonUnavailable``, and callers fall back to running
-in-process — a machine with no daemon must still be able to reindex. A call
+in-process: a machine with no daemon must still be able to reindex. A call
 that *did* reach the daemon and failed there raises ``DaemonCallFailed``, which
 callers must not paper over by running locally: that would answer "the daemon
 had a problem" by starting the exact second writer this module removes.
@@ -62,13 +62,13 @@ PROBE_TIMEOUT_SEC = 0.5
 CALL_TIMEOUT_SEC = 120.0
 
 #: Poll pacing while waiting for a background job. The daemon's own
-#: ``check_again_in_seconds`` is the long-run signal — it comes from the median
-#: duration of past runs — but it is tuned for an agent spending a whole turn
+#: ``check_again_in_seconds`` is the long-run signal (it comes from the median
+#: duration of past runs) but it is tuned for an agent spending a whole turn
 #: per poll, and it has a floor of 30s. A blocked CLI process is not paying by
 #: the turn, and the job it usually waits on is an incremental reindex that
 #: finishes in well under a second: obeying the hint made a 70ms reindex take
 #: 10.6s of wall clock, measured. So the interval starts short and grows,
-#: bounded by the hint — fast jobs return immediately, long jobs settle into a
+#: bounded by the hint: fast jobs return immediately, long jobs settle into a
 #: slow beat instead of hammering the daemon.
 POLL_INITIAL_SEC = 0.25
 POLL_GROWTH = 1.6
@@ -80,7 +80,7 @@ JOB_WAIT_TIMEOUT_SEC = 3600.0
 
 
 class DaemonUnavailable(RuntimeError):
-    """No daemon answered — the caller may safely do the work itself."""
+    """No daemon answered: the caller may safely do the work itself."""
 
 
 class DaemonCallFailed(RuntimeError):
@@ -150,7 +150,7 @@ def _run(coro, what: str):
     """Run a daemon coroutine, mapping transport failures onto the two errors.
 
     The port was open a moment ago, so a connection failure here means the
-    daemon went away between the probe and the call (a restart, most likely) —
+    daemon went away between the probe and the call (a restart, most likely):
     that is still "no daemon", and the caller may proceed alone.
     """
     try:
@@ -184,16 +184,21 @@ def _is_connection_error(exc: BaseException) -> bool:
     """True if this exception (or anything it wraps) is a failure to connect.
 
     httpx raises ConnectError/ConnectTimeout for this, and both derive from
-    OSError only indirectly, so the check walks __cause__/__context__ — FastMCP
+    OSError only indirectly, so the check walks __cause__/__context__; FastMCP
     and anyio both re-wrap transport errors on the way up.
     """
     seen = set()
     current: BaseException | None = exc
+    conn_error_names = {
+        "ConnectError", "ConnectTimeout", "ReadError", "ReadTimeout",
+        "WriteError", "WriteTimeout", "PoolTimeout", "RemoteProtocolError",
+        "ProtocolError", "LocalProtocolError", "CloseError", "NetworkError",
+    }
     while current is not None and id(current) not in seen:
         seen.add(id(current))
-        if isinstance(current, (ConnectionError, OSError)):
+        if isinstance(current, (ConnectionError, OSError, TimeoutError)):
             return True
-        if type(current).__name__ in {"ConnectError", "ConnectTimeout", "ReadError"}:
+        if type(current).__name__ in conn_error_names:
             return True
         if isinstance(current, ExceptionGroup):  # anyio task groups wrap in these
             if any(_is_connection_error(sub) for sub in current.exceptions):
@@ -212,7 +217,7 @@ class _Poll:
 
 
 def next_poll_wait(status: dict, job_id: str, tool: str, poll: _Poll) -> float | None:
-    """How long to wait before polling again — or None when the job is finished.
+    """How long to wait before polling again, or None when the job is finished.
 
     All the decisions that can go wrong live here, in one synchronous function
     with no transport underneath it, because two of them already did:
@@ -229,9 +234,9 @@ def next_poll_wait(status: dict, job_id: str, tool: str, poll: _Poll) -> float |
     state = status.get("status")
     if state is None:
         # In-memory job ids do not survive a daemon restart, so a job that
-        # vanishes is not necessarily a job that failed — say which it is.
+        # vanishes is not necessarily a job that failed: say which it is.
         raise DaemonCallFailed(
-            f"the daemon lost job {job_id} ({status.get('error')}) — it may have "
+            f"the daemon lost job {job_id} ({status.get('error')}) : it may have "
             f"restarted mid-run; the work's state is unknown")
     if state == "done":
         return None
@@ -239,7 +244,7 @@ def next_poll_wait(status: dict, job_id: str, tool: str, poll: _Poll) -> float |
         raise DaemonCallFailed(f"{tool} failed on the daemon: {status.get('error')}")
     if time.monotonic() >= poll.deadline:
         raise DaemonCallFailed(
-            f"{tool} (job {job_id}) still running after {int(poll.timeout)}s — "
+            f"{tool} (job {job_id}) still running after {int(poll.timeout)}s: "
             f"left running on the daemon; check task_status({job_id})")
 
     hint = float(status.get("check_again_in_seconds") or POLL_MAX_SEC)
@@ -253,16 +258,16 @@ def submit_and_wait(cfg, tool: str, arguments: dict | None = None, *,
                     on_wait=None, timeout: float = JOB_WAIT_TIMEOUT_SEC) -> dict:
     """Call a ``*_bg`` tool, then poll ``task_status`` until the job finishes.
 
-    Returns the finished job dict — ``job["result"]`` is whatever the underlying
-    function returned. A tool that answers synchronously (no ``job_id``) is
+    Returns the finished job dict (``job["result"]`` is whatever the underlying
+    function returned). A tool that answers synchronously (no ``job_id``) is
     returned as-is, so this is safe to point at either kind.
 
     ``on_wait(seconds, job)`` is called before each sleep, for progress output.
 
     The submit and every poll share one MCP session. A session per call also
     works, but each costs an initialize/GET/DELETE round trip and registers its
-    own row in the daemon's connected-client tracking — one `maintain` showed up
-    as three separate clients.
+    own row in the daemon's connected-client tracking (one `maintain` showed up
+    as three separate clients).
     """
     if not is_listening(cfg):
         raise DaemonUnavailable(f"nothing listening on {cfg.server_host}:{cfg.server_port}")
@@ -286,3 +291,4 @@ def submit_and_wait(cfg, tool: str, arguments: dict | None = None, *,
                 await asyncio.sleep(wait)
 
     return _run(_session(), tool)
+

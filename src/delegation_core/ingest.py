@@ -23,7 +23,7 @@ logger = logging.getLogger("ingest")
 
 _REGISTRY_FILE = CONFIG_DIR / "ingested_sources.json"
 
-#: Extensions that mean "this was a codebase, not a document folder" — used only
+#: Extensions that mean "this was a codebase, not a document folder": used only
 #: to phrase the hint, not to decide what gets indexed.
 _CODE_HINT_EXTS = frozenset({
     ".py", ".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs", ".go", ".rs", ".java",
@@ -185,7 +185,7 @@ class IngestManager:
                     if c_info[0] == f_mtime and c_info[1] == f_size:
                         # Counted as unchanged, NOT as indexed. Reporting a skip
                         # as an index made "N arquivos reingeridos" indistinguishable
-                        # from "N arquivos already present" — the number stayed
+                        # from "N arquivos already present": the number stayed
                         # plausible on a run that embedded nothing at all, which is
                         # the one case where the operator needs to know.
                         skipped_unchanged.append(f_str)
@@ -199,8 +199,8 @@ class IngestManager:
                     continue
 
                 chunks = chunk_text(content, max_chars=max_chars, overlap=overlap)
-                # Ingested files are the bulk of a real index — 92.8% of rows on
-                # the deployment that asked for client scoping — so a filter that
+                # Ingested files are the bulk of a real index (92.8% of rows on
+                # the deployment that asked for client scoping), so a filter that
                 # skipped them would reach a fourteenth of the corpus and read as
                 # "that client has almost nothing". Derived from the configured
                 # roots only; no root, no client, never a guess.
@@ -239,12 +239,20 @@ class IngestManager:
                 skipped_unreadable.append(f.name)
                 errors.append(f"{f.name}: {e}")
 
+        merged_files = dict(cached_files) if (not force and not source.is_file()) else {}
+        merged_files.update(new_cached_files)
+
         registry[source_key] = {
-            "last_indexed":  now,
-            "indexed_count": len(indexed),
-            "error_count":   len(errors),
-            "recursive":     recursive,
-            "files":         new_cached_files,
+            "last_indexed":           now,
+            "indexed_count":          len(indexed),
+            "skipped_unchanged_count": len(skipped_unchanged),
+            "skipped_empty_count":     len(skipped_empty),
+            "skipped_unreadable_count": len(skipped_unreadable),
+            "skipped_dataless_count":  len(skipped_dataless),
+            "error_count":            len(errors),
+            "recursive":              recursive,
+            "exclude":                patterns if patterns else None,
+            "files":                  merged_files,
         }
         _save_registry(registry)
 
@@ -272,7 +280,7 @@ class IngestManager:
             code_like = sum(n for ext, n in unsupported.items() if ext in _CODE_HINT_EXTS)
             if code_like:
                 result["hint"] = (
-                    f"{code_like} code file(s) were not indexed — ingest_folder handles "
+                    f"{code_like} code file(s) were not indexed: ingest_folder handles "
                     "documents only. Use graph_build() to make a codebase searchable."
                 )
         return result
@@ -281,7 +289,7 @@ class IngestManager:
         """Drop everything previously ingested from source_path.
 
         ingest is upsert-by-absolute-path, which is safe for re-runs but leaves
-        rows behind forever once the source moves or is deleted — they keep
+        rows behind forever once the source moves or is deleted: they keep
         answering searches with paths that no longer resolve. Matches the source
         folder strictly or any file contained beneath it.
         """
