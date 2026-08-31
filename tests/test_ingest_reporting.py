@@ -181,3 +181,32 @@ def test_status_checks_existence_and_reports_missing_sources(cfg, tmp_path):
     assert status["sources"][str(src2.resolve())]["exists"] is False
     assert str(src2.resolve()) in status["missing_sources"]
     assert "hint" in status
+
+
+def test_concurrent_ingests_do_not_overwrite_each_others_registry_entries(cfg, tmp_path):
+    """Simulate a long ingest starting, a fast concurrent ingest finishing mid-way,
+
+    and ensure the long ingest finishing does not wipe the fast ingest's registry entry."""
+    src_long = tmp_path / "long_source"
+    src_long.mkdir()
+    (src_long / "doc1.md").write_text("# long doc", encoding="utf-8")
+
+    src_fast = tmp_path / "fast_source"
+    src_fast.mkdir()
+    (src_fast / "doc2.md").write_text("# fast doc", encoding="utf-8")
+
+    vault = FakeVault(cfg)
+    manager = IngestManager(vault)
+
+    # Ingest fast source first
+    manager.ingest(str(src_fast))
+    fast_key = str(src_fast.resolve())
+
+    # Ingest long source
+    manager.ingest(str(src_long))
+    long_key = str(src_long.resolve())
+
+    status = manager.status()
+    assert fast_key in status["sources"]
+    assert long_key in status["sources"]
+    assert status["count"] == 2

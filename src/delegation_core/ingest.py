@@ -11,6 +11,8 @@ New in v0.2.
 import fnmatch
 import json
 import logging
+import os
+import tempfile
 from collections import Counter
 from datetime import datetime
 from pathlib import Path
@@ -39,12 +41,46 @@ def _load_registry() -> dict:
         return {}
 
 
-def _save_registry(registry: dict):
+def _atomic_write_registry(registry: dict):
+    target_dir = _REGISTRY_FILE.parent
+    target_dir.mkdir(parents=True, exist_ok=True)
+    tmp = None
     try:
-        CONFIG_DIR.mkdir(parents=True, exist_ok=True)
-        _REGISTRY_FILE.write_text(json.dumps(registry, indent=2), encoding="utf-8")
+        with tempfile.NamedTemporaryFile("w", dir=str(target_dir), delete=False, encoding="utf-8") as tf:
+            json.dump(registry, tf, indent=2)
+            tmp = tf.name
+        os.replace(tmp, str(_REGISTRY_FILE))
     except Exception as e:
+        if tmp and os.path.exists(tmp):
+            try:
+                os.unlink(tmp)
+            except OSError:
+                pass
         logger.warning("Could not save ingest registry: %s", e)
+
+
+def _save_registry(registry: dict):
+    _atomic_write_registry(registry)
+
+
+def _update_source_entry(source_key: str, entry: dict):
+    try:
+        fresh = _load_registry()
+        fresh[source_key] = entry
+        _atomic_write_registry(fresh)
+    except Exception as e:
+        logger.warning("Could not update registry entry for %s: %s", source_key, e)
+
+
+def _remove_source_entry(source_key: str) -> bool:
+    try:
+        fresh = _load_registry()
+        had_entry = fresh.pop(source_key, None) is not None
+        _atomic_write_registry(fresh)
+        return had_entry
+    except Exception as e:
+        logger.warning("Could not remove registry entry for %s: %s", source_key, e)
+        return False
 
 
 def _paged_get(collection, limit: int = 5000, **kwargs) -> dict:
@@ -242,7 +278,7 @@ class IngestManager:
         merged_files = dict(cached_files) if (not force and not source.is_file()) else {}
         merged_files.update(new_cached_files)
 
-        registry[source_key] = {
+        source_entry = {
             "last_indexed":           now,
             "indexed_count":          len(indexed),
             "skipped_unchanged_count": len(skipped_unchanged),
@@ -254,7 +290,7 @@ class IngestManager:
             "exclude":                patterns if patterns else None,
             "files":                  merged_files,
         }
-        _save_registry(registry)
+        _update_source_entry(source_key, source_entry)
 
         total_skipped = len(skipped_empty) + len(skipped_unreadable) + len(skipped_dataless)
         result = {
@@ -330,9 +366,7 @@ class IngestManager:
             logger.warning("Ingest forget failed for %s: %s", source_str, e)
             return {"error": str(e)}
 
-        registry = _load_registry()
-        had_entry = registry.pop(source_str, None) is not None
-        _save_registry(registry)
+        had_entry = _remove_source_entry(source_str)
         return {"source": source_str, "removed_chunks": removed, "registry_entry_removed": had_entry}
 
 
