@@ -1037,22 +1037,35 @@ async def task_status(job_id: str) -> str:
 # ── external ingestion ────────────────────────────────────────────────────────
 
 @mcp.tool()
-async def ingest_folder(source_path: str, recursive: bool = True) -> str:
+async def ingest_folder(source_path: str, recursive: bool = True,
+                        exclude: list[str] | None = None) -> str:
     """
     Index all supported files from an external folder into vault search.
     Original files are NEVER moved or modified. Results are tagged folder='_external'.
-    Re-running is safe — files are upserted, not duplicated.
+    Re-running is safe, files are upserted, not duplicated.
     For large directories, prefer ingest_folder_bg().
+
+    exclude: glob patterns to leave out, matched against the path relative to
+    source_path, the file name, or any single path component. So `Logs/*`,
+    `*.log` and `Logs` all work, and all three are common. Use it for the
+    subdirectory that holds build output, manifests or logs: those are text, so
+    the extractor takes them, and they cost embedding time while answering
+    nothing. The count comes back as `excluded`.
     """
     loop = asyncio.get_running_loop()
-    result = await loop.run_in_executor(None, lambda: _ingest.ingest(source_path, recursive=recursive))
+    result = await loop.run_in_executor(
+        None, lambda: _ingest.ingest(source_path, recursive=recursive, exclude=exclude))
     return json.dumps(result)
 
 
 @mcp.tool()
-async def ingest_folder_bg(source_path: str, recursive: bool = True) -> str:
-    """Index files from an external folder in the background. Returns a job_id immediately."""
-    job_id = jobs.submit("ingest_folder", _ingest.ingest, source_path, recursive)
+async def ingest_folder_bg(source_path: str, recursive: bool = True,
+                           exclude: list[str] | None = None) -> str:
+    """Index files from an external folder in the background. Returns a job_id immediately.
+
+    exclude takes the same glob patterns as ingest_folder().
+    """
+    job_id = jobs.submit("ingest_folder", _ingest.ingest, source_path, recursive, False, exclude)
     return json.dumps({"job_id": job_id, "source": source_path, "status": "running",
                        "message": "Ingestion started. Call task_status(job_id) to check progress."})
 

@@ -318,9 +318,9 @@ def _delegate(cfg, args, tool: str, arguments: dict, say) -> dict | None:
         the log rather than looking like nothing happened.
         """
         if cfg.local_index_fallback_allowed():
-            say(f"{reason} — running in this process.")
+            say(f"{reason}. Running in this process.")
             return None
-        say(f"{reason} — refusing to write the index from this process.")
+        say(f"{reason}. Refusing to write the index from this process.")
         say("Local index fallback is off (config allow_local_index_fallback, or "
             f"{CONFIG_DIR / 'no_auto_reindex'}). Start the daemon, or pass --local.")
         sys.exit(0)

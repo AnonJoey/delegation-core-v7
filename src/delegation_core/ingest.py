@@ -1,13 +1,14 @@
 """
-ingest.py — External folder ingestion (ABNER).
+ingest.py : External folder ingestion (ABNER).
 
 Index files from any path without moving or modifying them.
 Uses embeddings.chunk_text for long documents and persists an ingestion registry
-so re-runs are safe (upsert semantics — no duplicates).
+so re-runs are safe (upsert semantics, no duplicates).
 
 New in v0.2.
 """
 
+import fnmatch
 import json
 import logging
 from collections import Counter
@@ -69,6 +70,29 @@ def _paged_get(collection, limit: int = 5000, **kwargs) -> dict:
         return collection.get(**kwargs)
 
 
+def is_excluded(path: Path, source: Path, patterns: list[str]) -> bool:
+    """Whether a glob pattern from `exclude` keeps this file out.
+
+    Matched against three shapes, because callers reach for all three and a
+    pattern that quietly matches nothing looks exactly like a clean folder:
+    the path relative to source (`Logs/*`), the file name (`*.log`), and any
+    single path component (`Logs`).
+    """
+    if not patterns:
+        return False
+    try:
+        rel = path.relative_to(source).as_posix()
+    except ValueError:
+        rel = path.name
+    parts = rel.split("/")
+    for p in patterns:
+        if fnmatch.fnmatch(rel, p) or fnmatch.fnmatch(path.name, p):
+            return True
+        if any(fnmatch.fnmatch(part, p) for part in parts):
+            return True
+    return False
+
+
 class IngestManager:
     """Index external files into the vault's ChromaDB without touching them on disk.
 
@@ -81,12 +105,22 @@ class IngestManager:
         self._vault = vault_manager
         self._cfg = vault_manager.cfg
 
-    def ingest(self, source_path: str, recursive: bool = True, force: bool = False) -> dict:
+    def ingest(self, source_path: str, recursive: bool = True, force: bool = False,
+               exclude: list[str] | None = None) -> dict:
         """Index all supported files under source_path.
 
         source_path: absolute path to a file or directory.
         recursive: walk subdirectories (default True).
         force: re-index even if file mtime and size are unchanged (default False).
+        exclude: glob patterns for paths to leave out (default none).
+
+        On exclude: without it the only control over what gets indexed is which
+        directory you point at, so a folder holding one useful document and a
+        build log costs you the log in the index. Measured on a real vault: a
+        `Logs/` subdirectory of MD5 manifests and file listings, 188 thousand
+        lines of hashes and paths, took 19.5 minutes to embed and answered no
+        question anybody would ask. The caller could only avoid it by ingesting
+        each useful subfolder separately, which is a workaround, not a control.
         """
         from .extractor import DatalessFileError, SUPPORTED, UnreadableFileError, extract
 
@@ -97,7 +131,13 @@ class IngestManager:
         candidates: list[Path]
         unsupported: Counter[str] = Counter()
 
+        patterns = [p for p in (exclude or []) if p]
+        excluded: list[str] = []
+
         def _keep(f: Path) -> bool:
+            if is_excluded(f, source, patterns):
+                excluded.append(f.name)
+                return False
             if f.suffix.lower() in SUPPORTED:
                 return True
             unsupported[f.suffix.lower() or "(sem extensão)"] += 1
@@ -219,6 +259,11 @@ class IngestManager:
             "skipped_unchanged":  len(skipped_unchanged),
             "errors":             errors,
         }
+        if excluded:
+            # Reported, not silent: a pattern that matches more than the caller
+            # meant looks exactly like a folder with fewer files in it.
+            result["excluded"] = len(excluded)
+            result["excluded_files"] = excluded[:20]
         if skipped_dataless:
             result["dataless_files"] = skipped_dataless
         if unsupported:
