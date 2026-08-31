@@ -1,5 +1,5 @@
 """
-cli.py — delegation-core v0.8.0 command-line interface.
+cli.py: delegation-core v0.8.0 command-line interface.
 
 Commands:
   setup          Interactive setup wizard (run once per machine).
@@ -12,12 +12,12 @@ Commands:
   relink         Add wikilinks to notes in a vault subfolder.
   search         Query the vault (BGE similarity search, no LLM required).
   compress       Extract key facts/decisions/action items from text via llama.cpp.
-  note           write / read / update / list / find-similar — direct vault note access.
-  graph          build / list / report / affected / hook install|uninstall|status —
+  note           write / read / update / list / find-similar: direct vault note access.
+  graph          build / list / report / affected / hook install|uninstall|status : 
                  the vendored code-graph pipeline (opt-in [graph] extra).
-  process        create / list / update / get — cross-session process tracking.
+  process        create / list / update / get: cross-session process tracking.
 
-v0.7.1: added search/compress/note/graph/process — previously these were only
+v0.7.1: added search/compress/note/graph/process: previously these were only
 reachable through an MCP client (Claude Desktop/Code); this repo already had a
 real, installed CLI (this file) but it only covered operational/maintenance
 commands, not the actual knowledge-work tools. This closes that gap so the
@@ -25,11 +25,11 @@ vault and the code-graph pipeline are usable standalone from a terminal.
 
 v0.11: reindex/maintain/ingest hand their work to the running HTTP daemon
 instead of opening a second ChromaDB and loading a second copy of BGE. They
-still do the work in-process when no daemon answers — and with --local when
-told to — so a machine without the service keeps working. See daemon.py.
+still do the work in-process when no daemon answers: and with --local when
+told to: so a machine without the service keeps working. See daemon.py.
 
 v0.8.0: added dashboard-api, the local JSON sidecar the Tauri dashboard (see
-dashboard/) talks to. Not an MCP tool — a separate small HTTP process, since
+dashboard/) talks to. Not an MCP tool: a separate small HTTP process, since
 FastMCP's mcp.run() serves one transport at a time (stdio here) and can't
 also serve HTTP for a UI in the same process.
 """
@@ -55,7 +55,7 @@ def _read_content(file_arg: str | None, what: str = "content") -> str:
         data = sys.stdin.read()
         if data.strip():
             return data
-    sys.stderr.write(f"No {what} provided — pass --file PATH or pipe it via stdin.\n")
+    sys.stderr.write(f"No {what} provided: pass --file PATH or pipe it via stdin.\n")
     sys.exit(1)
 
 
@@ -91,9 +91,9 @@ def cmd_run(args):
     if getattr(args, "recalibrate", False):
         cfg.tok_sec = 0.0
         cfg.save()
-        sys.stderr.write("Calibration reset — will recalibrate on startup.\n")
+        sys.stderr.write("Calibration reset: will recalibrate on startup.\n")
 
-    # Prefer cached model weights, but only when they exist — see prefer_offline().
+    # Prefer cached model weights, but only when they exist: see prefer_offline().
     from .embeddings import prefer_offline
     prefer_offline(cfg.bge_model)
     # Suppress FastMCP update check on startup
@@ -165,25 +165,34 @@ def cmd_clients(args):
     cfg = Config.load()
     token = cfg.ensure_server_token()
 
-    if args.show or not (args.claude_code or args.codex or args.antigravity):
+    if args.show or not (args.claude_code or args.claude_desktop or args.codex or args.antigravity):
         console.print(f"[bold]URL[/bold]    {cfg.server_url}")
         console.print(f"[bold]Header[/bold] Authorization: Bearer {token}")
         console.print(f"[bold]Env[/bold]    {_clients.CODEX_TOKEN_ENV_VAR}={token}")
         if not args.show:
-            console.print("\n[dim]Nothing written. Pass --claude-code, --codex "
+            console.print("\n[dim]Nothing written. Pass --claude-code, --claude-desktop, --codex "
                           "and/or --antigravity to update a client config.[/dim]")
         return 0
 
     if args.claude_code:
         result = _clients.install_claude_code(cfg)
-        console.print(f"[green]claude-code[/green] {result['status']} — {result['path']}")
+        console.print(f"[green]claude-code[/green] {result['status']}: {result['path']}")
         if result.get("replaced"):
             console.print(f"  [dim]replaced: {result['replaced']}[/dim]")
         console.print("  [yellow]Reconnect the client for this to take effect.[/yellow]")
 
+    if args.claude_desktop:
+        result = _clients.install_claude_desktop(cfg)
+        colour = "red" if result["status"] == "error" else "green"
+        console.print(f"[{colour}]claude-desktop[/{colour}] {result['status']}: {result['path']}")
+        if result.get("detail"):
+            console.print(f"  [yellow]{result['detail']}[/yellow]")
+        else:
+            console.print("  [yellow]Restart Claude Desktop for this to take effect.[/yellow]")
+
     if args.codex:
         result = _clients.install_codex(cfg)
-        console.print(f"[green]codex[/green] {result['status']} — {result['path']}")
+        console.print(f"[green]codex[/green] {result['status']}: {result['path']}")
         if result.get("note"):
             console.print(f"  [yellow]{result['note']}[/yellow]")
             console.print(result["block"])
@@ -193,7 +202,7 @@ def cmd_clients(args):
     if args.antigravity:
         result = _clients.install_antigravity(cfg)
         colour = "red" if result["status"] == "error" else "green"
-        console.print(f"[{colour}]antigravity[/{colour}] {result['status']} — {result['path']}")
+        console.print(f"[{colour}]antigravity[/{colour}] {result['status']}: {result['path']}")
         if result.get("detail"):
             console.print(f"  [yellow]{result['detail']}[/yellow]")
         else:
@@ -233,9 +242,9 @@ def cmd_status(_args):
 
     # In agent mode ensure_running() refuses to spawn llama at all (engine.py),
     # so probing /health and reporting "will start on first tool call" was
-    # actively misleading — it never will.
+    # actively misleading: it never will.
     if cfg.is_agent_mode:
-        llama_str = "[dim]not used — generation delegated to the calling agent[/dim]"
+        llama_str = "[dim]not used: generation delegated to the calling agent[/dim]"
     else:
         import requests
         on_demand = "will start on first big/bulk task" if cfg.is_hybrid_mode \
@@ -248,7 +257,7 @@ def cmd_status(_args):
                 else f"[yellow]unhealthy[/yellow]  ({cfg.llama_url})"
             )
         except Exception:
-            llama_str = f"[dim]offline — {on_demand}[/dim]  ({cfg.llama_url})"
+            llama_str = f"[dim]offline: {on_demand}[/dim]  ({cfg.llama_url})"
     table.add_row("llama.cpp", llama_str)
 
     # Where the running code actually comes from. An editable install serves the
@@ -259,7 +268,7 @@ def cmd_status(_args):
         import delegation_core as _pkg
         origin = Path(_pkg.__file__).resolve().parent
         editable = not any(part == "site-packages" for part in origin.parts)
-        table.add_row("code", f"{origin}" + ("  [yellow](editable — live working tree)[/yellow]"
+        table.add_row("code", f"{origin}" + ("  [yellow](editable: live working tree)[/yellow]"
                                              if editable else ""))
     except Exception:
         pass
@@ -270,8 +279,8 @@ def cmd_status(_args):
         # cfg.collection_name, not the historical literal: every other caller
         # derives the name from the embedding model, so on any install using
         # something other than bge-base this looked up a collection that does
-        # not exist and reported "not initialized — run: delegation-core
-        # reindex" over a perfectly healthy index — recommending a rebuild that
+        # not exist and reported "not initialized: run: delegation-core
+        # reindex" over a perfectly healthy index: recommending a rebuild that
         # costs hours on a real vault.
         col = client.get_collection(cfg.collection_name)
         # "rows", not "notes": since v0.12 a note is one row per chunk, so this
@@ -279,7 +288,7 @@ def cmd_status(_args):
         # exactly the wrong conclusion about the size of the vault.
         table.add_row("ChromaDB", f"[green]✓[/green]  {col.count()} rows indexed")
     except Exception:
-        table.add_row("ChromaDB", "[dim]not initialized — run: delegation-core reindex[/dim]")
+        table.add_row("ChromaDB", "[dim]not initialized: run: delegation-core reindex[/dim]")
 
     # v0.2 feature flags
     table.add_row("budget_mode",  cfg.budget_mode)
@@ -297,7 +306,7 @@ def _delegate(cfg, args, tool: str, arguments: dict, say) -> dict | None:
     Every command that writes to ChromaDB goes through here. When the daemon is
     up it owns the index and the resident BGE model, so a second process opening
     the same directory is both a concurrent writer and a second ~2.4 GiB copy of
-    the model on the GPU — see daemon.py for what that cost in practice, and for
+    the model on the GPU: see daemon.py for what that cost in practice, and for
     why a *failed* daemon call is not allowed to fall back to local work.
 
     `say` reports routing on the command's own output channel, since `maintain`
@@ -557,7 +566,7 @@ def cmd_compress(args):
 
 def _inject_related_links(vault, note_path, rel_path: str, folder: str, stem: str) -> None:
     """Best-effort forward wikilinks + backlinks after a direct CLI write, mirroring
-    server.py's _post_write_links() — BGE search only, no llama.cpp call needed."""
+    server.py's _post_write_links(): BGE search only, no llama.cpp call needed."""
     from .linker import inject_backlinks, wikilinks
     try:
         content = note_path.read_text(encoding="utf-8")
@@ -769,7 +778,7 @@ def cmd_graph_preview(args):
 
     if result.get("previous_build"):
         pb = result["previous_build"]
-        console.print(f"  [yellow]já construído[/yellow] em {pb['built_at']} — "
+        console.print(f"  [yellow]já construído[/yellow] em {pb['built_at']}: "
                       f"{pb['node_count']} nós, {pb['community_count']} comunidades, "
                       f"{pb['vault_notes_filed']} notas no vault")
 
@@ -873,7 +882,7 @@ def cmd_embed_model(args):
         pass
 
     if existing and not args.reindex:
-        console.print(f"  [green]{existing} linhas já indexadas nessa coleção — pronto para usar.[/green]")
+        console.print(f"  [green]{existing} linhas já indexadas nessa coleção: pronto para usar.[/green]")
     elif not args.reindex:
         console.print("  [yellow]Coleção vazia.[/yellow] Rode: delegation-core embed-model "
                       f"{target} --reindex")
@@ -887,7 +896,7 @@ def _source_row_count(vault, source: str) -> int:
     """How many rows this ingest source still has in the collection.
 
     Used to tell "the index was rebuilt and this source is gone" from "the
-    source is indexed and merely unchanged" — the two cases a reindex must
+    source is indexed and merely unchanged": the two cases a reindex must
     treat differently. Counting is deliberately cheap and ids-only; the answer
     only has to distinguish zero from non-zero. Any failure reads as 0, which
     errs toward re-ingesting: costly, but never silently leaves a source out.
@@ -907,7 +916,7 @@ def _reindex_everything(console, cfg):
     """Rebuild the vault index AND replay every ingested external folder.
 
     reindex_vault only walks cfg.vault_folders, so a model switch that only
-    reindexed the vault silently dropped every ingest_folder'd file — 76 of them
+    reindexed the vault silently dropped every ingest_folder'd file: 76 of them
     on this machine, from seven registered sources. The registry is what makes
     them recoverable, so it is replayed here rather than left to be noticed later.
     """
@@ -938,7 +947,7 @@ def _reindex_everything(console, cfg):
         #
         # Both extremes are wrong. Never forcing means v0.12's per-file
         # mtime+size cache makes every file compare as unchanged, so the command
-        # re-embeds nothing — exactly when it is being run to recover, after a
+        # re-embeds nothing: exactly when it is being run to recover, after a
         # Chroma rebuild or a model switch left the new collection empty while
         # the registry insists everything is indexed. Always forcing costs a
         # full re-embed of the corpus on every invocation: 4.8 hours for 6,637
@@ -1014,7 +1023,7 @@ def cmd_graph_list(_args):
     for name, info in result["graphs"].items():
         console.print(f"[bold]{name}[/bold]  [dim]{info['source_path']}[/dim]")
         console.print(f"  {info['node_count']} nodes, {info['edge_count']} edges, "
-                      f"{info['community_count']} communities — built {info['built_at']}")
+                      f"{info['community_count']} communities: built {info['built_at']}")
 
 
 def cmd_graph_report(args):
@@ -1127,7 +1136,7 @@ def cmd_process_list(args):
     for p in processes:
         done = sum(s["done"] for s in p["steps"]) if p["steps"] else 0
         total = len(p["steps"])
-        console.print(f"[bold]{p['id']}[/bold]  {p['name']}  [dim]({done}/{total} — {p['status']})[/dim]")
+        console.print(f"[bold]{p['id']}[/bold]  {p['name']}  [dim]({done}/{total}: {p['status']})[/dim]")
 
 
 def cmd_process_update(args):
@@ -1165,7 +1174,7 @@ def cmd_process_get(args):
 def main():
     parser = argparse.ArgumentParser(
         prog="delegation-core",
-        description="Local MCP delegation server — llama.cpp + BGE + ChromaDB + Obsidian vault",
+        description="Local MCP delegation server: llama.cpp + BGE + ChromaDB + Obsidian vault",
     )
     sub = parser.add_subparsers(dest="command", metavar="command")
 
@@ -1183,6 +1192,8 @@ def main():
         "clients", help="Point MCP clients at the HTTP daemon (migrates from stdio)")
     p_clients.add_argument("--claude-code", action="store_true",
                            help="Rewrite delegation-core's entry in ~/.claude.json")
+    p_clients.add_argument("--claude-desktop", action="store_true",
+                           help="Point Claude Desktop (claude_desktop_config.json) at the daemon")
     p_clients.add_argument("--antigravity", action="store_true",
                            help="Point Antigravity / the Gemini CLI (agy) at the daemon")
     p_clients.add_argument("--codex", action="store_true",
@@ -1206,7 +1217,7 @@ def main():
     _add_local_flag(p_maintain)
 
     # cmd_embed_model existed and was never registered, while cmd_status told
-    # users to run `delegation-core embed-model ...` — the command it named did
+    # users to run `delegation-core embed-model ...`: the command it named did
     # not exist. Same shape as the graph labeler nothing called.
     p_embed = sub.add_parser("embed-model",
                              help="List calibrated embedding models, or switch to one")

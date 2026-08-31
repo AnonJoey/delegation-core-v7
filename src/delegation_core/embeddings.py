@@ -1,5 +1,5 @@
 """
-embeddings.py — BGE embedding function factory and text chunking utilities.
+embeddings.py: BGE embedding function factory and text chunking utilities.
 
 Isolated from vault.py so the embedding backend can be swapped without
 touching vault logic. normalize_embeddings=True is mandatory for BGE
@@ -24,19 +24,19 @@ logger = logging.getLogger("embeddings")
 #: the old 0.55 floor silently cut three of four known-good answers.
 #:
 #: Measured head-to-head over the same 1608 indexed rows, 9 known-answer queries:
-#:   bge-base-en-v1.5 — sharper when it hits (0.75–0.82 at rank 1), but returned
+#:   bge-base-en-v1.5: sharper when it hits (0.75-0.82 at rank 1), but returned
 #:                      nothing at all for 4 of 9, three of them Portuguese.
-#:   bge-m3           — found the answer in all 9, at a compressed scale
-#:                      (irrelevant p95 0.480 / max 0.524; correct 0.518–0.677).
+#:   bge-m3          : found the answer in all 9, at a compressed scale
+#:                      (irrelevant p95 0.480 / max 0.524; correct 0.518-0.677).
 MODEL_PROFILES: dict[str, dict] = {
     "BAAI/bge-base-en-v1.5": {
-        "collection": "vault_bge",          # historical name — do not rename, it holds existing data
+        "collection": "vault_bge",          # historical name: do not rename, it holds existing data
         "dim": 768,
         "max_seq": 512,
         "search_threshold": 0.55,
         "confidence": (0.80, 0.65),
         "languages": "inglês",
-        "summary": "menor e mais rápido, ranqueia com mais contraste — mas monolíngue",
+        "summary": "menor e mais rápido, ranqueia com mais contraste: mas monolíngue",
     },
     "BAAI/bge-m3": {
         "collection": "vault_bge_m3",
@@ -58,7 +58,7 @@ DEFAULT_PROFILE = {
     "search_threshold": 0.50,
     "confidence": (0.80, 0.65),
     "languages": "desconhecido",
-    "summary": "sem calibração medida — limiares são chute conservador",
+    "summary": "sem calibração medida: limiares são chute conservador",
 }
 
 
@@ -133,12 +133,12 @@ def prefer_offline(model_name: str) -> bool:
     if os.environ.get("HF_HUB_OFFLINE") is not None:
         return os.environ["HF_HUB_OFFLINE"] == "1"   # explicit operator choice wins
     if not model_name:
-        return False        # nothing to look for — stay online rather than lock out
+        return False        # nothing to look for: stay online rather than lock out
     if _model_is_cached(model_name):
         os.environ["HF_HUB_OFFLINE"] = "1"
         return True
     logger.info(
-        "Embedding model %s is not cached locally — leaving HF online for this run "
+        "Embedding model %s is not cached locally: leaving HF online for this run "
         "so it can be fetched once. Later runs will start offline.", model_name,
     )
     return False
@@ -161,7 +161,7 @@ def _effective_max_seq_length(model_name: str, requested: int | None) -> int | N
     """Resolve the sequence-length cap to apply, or None for "leave the model alone".
 
     MODEL_PROFILES already records each model's real input window, and until now that
-    field was display-only — cli.py prints it in the model table and nothing else read
+    field was display-only: cli.py prints it in the model table and nothing else read
     it. It is the one number on hand that can catch a config asking for more than the
     weights can do: raising max_seq_length past a model's trained window does not
     extend the window, it hands the encoder positions its embeddings cannot represent.
@@ -174,7 +174,7 @@ def _effective_max_seq_length(model_name: str, requested: int | None) -> int | N
     ceiling = profile_for(model_name).get("max_seq")
     if ceiling and requested > ceiling:
         logger.warning(
-            "Configured max_seq_length=%d exceeds %s's %d-token window — clamping to %d",
+            "Configured max_seq_length=%d exceeds %s's %d-token window: clamping to %d",
             requested, model_name, ceiling, ceiling,
         )
         return ceiling
@@ -195,7 +195,7 @@ def effective_chunk_chars(model_name: str, requested_chars: int,
 
     Chunk size is configured in characters because chunk_text splits on
     characters; the model's limit is in tokens. Nothing reconciled the two, so a
-    4000-character chunk — around 1000 English tokens, more in Portuguese — was
+    4000-character chunk: around 1000 English tokens, more in Portuguese: was
     fine under bge-m3's window and silently cut in half under bge-base-en-v1.5,
     whose window is 512. That is the very bug chunking exists to fix, returning
     at a smaller scale: the tail of every chunk simply never reaches the index.
@@ -208,7 +208,7 @@ def effective_chunk_chars(model_name: str, requested_chars: int,
     budget = int(ceiling * _CHARS_PER_TOKEN_FLOOR)
     if budget < requested_chars:
         logger.info(
-            "Chunk size %d chars exceeds what %s can embed at %d tokens — "
+            "Chunk size %d chars exceeds what %s can embed at %d tokens: "
             "chunking at %d chars instead",
             requested_chars, model_name, ceiling, budget,
         )
@@ -227,11 +227,11 @@ def _is_out_of_memory(exc: BaseException) -> bool:
     1. isinstance against torch's real exception, but only if torch is ALREADY
        imported. sys.modules is consulted rather than `import torch` so the
        module keeps its lazy-import discipline and still works where torch is
-       absent — and if we are far enough along to be encoding on a GPU, torch is
+       absent: and if we are far enough along to be encoding on a GPU, torch is
        loaded by definition.
     2. Class name, for accelerator backends that define their own.
-    3. Message text — needed because older torch raised a plain RuntimeError
-       ("CUDA out of memory. Tried to allocate ...") — but requiring an
+    3. Message text: needed because older torch raised a plain RuntimeError
+       ("CUDA out of memory. Tried to allocate ..."): but requiring an
        accelerator to be named alongside the phrase. A bare "out of memory" from
        anywhere else in the stack used to be enough to trigger the fallback.
     """
@@ -260,7 +260,7 @@ def _limited_embedding_function_class(base: type) -> type:
 
       * STEF forwards **kwargs straight into SentenceTransformer.__init__, which
         (sentence-transformers 5.5.1) accepts neither `max_seq_length` nor
-        `batch_size` and has no **kwargs of its own — both are a TypeError, not a
+        `batch_size` and has no **kwargs of its own: both are a TypeError, not a
         silent no-op. max_seq_length is a *post-construction* property on the model.
       * STEF.__call__ never passes batch_size to .encode() at all, so the model's own
         default of 32 applies no matter what anyone configured.
@@ -274,7 +274,7 @@ def _limited_embedding_function_class(base: type) -> type:
     default_space()/build_from_config() stay byte-for-byte the base's. chromadb 1.5.9
     serialises the embedding function into the collection config and validates it
     against schemas/embedding_functions/sentence_transformer.json, which declares
-    additionalProperties=false — a get_config() carrying two extra keys would raise
+    additionalProperties=false: a get_config() carrying two extra keys would raise
     inside _serialize_config's try, and the except there quietly rewrites the whole
     entry to {"type": "legacy"}. The cost of inheriting build_from_config unchanged
     is that an EF chromadb rehydrates from that stored config comes back as a plain
@@ -300,14 +300,14 @@ def _limited_embedding_function_class(base: type) -> type:
             model = getattr(self, "_model", None) if self.max_seq_length else None
             if self.max_seq_length and model is None:
                 logger.warning(
-                    "Embedding backend %s exposes no _model — max_seq_length=%d not applied",
+                    "Embedding backend %s exposes no _model: max_seq_length=%d not applied",
                     type(self).__mro__[1].__name__, self.max_seq_length,
                 )
             elif model is not None:
                 # STEF caches SentenceTransformer instances in a class-level dict keyed
                 # by model name, so this mutates the one shared model rather than a copy.
-                # That is the behaviour we want — every EF over this model should honour
-                # the cap — but it does mean the last cap constructed wins if two ever
+                # That is the behaviour we want: every EF over this model should honour
+                # the cap: but it does mean the last cap constructed wins if two ever
                 # disagree, which is why the value is resolved once, up in the factory.
                 model.max_seq_length = self.max_seq_length
 
@@ -315,13 +315,13 @@ def _limited_embedding_function_class(base: type) -> type:
             # Reimplements the base's __call__ body rather than delegating to it: the
             # EmbeddingFunction protocol's __init_subclass__ wraps every __call__ it
             # sees in validate/normalize, so super().__call__() would run that wrapper
-            # a second time — and .encode() is the only seam batch_size can enter by.
+            # a second time: and .encode() is the only seam batch_size can enter by.
             encode_kwargs = {}
             if self.batch_size:
                 encode_kwargs["batch_size"] = self.batch_size
             # Re-assert the cap here, not only at construction. STEF keys cached
             # SentenceTransformer instances by model name in a class-level dict,
-            # so every EF over one model shares an instance — and setting the cap
+            # so every EF over one model shares an instance: and setting the cap
             # only in __init__ meant the last EF constructed silently decided the
             # sequence length for all of them. Applying it per encode makes each
             # EF get its own cap whoever built last, and costs an attribute
@@ -342,7 +342,7 @@ def _limited_embedding_function_class(base: type) -> type:
             except Exception as e:
                 # make_bge_embedding_function's fallback only covers OOM while the
                 # weights are being *placed*. The OOM that motivated these limits hit
-                # mid-reindex — inside encode, where nothing caught it and the reindex
+                # mid-reindex: inside encode, where nothing caught it and the reindex
                 # died with the vault half indexed. The caps above are the actual fix;
                 # this is the net under them, because how much VRAM is free depends on
                 # what else is running (llama.cpp shares this GPU) and no static cap is
@@ -358,7 +358,7 @@ def _limited_embedding_function_class(base: type) -> type:
                 # able to say when it started.
                 logger.error(
                     "Embedding encode ran out of memory on %s (%s). Moving the model to "
-                    "cpu PERMANENTLY for this process — embedding will be far slower "
+                    "cpu PERMANENTLY for this process: embedding will be far slower "
                     "until it restarts. Lower embed_batch_size or embed_max_seq_length, "
                     "or free the accelerator, to avoid this.", self.device, e,
                 )
@@ -386,7 +386,7 @@ def make_bge_embedding_function(model_name: str, max_seq_length: int | None = No
     max_seq_length and batch_size cap what a single encode call asks of the device.
     Transformer attention costs batch x seq^2, so bge-m3's advertised 8192-token
     window at .encode()'s default batch of 32 is enough to exhaust a 16 GB card
-    partway through a reindex — observed in production. Both default to None,
+    partway through a reindex: observed in production. Both default to None,
     meaning "leave the model's own default alone", so every caller that predates
     them behaves exactly as before.
     """
@@ -397,7 +397,7 @@ def make_bge_embedding_function(model_name: str, max_seq_length: int | None = No
 
     def build(on_device: str):
         """One construction attempt. Both call sites below go through here so the
-        cpu fallback cannot drift into loading the model without the limits — an
+        cpu fallback cannot drift into loading the model without the limits: an
         unlimited cpu encode is slower than the failure it replaced, not safer."""
         if max_seq_length is None and batch_size is None:
             return SentenceTransformerEmbeddingFunction(
@@ -415,6 +415,14 @@ def make_bge_embedding_function(model_name: str, max_seq_length: int | None = No
         )
 
     device = detect_device()
+    if device == "mps":
+        # Apple Silicon MPS safety guard (DC-47): cap sequence length to 1024 and batch to 16
+        # when not explicitly configured, preventing buffer allocation faults in unified memory.
+        if max_seq_length is None:
+            max_seq_length = 1024
+        if batch_size is None:
+            batch_size = 16
+
     logger.info("Loading BGE model: %s (device=%s, max_seq_length=%s, batch_size=%s)",
                 model_name, device, max_seq_length or "model default",
                 batch_size or "model default")
@@ -422,14 +430,14 @@ def make_bge_embedding_function(model_name: str, max_seq_length: int | None = No
         return build(device)
     except Exception as e:
         # detect_device() only checks whether CUDA/MPS *exists*, not whether
-        # there's free memory for it right now — a concurrently-running
+        # there's free memory for it right now: a concurrently-running
         # llama.cpp server (this project's own local-LLM mode) can leave next
         # to nothing free, and every retry would hit the exact same OOM
         # forever since _ensure_ready() just calls this again unchanged. Fall
         # back to CPU once rather than leaving search permanently broken.
         if device == "cpu":
             raise
-        logger.warning("BGE load failed on %s (%s) — falling back to cpu", device, e)
+        logger.warning("BGE load failed on %s (%s): falling back to cpu", device, e)
         return build("cpu")
 
 
@@ -444,19 +452,19 @@ def chunk_text(text: str, max_chars: int = 4000, overlap: int = 200) -> list[str
     An overlap at or above max_chars makes the stride `max_chars - overlap` zero or
     negative and the loop then appends forever: chunk_text("x" * 10000, 100, 100)
     grew until the OOM killer took the process (exit 137). A typo in a config file
-    must not be able to do that, so the overlap is clamped to half of max_chars —
+    must not be able to do that, so the overlap is clamped to half of max_chars : 
     half rather than max_chars-1 because a stride of 1 character is barely less
     ruinous than a stride of 0, just slower to notice.
     """
     if max_chars <= 0:
-        logger.warning("chunk_text got max_chars=%d — returning the text unsplit", max_chars)
+        logger.warning("chunk_text got max_chars=%d: returning the text unsplit", max_chars)
         return [text]
     if len(text) <= max_chars:
         return [text]
     if not 0 <= overlap <= max_chars // 2:
         clamped = max(0, min(overlap, max_chars // 2))
         logger.warning(
-            "chunk_text overlap=%d is out of range for max_chars=%d — clamping to %d",
+            "chunk_text overlap=%d is out of range for max_chars=%d: clamping to %d",
             overlap, max_chars, clamped,
         )
         overlap = clamped
@@ -468,7 +476,7 @@ def chunk_text(text: str, max_chars: int = 4000, overlap: int = 200) -> list[str
         # takes one more stride and emits a tail that lies wholly inside the previous
         # chunk's overlap: chunk_text("x" * 7601) returned lengths [4000, 3801, 1],
         # and that 1-character duplicate became its own ChromaDB row with its own
-        # embedding — a full vector of index spent on content its predecessor
+        # embedding: a full vector of index spent on content its predecessor
         # already covers, and a spurious near-empty result competing in search.
         if start + max_chars >= len(text):
             break

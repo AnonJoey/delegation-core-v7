@@ -260,3 +260,43 @@ def test_malformed_config_is_refused_not_overwritten(tmp_path, monkeypatch):
     result = clients.install_antigravity(Config(server_token="tok"))
     assert result["status"] == "error"
     assert path.read_text() == "{ not json"
+
+
+# ── Claude Desktop ────────────────────────────────────────────────────────────
+
+def test_claude_desktop_installs_into_missing_file(tmp_path):
+    from delegation_core import clients
+    from delegation_core.config import Config
+
+    path = tmp_path / "Claude" / "claude_desktop_config.json"
+    result = clients.install_claude_desktop(Config(server_token="desktop-tok"), target_path=path)
+    assert result["status"] == "installed"
+    assert path.exists()
+    data = json.loads(path.read_text())
+    assert data["mcpServers"]["delegation-core"]["type"] == "http"
+    assert data["mcpServers"]["delegation-core"]["headers"]["Authorization"] == "Bearer desktop-tok"
+
+
+def test_claude_desktop_preserves_other_servers(tmp_path):
+    from delegation_core import clients
+    from delegation_core.config import Config
+
+    path = tmp_path / "Claude" / "claude_desktop_config.json"
+    path.parent.mkdir(parents=True)
+    path.write_text(json.dumps({"mcpServers": {"other-server": {"command": "other"}}}))
+
+    result = clients.install_claude_desktop(Config(server_token="desktop-tok"), target_path=path)
+    assert result["status"] == "installed"
+    data = json.loads(path.read_text())
+    assert data["mcpServers"]["other-server"] == {"command": "other"}
+    assert data["mcpServers"]["delegation-core"]["headers"]["Authorization"] == "Bearer desktop-tok"
+
+
+def test_claude_desktop_reinstall_is_idempotent(tmp_path):
+    from delegation_core import clients
+    from delegation_core.config import Config
+
+    path = tmp_path / "Claude" / "claude_desktop_config.json"
+    cfg = Config(server_token="tok")
+    clients.install_claude_desktop(cfg, target_path=path)
+    assert clients.install_claude_desktop(cfg, target_path=path)["status"] == "already-configured"

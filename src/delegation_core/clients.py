@@ -1,5 +1,5 @@
 """
-clients.py — point MCP clients at the HTTP daemon.
+clients.py: point MCP clients at the HTTP daemon.
 
 v0.11 replaced stdio with a single HTTP daemon, and that is a breaking change for
 every client already configured: a `{"command": ..., "args": ["run"]}` entry now
@@ -36,7 +36,7 @@ Antigravity / Gemini CLI (~/.gemini/config/mcp_config.json, JSON):
       "headers": {"Authorization": "Bearer <token>"}
     }
 
-The key is `serverUrl`, not `url` — Antigravity's own embedded documentation
+The key is `serverUrl`, not `url`: Antigravity's own embedded documentation
 describes exactly two transports, stdio (`command`/`args`/`env`) and remote
 (`serverUrl`), and calls the remote one SSE. This daemon serves streamable HTTP
 at the same path, which most current clients accept under that field; whether
@@ -47,6 +47,7 @@ from __future__ import annotations
 
 import json
 import logging
+import platform
 import shutil
 from pathlib import Path
 
@@ -60,6 +61,16 @@ CODEX_CONFIG = Path.home() / ".codex" / "config.toml"
 #: Antigravity (the `agy` CLI) and the Gemini CLI share this file. Its own docs
 #: call it the "Global Configuration", applying to all sessions.
 ANTIGRAVITY_CONFIG = Path.home() / ".gemini" / "config" / "mcp_config.json"
+
+
+def claude_desktop_config_path() -> Path:
+    system = platform.system()
+    if system == "Darwin":
+        return Path.home() / "Library" / "Application Support" / "Claude" / "claude_desktop_config.json"
+    elif system == "Windows":
+        return Path.home() / "AppData" / "Roaming" / "Claude" / "claude_desktop_config.json"
+    else:
+        return Path.home() / ".config" / "Claude" / "claude_desktop_config.json"
 
 #: Codex looks the bearer token up in the environment under this name.
 CODEX_TOKEN_ENV_VAR = "DELEGATION_CORE_TOKEN"
@@ -97,7 +108,7 @@ def install_antigravity(cfg: Config) -> dict:
     """Point Antigravity / the Gemini CLI at the daemon.
 
     The file ships empty (0 bytes on this machine, untouched since it was
-    created), and json.load on an empty file raises rather than returning {} —
+    created), and json.load on an empty file raises rather than returning {}:
     so emptiness is treated as "no servers yet" instead of as corruption.
 
     Other servers in the file are preserved; only this one entry is rewritten.
@@ -119,7 +130,7 @@ def install_antigravity(cfg: Config) -> dict:
                     "client": "antigravity",
                     "path": str(ANTIGRAVITY_CONFIG),
                     "status": "error",
-                    "detail": "mcp_config.json is not valid JSON — not touching it",
+                    "detail": "mcp_config.json is not valid JSON: not touching it",
                 }
 
     servers = data.setdefault("mcpServers", {})
@@ -128,7 +139,7 @@ def install_antigravity(cfg: Config) -> dict:
             "client": "antigravity",
             "path": str(ANTIGRAVITY_CONFIG),
             "status": "error",
-            "detail": "mcpServers is not an object — not touching it",
+            "detail": "mcpServers is not an object: not touching it",
         }
 
     before = servers.get(SELF)
@@ -148,6 +159,53 @@ def install_antigravity(cfg: Config) -> dict:
     tmp.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
     tmp.replace(ANTIGRAVITY_CONFIG)
     return {"client": "antigravity", "path": str(ANTIGRAVITY_CONFIG),
+            "status": "updated" if before else "installed"}
+
+
+def install_claude_desktop(cfg: Config, target_path: Path | None = None) -> dict:
+    """Point Claude Desktop at the HTTP daemon in claude_desktop_config.json."""
+    config_file = target_path or claude_desktop_config_path()
+    config_file.parent.mkdir(parents=True, exist_ok=True)
+
+    data: dict = {}
+    if config_file.exists():
+        raw = config_file.read_text(encoding="utf-8").strip()
+        if raw:
+            try:
+                loaded = json.loads(raw)
+                data = loaded if isinstance(loaded, dict) else {}
+            except json.JSONDecodeError:
+                return {
+                    "client": "claude-desktop",
+                    "path": str(config_file),
+                    "status": "error",
+                    "detail": "claude_desktop_config.json is not valid JSON, not touching it",
+                }
+
+    servers = data.setdefault("mcpServers", {})
+    if not isinstance(servers, dict):
+        return {
+            "client": "claude-desktop",
+            "path": str(config_file),
+            "status": "error",
+            "detail": "mcpServers is not an object, not touching it",
+        }
+
+    before = servers.get(SELF)
+    servers[SELF] = claude_code_entry(cfg)
+    if before == servers[SELF]:
+        return {"client": "claude-desktop", "path": str(config_file),
+                "status": "already-configured"}
+
+    if config_file.exists() and config_file.stat().st_size:
+        backup = config_file.with_suffix(".json.dc-backup")
+        if not backup.exists():
+            shutil.copy2(config_file, backup)
+
+    tmp = config_file.with_suffix(".json.tmp")
+    tmp.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
+    tmp.replace(config_file)
+    return {"client": "claude-desktop", "path": str(config_file),
             "status": "updated" if before else "installed"}
 
 
@@ -179,7 +237,7 @@ def install_codex(cfg: Config) -> dict:
 
     Deliberately append-only and refuses to edit an existing table. There is no
     TOML writer in the stdlib, so rewriting a table in place would mean
-    hand-editing text around a parser that only reads — the failure mode is a
+    hand-editing text around a parser that only reads: the failure mode is a
     corrupted config for a tool the user relies on. Reporting the block and
     letting them replace it is the honest option.
     """
@@ -197,8 +255,8 @@ def install_codex(cfg: Config) -> dict:
                 "status": "already_present",
                 "block": block, "env_var": CODEX_TOKEN_ENV_VAR,
                 "note": ("A [mcp_servers.delegation-core] table already exists. "
-                         "Replace it by hand with the block above — this command "
-                         "will not rewrite TOML it did not write.")}
+                         "Replace it by hand with the block above (this command "
+                         "will not rewrite TOML it did not write).")}
 
     backup = CODEX_CONFIG.with_suffix(".toml.dc-backup")
     if not backup.exists():

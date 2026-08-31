@@ -99,3 +99,14 @@ def test_successful_accelerator_construction_does_not_fall_back(fake_stef, monke
 
     assert fn.device == "cuda"
     assert [c["device"] for c in fake_stef.constructions] == ["cuda"]
+
+
+def test_mps_applies_default_safety_caps_for_apple_silicon(fake_stef, monkeypatch):
+    """MPS on Apple Silicon defaults to max_seq_length=1024 and batch_size=16 (DC-47)."""
+    monkeypatch.setattr(embeddings, "detect_device", lambda: "mps")
+
+    fn = embeddings.make_bge_embedding_function("BAAI/bge-m3")
+
+    assert fn.device == "mps"
+    assert fn.max_seq_length == 1024
+    assert fn.batch_size == 16
