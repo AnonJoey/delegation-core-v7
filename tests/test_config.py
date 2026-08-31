@@ -119,3 +119,17 @@ def test_load_ignores_unknown_keys(monkeypatch, tmp_path):
     cfg = config_mod.Config.load()
     assert cfg.vault_path == "/x"
     assert not hasattr(cfg, "some_removed_field")
+
+
+def test_load_calibrates_threshold_to_model_profile_when_omitted(monkeypatch, tmp_path):
+    import json
+    import delegation_core.config as config_mod
+
+    config_file = tmp_path / "config.json"
+    monkeypatch.setattr(config_mod, "CONFIG_DIR", tmp_path)
+    monkeypatch.setattr(config_mod, "CONFIG_FILE", config_file)
+
+    config_file.write_text(json.dumps({"vault_path": "/x", "bge_model": "BAAI/bge-m3"}))
+    cfg = config_mod.Config.load()
+    assert cfg.bge_model == "BAAI/bge-m3"
+    assert cfg.search_threshold == 0.45

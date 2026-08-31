@@ -1,10 +1,10 @@
 """
-config.py — User configuration stored at ~/.delegation_core/config.json.
+config.py: User configuration stored at ~/.delegation_core/config.json.
 
 v0.2 additions:
   synthesis_enabled  toggle the LLM synthesis pipeline (default True)
   synthesis_lang     language for synthesis prompts: "en" | "pt" (default "en")
-  budget_mode        "normal" | "cpu" | "auto" — auto measures tok/sec at startup
+  budget_mode        "normal" | "cpu" | "auto": auto measures tok/sec at startup
                      and computes per-task budgets that stay within mcp_timeout_sec
   ingest_chunk_size  chunk size for external ingestion
   ingest_chunk_overlap  overlap for external ingestion chunks
@@ -26,7 +26,7 @@ v0.5.1 additions:
                       the local-only design. Requires the [web] extra:
                       pip install "delegation-core[web]"
   engine_mode         where generation runs: "local" (llama.cpp, default) or
-                      "agent" (no local model — synthesis/compression delegated
+                      "agent" (no local model: synthesis/compression delegated
                       to the calling Claude). Embeddings + search stay local in
                       both modes. "agent" is for machines that can't spare the
                       RAM/CPU to run a local model alongside other apps.
@@ -34,7 +34,7 @@ v0.5.1 additions:
 v0.7.0 additions:
   graphs_dir, graphs_registry_path  storage for the vendored code-graph pipeline
                       (graph_build/graph_list/graph_report tools). Opt-in via the
-                      [graph] extra — see delegation_core/graph/__init__.py.
+                      [graph] extra: see delegation_core/graph/__init__.py.
 """
 
 import json
@@ -56,7 +56,7 @@ def resolve_folder(name: str, folders: list) -> str | None:
     ("decisions", "research", ...), but a vault configured through the wizard or
     edited by hand commonly uses Capitalized names ("Decisions", "Reference").
     Code that hardcoded a lowercase name and tested `"sessions" in folders`
-    silently did the wrong thing on such a vault — export_session wrote to
+    silently did the wrong thing on such a vault: export_session wrote to
     folders[0], the classifier's folder hints and its own returned label never
     matched, and orphan accounting skipped nothing. Matching is case-insensitive
     but the *caller* always gets back the real folder name, so the value is safe
@@ -117,7 +117,7 @@ class Config:
     # report was 6.7% represented in the index and a 60k-token transcript 13.6%.
     # The remainder was unsearchable with nothing anywhere reporting it missing.
     # Notes are now chunked the way ingest.py has always chunked external files.
-    # Sized in CHARACTERS (chunk_text splits on characters) — see
+    # Sized in CHARACTERS (chunk_text splits on characters), see
     # embed_max_seq_length for the token ceiling these must stay under.
     vault_chunk_size: int = 4000
     vault_chunk_overlap: int = 200
@@ -126,14 +126,14 @@ class Config:
     # Both pinned explicitly rather than inherited from the model card. bge-m3
     # advertises 8192, and transformer attention costs batch x seq^2: a batch of
     # 8 at 8192 asks roughly 32 GB of attention buffer, which OOMs a 16 GB card
-    # mid-reindex — observed in production, not theorised. With chunking above,
+    # mid-reindex (observed in production, not theorised). With chunking above,
     # no chunk comes near this ceiling, so lowering it costs no recall.
     # 0 means "leave the model's own default alone".
     embed_max_seq_length: int = 2048
     embed_batch_size: int = 8
 
     # ── v0.12: default search scope ──────────────────────────────────────────
-    # "" means adaptive — decided per vault from how much of it is generated.
+    # "" means adaptive (decided per vault from how much of it is generated).
     # A fixed "notes" default was right for the vault it was measured on (3,692
     # generated articles against 187 hand-written notes) and exactly wrong for a
     # vault whose authoritative material is ingested: one field deployment had
@@ -153,12 +153,12 @@ class Config:
     # the bulk of a real index (92.8% of rows on the deployment that reported
     # this). The client is the path segment directly under a listed root:
     # "/Work/Oksigen" turns /Work/Oksigen/Gazin/deck.pdf into client "gazin".
-    # Empty by default — deriving a client from an unconfigured path shape would
+    # Empty by default: deriving a client from an unconfigured path shape would
     # invent labels, and a wrong label silently excludes a document from the
     # filter that should have found it, which is worse than no label at all.
     client_path_roots: list = field(default_factory=list)
     # {slug: canonical slug}, for names that normalisation cannot merge because
-    # they are genuinely different strings — "campo-incorporadora" -> "campo".
+    # they are genuinely different strings ("campo-incorporadora" -> "campo").
     # That is a judgement about the data, so it is configuration, not code.
     client_aliases: dict = field(default_factory=dict)
 
@@ -189,7 +189,7 @@ class Config:
     # ── v0.13.1: guard against a second index writer ─────────────────────────
     # When no daemon answers, index commands do the work in this process. That
     # is what keeps the CLI usable on a machine that never installed the
-    # service — and it is also how a hook-fired `reindex` becomes a second
+    # service, and it is also how a hook-fired `reindex` becomes a second
     # writer against an index the running daemon holds open, which is the
     # sequence that corrupted an index in the field: under load the daemon
     # stops answering without dying, "no daemon" reads as true, and two
@@ -206,16 +206,16 @@ class Config:
     web_search_enabled: bool = False
 
     # ── v0.5.1: engine mode ──────────────────────────────────────────────────
-    # "local"  — run the model locally via llama.cpp (default).
-    # "agent"  — no local model. Synthesis/compression is delegated to the
+    # "local"  : run the model locally via llama.cpp (default).
+    # "agent"  : no local model. Synthesis/compression is delegated to the
     #            calling MCP client (Claude): interactive tools return the raw
     #            retrieved material for the agent to reason over, and background
     #            maintenance uses a deterministic extractive fallback.
-    # "hybrid" — best of both. Interactive/light work is delegated to Claude
+    # "hybrid" : best of both. Interactive/light work is delegated to Claude
     #            (fast, no local load). Big/slow/bulk generation uses the LOCAL
     #            model instead: background pipelines (synthesize/heal/ingestion)
     #            route local automatically (no agent is in the loop there), and
-    #            oversized interactive inputs are NOT auto-run — the tool returns
+    #            oversized interactive inputs are NOT auto-run: the tool returns
     #            a token-cost estimate plus an explicit offer to run locally
     #            (pass use_local=true) so the choice is surfaced, never silent.
     # BGE embeddings + ChromaDB search always run locally in every mode.
@@ -231,7 +231,7 @@ class Config:
     # The server is a single long-lived daemon that every MCP client connects
     # to over HTTP, replacing the previous stdio model where each client
     # spawned its own process (and its own BGE copy, and its own ChromaDB
-    # writer — see client_tracking.py's module docstring for what that cost).
+    # writer, see client_tracking.py's module docstring for what that cost).
     #
     # server_host stays on loopback. Nothing here is designed to be reachable
     # from another machine: the token below is a guard against other *local*
@@ -242,7 +242,7 @@ class Config:
 
     # Bearer token every client must present. Generated on first use by
     # ensure_server_token(); empty means "not yet generated", never "no auth".
-    # dashboard_api.py learned this the hard way in v0.8.1 — an unauthenticated
+    # dashboard_api.py learned this the hard way in v0.8.1: an unauthenticated
     # local port let any website in the user's browser read and write the vault
     # via a guessed port. The surface here is the whole vault plus every tool,
     # so there is no unauthenticated mode to fall back to.
@@ -250,7 +250,7 @@ class Config:
 
     # The dashboard's JSON API, served by the daemon on a second loopback port.
     # It used to be a sidecar the Tauri app spawned, which was the right shape
-    # under stdio — mcp.run() served one transport, so the dashboard could not
+    # under stdio (mcp.run() served one transport), so the dashboard could not
     # attach to the MCP server and needed its own process. That process then
     # built its own VaultManager: measured on this machine, opening the
     # dashboard added a second 2314 MiB copy of BGE-m3 to the GPU and a second
@@ -265,7 +265,7 @@ class Config:
     # How long the local model may sit loaded with an empty task line before the
     # worker unloads it. A queued task pins ~11.5 GiB on this machine (gemma-12B
     # Q6 alongside BGE-m3, measured: 3838 -> 15386 MiB), and without this a
-    # single task holds that until the next daemon restart — reintroducing
+    # single task holds that until the next daemon restart, reintroducing
     # exactly the GPU contention that engine_mode "agent" exists to avoid.
     #
     # Only applies in agent mode, where the local model runs solely to serve the
@@ -307,7 +307,7 @@ class Config:
         Derived rather than fixed so two models can be indexed side by side in the
         same store: their vector dimensions differ (768 vs 1024), so a shared
         collection would reject the second one outright. With one collection each,
-        switching models is a config edit — the other index is still there.
+        switching models is a config edit: the other index is still there.
         """
         from .embeddings import collection_name_for
         return collection_name_for(self.bge_model)
@@ -366,9 +366,9 @@ class Config:
 
     def route(self, task: str = "default", input_chars: int = 0, use_local: bool = False) -> str:
         """Decide where a generation call runs. Returns:
-          "local" — run llama.cpp locally
-          "agent" — delegate to the calling Claude (return raw material)
-          "offer" — big interactive input: don't auto-run; return a cost estimate
+          "local" : run llama.cpp locally
+          "agent" : delegate to the calling Claude (return raw material)
+          "offer" : big interactive input: don't auto-run; return a cost estimate
                     and offer the local model (caller re-invokes with use_local)
         Considers engine_mode + task type + input size + explicit opt-in.
         """
@@ -376,21 +376,21 @@ class Config:
             return "local"
         if self.engine_mode == "agent":
             return "agent"
-        # hybrid — nuanced routing
+        # hybrid: nuanced routing
         if use_local:
             return "local"
         if task in self._HEAVY_TASKS:
             return "local"                       # background/bulk always local
         if input_chars >= self.hybrid_local_min_chars:
             return "offer"                       # big: surface the choice + cost
-        return "agent"                           # light interactive → Claude
+        return "agent"                           # light interactive -> Claude
 
     def local_index_fallback_allowed(self) -> bool:
         """Whether a command may write the index in this process.
 
         Two ways to say no, because they answer different needs: the config
         flag is the durable setting, and a `no_auto_reindex` file in the state
-        directory is the switch you can flip without editing JSON — and, unlike
+        directory is the switch you can flip without editing JSON, and, unlike
         a patched hook, neither is erased by the next install.
         """
         if not self.allow_local_index_fallback:
@@ -408,9 +408,13 @@ class Config:
             try:
                 data = json.loads(CONFIG_FILE.read_text(encoding="utf-8"))
                 known = {k: v for k, v in data.items() if k in cls.__dataclass_fields__}
-                return cls(**known)
+                cfg = cls(**known)
+                if "search_threshold" not in data:
+                    from .embeddings import profile_for
+                    cfg.search_threshold = profile_for(cfg.bge_model).get("search_threshold", 0.50)
+                return cfg
             except Exception as e:
-                logger.error("Could not load %s: %s — using defaults", CONFIG_FILE, e)
+                logger.error("Could not load %s: %s (using defaults)", CONFIG_FILE, e)
         return cls()
 
     def save(self):
