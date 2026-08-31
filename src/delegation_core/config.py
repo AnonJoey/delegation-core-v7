@@ -398,6 +398,8 @@ class Config:
         return not (CONFIG_DIR / "no_auto_reindex").exists()
 
     def is_configured(self) -> bool:
+        if self.is_agent_mode:
+            return bool(self.vault_path)
         return bool(self.vault_path and self.llama_binary and self.llama_model)
 
     # ── persistence ──────────────────────────────────────────────────────────

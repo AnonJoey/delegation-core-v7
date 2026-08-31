@@ -27,6 +27,7 @@ def test_is_configured_requires_vault_binary_and_model():
     assert not Config().is_configured()
     assert not Config(vault_path="/x").is_configured()
     assert Config(vault_path="/x", llama_binary="/y", llama_model="/z").is_configured()
+    assert Config(vault_path="/x", engine_mode="agent").is_configured()
 
 
 def test_is_cpu_budget_and_mode_flags():
