@@ -193,12 +193,12 @@ DASH_BUNDLE_DIR="$SCRIPT_DIR/dashboard/src-tauri/target/release/bundle"
 
 _repo_slug() {
     local url
-    # Prefer the "fork" remote — on this checkout it's the active repo that
-    # actually publishes releases; "origin" (if present at all) may point at
-    # an older/renamed repo and would make the `gh release download` fallback
-    # below silently look in the wrong place. Fall back to origin, then a
-    # hardcoded default, if "fork" isn't configured.
-    for remote in fork origin; do
+    # "origin" is the active repo that publishes releases. "fork" is only tried
+    # for checkouts predating the 2026-08-31 remote rename, where the active repo
+    # was named "fork" and "origin" pointed at the frozen delegation-core-v6.4 —
+    # picking the wrong one makes the `gh release download` fallback below look
+    # in a repo with no releases. Hardcoded default last.
+    for remote in origin fork; do
         url=$(git -C "$SCRIPT_DIR" remote get-url "$remote" 2>/dev/null || true)
         if [[ "$url" =~ github\.com[:/]([^/]+/[^/.]+)(\.git)?$ ]]; then
             echo "${BASH_REMATCH[1]}"

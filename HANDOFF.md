@@ -16,10 +16,13 @@ desktop dashboard. 31 public MCP tools (32 `@mcp.tool()` registrations; one,
 ## Repos and remotes
 
 - Working checkout: `/home/joey/Projects/delegation_core_v6.4` (path name is historical).
-- **Active repo: `fork` → github.com/AnonJoey/delegation-core-v7** (private). Local
-  `master` tracks `fork/master`. Push here.
-- Frozen archive: `origin` → github.com/AnonJoey/delegation-core-v6.4. Do not push
-  without an explicit ask.
+- **Active repo: `origin` → github.com/AnonJoey/delegation-core-v7** (public). Local
+  `master` tracks `origin/master`. Push here — the plain git default now works.
+- Frozen archive: `origin-v6.4-obsoleto` → github.com/AnonJoey/delegation-core-v6.4.
+  Same commit, same 8 tags, nothing exclusive. Kept only so old URLs resolve; do not push.
+  (Until 2026-08-31 these two names were swapped: the active repo was called `fork` and
+  the frozen one `origin`, which is why older notes say "push to fork, not origin".
+  That instruction is now wrong.)
 
 ## Current state (all verified, not assumed)
 
@@ -149,7 +152,7 @@ cd dashboard && npm run tauri dev      # dev (WEBKIT_DISABLE_DMABUF_RENDERER=1 i
 cd dashboard && npm run tauri build    # .deb/.rpm locally; AppImage only in CI
 
 # Release pipeline
-git tag dashboard-vX.Y.Z && git push fork dashboard-vX.Y.Z   # builds 3 platforms, attaches to a draft release
+git tag dashboard-vX.Y.Z && git push origin dashboard-vX.Y.Z   # builds 3 platforms, attaches to a draft release
 
 # Sanity check the machine
 nvidia-smi                             # llama.cpp eats ~11.3GB when on; BGE falls back to CPU if full

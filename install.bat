@@ -164,12 +164,12 @@ set "MSI_FILE="
 set "NSIS_FILE="
 
 :: Determine the repo slug for the `gh release download` fallback below.
-:: Prefer the "fork" remote — the actively-published repo on this checkout —
+:: Prefer "origin" - the actively-published repo. "fork" is legacy, for
 :: over "origin", which may point at an older/renamed repo and would make the
 :: release lookup silently search the wrong place.
 set "REPO_SLUG="
 set "REMOTE_URL="
-for %%R in (fork origin) do (
+for %%R in (origin fork) do (
     if not defined REPO_SLUG (
         for /f "delims=" %%U in ('git -C "%SCRIPT_DIR%" remote get-url %%R 2^>nul') do set "REMOTE_URL=%%U"
         if defined REMOTE_URL (
