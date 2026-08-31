@@ -157,7 +157,7 @@ Verify the reload succeeded by checking `heartbeat` now reports `engine_mode`.
 **Action.** Initialized Git workflow and deployed `delegation_core_v6.4` to a dedicated public GitHub repository.
 
 **Details.**
-- **Local Repository:** `/home/joey/Projects/delegation_core_v6.4`
+- **Local Repository:** `/home/joey/Projects/delegation-core`
 - **Git User Configured:** `joey bernardes <followthepillow@gmail.com>`
 - **GitHub Repository Created:** [https://github.com/AnonJoey/delegation-core-v6.4](https://github.com/AnonJoey/delegation-core-v6.4)
 - **Tooling Used:** GitHub CLI (`gh` v2.96.0) installed and authenticated to `AnonJoey`.

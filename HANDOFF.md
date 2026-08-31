@@ -15,7 +15,8 @@ desktop dashboard. 31 public MCP tools (32 `@mcp.tool()` registrations; one,
 
 ## Repos and remotes
 
-- Working checkout: `/home/joey/Projects/delegation_core_v6.4` (path name is historical).
+- Working checkout: `/home/joey/Projects/delegation-core` (renamed 2026-08-31; it was
+  `delegation_core_v6.4`, a name seven releases out of date).
 - **Active repo: `origin` → github.com/AnonJoey/delegation-core-v7** (public). Local
   `master` tracks `origin/master`. Push here — the plain git default now works.
 - Frozen archive: `origin-v6.4-obsoleto` → github.com/AnonJoey/delegation-core-v6.4.
