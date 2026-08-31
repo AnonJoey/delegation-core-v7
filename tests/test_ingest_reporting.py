@@ -153,3 +153,31 @@ def test_forget_on_an_unknown_path_is_harmless(cfg, tmp_path):
 
     assert result["removed_chunks"] == 0
     assert result["registry_entry_removed"] is False
+
+
+# ── status ───────────────────────────────────────────────────────────────────
+
+def test_status_checks_existence_and_reports_missing_sources(cfg, tmp_path):
+    src1 = tmp_path / "active_docs"
+    src1.mkdir()
+    (src1 / "a.md").write_text("# active", encoding="utf-8")
+
+    src2 = tmp_path / "moved_docs"
+    src2.mkdir()
+    (src2 / "b.md").write_text("# moved", encoding="utf-8")
+
+    vault = FakeVault(cfg)
+    manager = IngestManager(vault)
+    manager.ingest(str(src1))
+    manager.ingest(str(src2))
+
+    # Simulate src2 moving or deleting
+    import shutil
+    shutil.rmtree(src2)
+
+    status = manager.status()
+    assert status["count"] == 2
+    assert status["sources"][str(src1.resolve())]["exists"] is True
+    assert status["sources"][str(src2.resolve())]["exists"] is False
+    assert str(src2.resolve()) in status["missing_sources"]
+    assert "hint" in status

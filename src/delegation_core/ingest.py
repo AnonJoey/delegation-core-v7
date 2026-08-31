@@ -337,6 +337,19 @@ class IngestManager:
 
 
     def status(self) -> dict:
-        """Return the ingestion registry: which paths have been indexed and when."""
+        """Return the ingestion registry: which paths have been indexed, file counts and existence."""
         registry = _load_registry()
-        return {"sources": registry, "count": len(registry)}
+        sources_status = {}
+        missing_sources = []
+        for src, info in registry.items():
+            exists = Path(src).exists()
+            entry = dict(info) if isinstance(info, dict) else {"last_indexed": str(info)}
+            entry["exists"] = exists
+            if not exists:
+                missing_sources.append(src)
+            sources_status[src] = entry
+        res = {"sources": sources_status, "count": len(registry)}
+        if missing_sources:
+            res["missing_sources"] = missing_sources
+            res["hint"] = "Some ingested source folders no longer exist on disk. Run ingest_forget(<source>) to clean them."
+        return res
