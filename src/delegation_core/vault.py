@@ -795,17 +795,32 @@ class VaultManager:
             and not absolute
             and str(metadata.get("is_external", "")).lower() != "true"
         )
-        # Promote `client:` from the note's own frontmatter, for any vault note
-        # carrying content. Gated on `chunkable`, NOT on `classifiable`:
+        # Promote `client:` and all declared frontmatter keys from the note's own frontmatter,
+        # for any vault note carrying content. Gated on `chunkable`, NOT on `classifiable`:
         # classifiable is false the moment a caller supplies `kind`, and
-        # note_metadata always supplies it — so gating there meant reindex and
+        # note_metadata always supplies it: so gating there meant reindex and
         # every write path that builds metadata properly promoted nothing, while
-        # the sloppier callers did. Silent, and exactly backwards.
-        if chunkable and content and "client" not in metadata:
-            declared = self._parse_frontmatter(content).get("client", "")
-            slug = client_slug(declared, aliases)
-            if slug:
-                metadata = {**metadata, "client": slug}
+        # the sloppier callers did.
+        if chunkable and content:
+            fm = self._parse_frontmatter(content)
+            if "client" not in metadata and "client" in fm:
+                declared = fm.get("client", "")
+                slug = client_slug(declared, aliases)
+                if slug:
+                    metadata = {**metadata, "client": slug}
+
+            reserved = {"path", "kind", "subkind", "folder", "title", "graph", "chunk", "total_chunks", "is_external", "client"}
+            extra_meta = {}
+            for k, v in fm.items():
+                if k not in reserved and k not in metadata:
+                    if isinstance(v, (str, int, float, bool)):
+                        extra_meta[k] = v
+                    elif isinstance(v, (list, tuple)):
+                        extra_meta[k] = ", ".join(str(x) for x in v)
+                    elif v is not None:
+                        extra_meta[k] = str(v)
+            if extra_meta:
+                metadata = {**metadata, **extra_meta}
 
         if chunkable:
             # The configured size is in characters, the model's limit in tokens;

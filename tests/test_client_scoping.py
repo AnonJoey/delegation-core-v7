@@ -212,3 +212,17 @@ def test_client_counts_count_documents_not_chunks(vm):
     rows, _ = vm._index_counts()
     assert rows > 1, "the fixture must actually produce several chunks"
     assert vm._client_counts() == {"gazin": 1}
+
+
+def test_frontmatter_custom_metadata_is_promoted_and_persists(vm):
+    content = "---\ntitle: Custom Note\nstatus: active\nproject: Atlas\ncategory: infrastructure\n---\n\nSample content."
+    rel = "Notes/custom.md"
+    (vm.cfg.vault / rel).parent.mkdir(parents=True, exist_ok=True)
+    (vm.cfg.vault / rel).write_text(content, encoding="utf-8")
+    vm.index_note(content, vm.note_metadata(rel, "Custom Note", "Notes", content))
+
+    got = vm.collection.get(include=["metadatas"])
+    meta = [m for m in got["metadatas"] if m.get("path") == rel][0]
+    assert meta.get("status") == "active"
+    assert meta.get("project") == "Atlas"
+    assert meta.get("category") == "infrastructure"
