@@ -370,3 +370,32 @@ def test_snippet_chars_caps_what_each_hit_costs(vm):
     vm.collection.rows = [row("Decisions/a.md", "Decisions", doc=long_doc)]
     assert len(vm.search("q", snippet_chars=50)[0]["snippet"]) == 50
     assert len(vm.search("q")[0]["snippet"]) == 800
+
+
+def test_subkind_weights_reorders_curated_over_transcripts(tmp_path):
+    """A curated note with slightly lower raw similarity beats a transcript (DC-23)."""
+    cfg = Config(vault_path=str(tmp_path / "vault"), search_threshold=0.40)
+    cfg.subkind_weights = {"curated": 1.0, "transcript": 0.90}
+    manager = VaultManager(cfg)
+    manager._ensure_ready = lambda: None
+
+    # Raw dist 0.28 (sim 0.72) transcript vs raw dist 0.30 (sim 0.70) curated note.
+    # Raw order from ChromaDB puts transcript first (lower dist).
+    # With subkind weighting:
+    #   transcript effective_sim = 0.72 * 0.90 = 0.648
+    #   curated note effective_sim = 0.70 * 1.0 = 0.70
+    manager.collection = StubCollection([
+        {"doc": "raw audio dump", "dist": 0.28,
+         "meta": {"title": "Call Transcript", "path": "sessions/transcript-1.md",
+                  "folder": "sessions", "subkind": "transcript"}},
+        {"doc": "clean curated notes", "dist": 0.30,
+         "meta": {"title": "Architecture Decision", "path": "Decisions/arch.md",
+                  "folder": "Decisions", "subkind": "curated"}},
+    ])
+
+    hits = manager.search("q", limit=2)
+    assert len(hits) == 2
+    assert hits[0]["title"] == "Architecture Decision"
+    assert hits[0]["similarity"] == 0.70
+    assert hits[1]["title"] == "Call Transcript"
+    assert hits[1]["similarity"] == 0.648

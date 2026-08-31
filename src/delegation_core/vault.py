@@ -709,9 +709,9 @@ class VaultManager:
                     "snippet":    doc[:max(snippet_chars, 0)],
                     "similarity": effective_sim,
                 })
-                if len(hits) >= want:
-                    break
-            return hits
+
+            hits.sort(key=lambda h: h["similarity"], reverse=True)
+            return hits[:want]
         except Exception as e:
             return [{"error": str(e)}]
 
