@@ -1,5 +1,5 @@
 """
-wizard.py — Interactive setup wizard for delegation-core.
+wizard.py: Interactive setup wizard for delegation-core.
 Designed for non-technical users: numbered menus, progress bars, clear prompts.
 No technical knowledge required.
 """
@@ -41,11 +41,11 @@ def run_wizard():
         cfg.engine_mode = _step_engine_mode()
 
         if cfg.engine_mode == "agent":
-            # Agent mode: no local model — nothing to download. Generation is
+            # Agent mode: no local model: nothing to download. Generation is
             # delegated to the calling Claude; embeddings/search stay local.
             cfg.llama_model = ""
             cfg.llama_binary = ""
-            console.print("  [green]✓[/green] Agent mode — skipping model and engine "
+            console.print("  [green]✓[/green] Agent mode: skipping model and engine "
                           "download. Claude will handle generation.\n")
         else:
             _header("Step 3 of 7", "AI Model")
@@ -140,7 +140,7 @@ def _check_internet() -> bool:
 
 def _check_linux_packages() -> tuple[str, list[str]]:
     if not shutil.which("dpkg"):
-        return "[dim]non-apt system — skipped[/dim]", []
+        return "[dim]non-apt system: skipped[/dim]", []
     required = ["python3-venv", "python3-dev", "build-essential"]
     missing = []
     for pkg in required:
@@ -178,7 +178,7 @@ def _install_xcode():
     if raw in ("n", "no"):
         console.print("  [yellow]Skipped.[/yellow] You may see errors during installation.\n")
         return
-    console.print("  Starting Xcode installer — a dialog will appear, click Install.")
+    console.print("  Starting Xcode installer: a dialog will appear, click Install.")
     subprocess.run(["xcode-select", "--install"], capture_output=True)
     console.input("  Press Enter once the Xcode installer has finished: ")
     console.print()
@@ -198,74 +198,54 @@ def _verify_python_packages():
             __import__(module)
         except ImportError:
             missing.append(pkg)
-
     if missing:
-        console.print(f"  [yellow]Some Python packages are missing:[/yellow] {', '.join(missing)}")
-        console.print(f"  Run: pip install {' '.join(missing)}\n")
+        console.print(f"  [red]Missing Python packages:[/red] {', '.join(missing)}")
+        console.print("  Run [bold]pip install -e .[/bold] first.\n")
+        sys.exit(1)
 
 
 # ── steps ─────────────────────────────────────────────────────────────────────
 
 def _step_vault() -> tuple[Path, list[str]]:
-    console.print("  Scanning for Obsidian vaults on your computer...\n")
-    vaults = _find_obsidian_vaults()
+    defaults = ["decisions", "research", "tools", "fixes", "reference", "sessions"]
+    console.print("  Where is your Obsidian vault?\n")
+    console.print("  [dim]delegation-core will read and write markdown notes here.[/dim]\n")
 
-    options = []
-    for v in vaults:
-        count = sum(1 for _ in v.rglob("*.md"))
-        options.append(f"{v}  [dim]({count} notes)[/dim]")
+    while True:
+        raw = console.input("  Vault path (e.g. ~/Documents/Vault): ").strip()
+        if not raw:
+            continue
+        vault_path = Path(raw).expanduser().resolve()
+        if _conflicts_with_config_dir(vault_path):
+            _warn_config_dir_conflict(vault_path)
+            continue
+        if vault_path.exists() and not vault_path.is_dir():
+            console.print("  [red]That path is a file, not a directory. Try again.[/red]\n")
+            continue
+        break
 
-    options += ["Enter a custom path", "Create a new vault folder"]
+    if not vault_path.exists():
+        console.print(f"\n  Directory [bold]{vault_path}[/bold] does not exist.")
+        raw = console.input("  Create it now? [Y/n]: ").strip().lower()
+        if raw not in ("", "y", "yes"):
+            console.print("\n  [yellow]Setup cancelled.[/yellow]\n")
+            sys.exit(0)
+        vault_path.mkdir(parents=True, exist_ok=True)
+        console.print(f"  [green]✓[/green] Created {vault_path}")
 
-    if not vaults:
-        console.print("  [dim]No vaults found automatically.[/dim]\n")
-
-    choice = _menu("Select your Obsidian vault:", options)
-
-    if choice < len(vaults):
-        vault_path = vaults[choice]
-    elif choice == len(vaults):
-        while True:
-            raw = console.input("\n  Path to vault: ").strip()
-            candidate = Path(raw).expanduser()
-            if _conflicts_with_config_dir(candidate):
-                _warn_config_dir_conflict(candidate)
-                continue
-            vault_path = candidate
-            vault_path.mkdir(parents=True, exist_ok=True)
-            break
-    else:
-        while True:
-            raw = console.input("\n  New vault location (e.g. ~/Documents/MyVault): ").strip()
-            candidate = Path(raw).expanduser()
-            if _conflicts_with_config_dir(candidate):
-                _warn_config_dir_conflict(candidate)
-                continue
-            vault_path = candidate
-            vault_path.mkdir(parents=True, exist_ok=True)
-            console.print(f"  [green]Created:[/green] {vault_path}")
-            break
-
-    # Detect or create folders
-    if vault_path.exists():
-        detected = sorted(
-            d.name for d in vault_path.iterdir()
-            if d.is_dir() and not d.name.startswith(".") and not d.name.startswith("_")
-        )
-    else:
-        detected = []
-
-    if detected:
-        console.print(f"\n  Found folders: [bold]{', '.join(detected[:12])}[/bold]")
-        raw = console.input("  Index all of these? [Y/n]: ").strip().lower()
+    existing_dirs = [d.name for d in vault_path.iterdir() if d.is_dir() and not d.name.startswith(".")]
+    if existing_dirs:
+        console.print(f"\n  Found existing folders in vault: [bold]{', '.join(existing_dirs)}[/bold]")
+        raw = console.input("  Use these folders for the vault structure? [Y/n]: ").strip().lower()
         if raw in ("", "y", "yes"):
-            folders = detected
+            folders = existing_dirs
         else:
-            raw = console.input("  Enter folder names (comma-separated): ").strip()
-            folders = [f.strip() for f in raw.split(",") if f.strip()] or detected
+            folders = defaults
+            for f in defaults:
+                (vault_path / f).mkdir(exist_ok=True)
+            console.print(f"  [green]Created default folders:[/green] {', '.join(defaults)}")
     else:
-        defaults = ["decisions", "research", "tools", "fixes", "reference", "sessions"]
-        console.print("  [dim]No folders found. Creating default structure.[/dim]")
+        console.print(f"\n  Creating standard vault folders: [bold]{', '.join(defaults)}[/bold]")
         for f in defaults:
             (vault_path / f).mkdir(exist_ok=True)
         folders = defaults
@@ -281,7 +261,7 @@ def _conflicts_with_config_dir(path: Path) -> bool:
     uninstall.sh / uninstall.bat remove a fixed list of CONFIG_DIR subpaths by
     name (sessions/, config.json, graphs/, ...) without ever touching the
     configured vault_path directly. That guarantee only holds if the vault
-    itself is never placed at/under CONFIG_DIR in the first place — otherwise
+    itself is never placed at/under CONFIG_DIR in the first place: otherwise
     a targeted removal could coincidentally delete real vault content that
     happens to share one of those names. Reject the path here instead.
     """
@@ -296,7 +276,7 @@ def _conflicts_with_config_dir(path: Path) -> bool:
 def _warn_config_dir_conflict(path: Path):
     console.print(f"  [red]That path is delegation-core's own config directory "
                   f"({CONFIG_DIR}), or is inside it.[/red]")
-    console.print("  [red]Choose a location outside of it — uninstalling could "
+    console.print("  [red]Choose a location outside of it: uninstalling could "
                   "otherwise delete vault content.[/red]\n")
 
 
@@ -307,23 +287,23 @@ def _step_engine_mode() -> str:
     """
     console.print("  How should delegation-core generate summaries and compress content?\n")
     console.print("  [bold]1. Local model[/bold] (llama.cpp)")
-    console.print("     [dim]Runs a model on this machine. Fully offline, but uses RAM/CPU")
-    console.print("     and competes with your other apps. Downloads ~2 GB on setup.[/dim]\n")
-    console.print("  [bold]2. Agent (Claude does it)[/bold]  [green]— lightest[/green]")
-    console.print("     [dim]No local model. The Claude you're talking to handles generation;")
-    console.print("     this machine only runs the (small) embedding + search layer. Nothing")
-    console.print("     to download. Best if the local model strains your hardware.[/dim]\n")
-    console.print("  [bold]3. Hybrid[/bold]  [green]— recommended[/green]")
-    console.print("     [dim]Interactive work goes to Claude (fast, no load); big/slow/bulk")
-    console.print("     jobs (whole-vault synthesis, healing) use the local model in the")
-    console.print("     background. Oversized calls show their token cost and let you choose")
-    console.print("     local vs Claude. Downloads ~2 GB (needs the local model on hand).[/dim]\n")
+    console.print("     [dim]Runs a model on this machine. Fully offline, but uses RAM/CPU[/dim]")
+    console.print("     [dim]and competes with your other apps. Downloads ~2 GB on setup.[/dim]\n")
+    console.print("  [bold]2. Agent (Claude does it)[/bold]  [green](lightest)[/green]")
+    console.print("     [dim]No local model. The Claude you're talking to handles generation;[/dim]")
+    console.print("     [dim]this machine only runs the (small) embedding + search layer. Nothing[/dim]")
+    console.print("     [dim]to download. Best if the local model strains your hardware.[/dim]\n")
+    console.print("  [bold]3. Hybrid[/bold]  [green](recommended)[/green]")
+    console.print("     [dim]Interactive work goes to Claude (fast, no load); big/slow/bulk[/dim]")
+    console.print("     [dim]jobs (whole-vault synthesis, healing) use the local model in the[/dim]")
+    console.print("     [dim]background. Oversized calls show their token cost and let you choose[/dim]")
+    console.print("     [dim]local vs Claude. Downloads ~2 GB (needs the local model on hand).[/dim]\n")
 
     choice = _menu_index("Choose an engine", 3)
     mode = {0: "local", 1: "agent", 2: "hybrid"}[choice]
     label = {"local": "Local model (llama.cpp)",
-             "agent": "Agent — Claude handles generation",
-             "hybrid": "Hybrid — Claude for interactive, local model for big/bulk"}[mode]
+             "agent": "Agent: Claude handles generation",
+             "hybrid": "Hybrid: Claude for interactive, local model for big/bulk"}[mode]
     console.print(f"\n  [green]✓[/green] Engine: {label}\n")
     return mode
 
@@ -355,7 +335,7 @@ def _step_model(models_dir: Path) -> str:
     if dest.exists():
         console.print(f"\n  [green]✓[/green] Already downloaded: {model['name']}\n")
     else:
-        console.print(f"\n  Downloading [bold]{model['name']}[/bold] ({model['size']}) — this may take a few minutes...\n")
+        console.print(f"\n  Downloading [bold]{model['name']}[/bold] ({model['size']}): this may take a few minutes...\n")
         result = download_model(model, models_dir)
         if not result:
             console.print("\n  [red]Download failed.[/red] Check your internet connection and run setup again.")
@@ -418,7 +398,7 @@ def _step_features() -> tuple[bool, str, str]:
     console.print("  [bold]Note synthesis[/bold]")
     console.print("  When enabled, inbox files are converted into structured Obsidian notes")
     console.print("  by the local AI model (sections, frontmatter, bullet points).")
-    console.print("  Disable to file raw text directly — faster but less organised.\n")
+    console.print("  Disable to file raw text directly: faster but less organised.\n")
     raw = console.input("  Enable note synthesis? [Y/n]: ").strip().lower()
     synthesis_enabled = raw not in ("n", "no")
     console.print()
@@ -429,7 +409,7 @@ def _step_features() -> tuple[bool, str, str]:
         console.print("  [bold]Synthesis language[/bold]")
         lang_choice = _menu("Choose the language for synthesised notes:", [
             "English (default)",
-            "Portuguese (Brazilian) — prompts from the MAURICIO deployment",
+            "Portuguese (Brazilian) (prompts from the MAURICIO deployment)",
         ])
         synthesis_lang = "pt" if lang_choice == 1 else "en"
         console.print()
@@ -438,11 +418,11 @@ def _step_features() -> tuple[bool, str, str]:
     console.print("  [bold]Budget mode[/bold]")
     console.print("  CPU mode applies strict per-task token caps to stay within MCP timeouts")
     console.print("  on low-power machines (e.g. i9 Mac without GPU offload).")
-    console.print("  [dim]normal[/dim] — full-quality outputs (recommended on any GPU machine)")
-    console.print("  [dim]cpu[/dim]    — hard caps: classify=8, compress=200, synthesize=2500\n")
+    console.print("  [dim]normal[/dim] : full-quality outputs (recommended on any GPU machine)")
+    console.print("  [dim]cpu[/dim]    : hard caps: classify=8, compress=200, synthesize=2500\n")
     budget_choice = _menu("Select budget mode:", [
-        "normal — full quality  [dim](recommended)[/dim]",
-        "cpu — strict token caps for low-power machines",
+        "normal : full quality  [dim](recommended)[/dim]",
+        "cpu : strict token caps for low-power machines",
     ])
     budget_mode = "cpu" if budget_choice == 1 else "normal"
 
@@ -455,7 +435,7 @@ def _step_features() -> tuple[bool, str, str]:
 
 def _step_bge(model_name: str):
     console.print(f"  Downloading the search embedding model [bold]{model_name}[/bold].")
-    console.print("  [dim]~110 MB — one-time download. Runs locally forever after.[/dim]\n")
+    console.print("  [dim]~110 MB (one-time download. Runs locally forever after).[/dim]\n")
     try:
         from sentence_transformers import SentenceTransformer
         SentenceTransformer(model_name)
@@ -505,7 +485,7 @@ def _startup_systemd(cfg: Config):
         "[Service]\n"
         "Type=simple\n"
         # ExecStart= uses systemd's own shell-like word splitting on
-        # whitespace — paths must be quoted or a space anywhere in the home
+        # whitespace, paths must be quoted or a space anywhere in the home
         # directory, models dir, or binary path (all user-controlled) splits
         # into the wrong number of arguments.
         f'ExecStart="{cfg.llama_binary}"'
@@ -635,25 +615,25 @@ def _completion(cfg: Config):
     console.print(Panel.fit(
         "[bold green]Setup complete![/bold green]\n\n"
         "A few more steps wire delegation-core into Claude Code and Claude Desktop\n"
-        "so both surfaces share this vault as memory. Each step below is optional —\n"
+        "so both surfaces share this vault as memory. Each step below is optional:\n"
         "skip any you don't need, or come back to this later.",
         border_style="green",
     ))
 
     console.print()
-    console.print("  [bold]1. Claude Desktop — register the MCP server[/bold]")
+    console.print("  [bold]1. Claude Desktop: register the MCP server[/bold]")
     console.print("     Add this block to your Claude Desktop config, then restart Claude Desktop.")
     console.print()
     console.print(Panel(mcp_snippet, title=f"[bold]{desktop_config_path}[/bold]", border_style="blue"))
 
     console.print()
-    console.print("  [bold]2. Claude Code — register the same MCP server[/bold]")
+    console.print("  [bold]2. Claude Code: register the same MCP server[/bold]")
     console.print("     Merge this into the [cyan]mcpServers[/cyan] key of [cyan]~/.claude.json[/cyan].")
     console.print()
     console.print(Panel(mcp_snippet, title="[bold]~/.claude.json[/bold]", border_style="blue"))
 
     console.print()
-    console.print("  [bold]3. Claude Code — install the session hooks[/bold]")
+    console.print("  [bold]3. Claude Code: install the session hooks[/bold]")
     console.print("     Merge this into [cyan]~/.claude/settings.json[/cyan]. The SessionStart hook")
     console.print("     briefs Code on vault activity and runs maintenance on a non-empty inbox;")
     console.print("     the SessionEnd hook backs up the raw transcript to the vault.")
@@ -661,14 +641,14 @@ def _completion(cfg: Config):
     console.print(Panel(hooks_snippet, title="[bold]~/.claude/settings.json[/bold]", border_style="blue"))
 
     console.print()
-    console.print("  [bold]4. Claude Code — load the agent protocol every session[/bold]")
+    console.print("  [bold]4. Claude Code: load the agent protocol every session[/bold]")
     console.print("     Add this to [cyan]~/.claude/CLAUDE.md[/cyan] (create it if missing).")
     console.print()
     console.print(Panel(claude_md_snippet, title="[bold]~/.claude/CLAUDE.md[/bold]", border_style="blue"))
 
     console.print()
-    console.print("  [bold]5. Claude Desktop / Cowork — load the agent protocol[/bold]")
-    console.print(f"     There's no config file for this — open Claude Desktop's")
+    console.print("  [bold]5. Claude Desktop / Cowork: load the agent protocol[/bold]")
+    console.print(f"     There's no config file for this: open Claude Desktop's")
     console.print("     [cyan]Settings → Custom Instructions[/cyan] (and/or each Cowork project's")
     console.print(f"     instructions) and paste the contents of:")
     console.print(f"       [bold]{system_prompt}[/bold]")
@@ -693,7 +673,7 @@ def _welcome():
 
 def _header(step: str, title: str):
     console.print()
-    console.print(Rule(f"[bold]{step}  —  {title}[/bold]", style="cyan"))
+    console.print(Rule(f"[bold]{step} : {title}[/bold]", style="cyan"))
     console.print()
 
 
@@ -703,7 +683,7 @@ def _menu(title: str, options: list) -> int:
         console.print(f"    [bold cyan]{i}[/bold cyan]  {opt}")
     console.print()
     while True:
-        raw = console.input(f"  Enter number [1–{len(options)}]: ").strip()
+        raw = console.input(f"  Enter number [1-{len(options)}]: ").strip()
         if raw.isdigit() and 1 <= int(raw) <= len(options):
             return int(raw) - 1
         console.print(f"  [red]Please enter a number between 1 and {len(options)}.[/red]")
@@ -711,7 +691,7 @@ def _menu(title: str, options: list) -> int:
 
 def _menu_index(prompt: str, count: int) -> int:
     while True:
-        raw = console.input(f"  {prompt} [1–{count}]: ").strip()
+        raw = console.input(f"  {prompt} [1-{count}]: ").strip()
         if raw.isdigit() and 1 <= int(raw) <= count:
             return int(raw) - 1
         console.print(f"  [red]Please enter a number between 1 and {count}.[/red]")
