@@ -326,6 +326,22 @@ def test_ingest_sends_an_absolute_path(configured, daemon_up, no_local_vault, tm
     assert tool == "ingest_folder_bg"
     assert args["source_path"] == str((tmp_path / "docs").resolve())
     assert args["recursive"] is True
+    assert args["force"] is False
+    assert args["exclude"] is None
+
+
+def test_ingest_forwards_force_and_exclude_to_daemon(configured, daemon_up, no_local_vault, tmp_path,
+                                                     monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "docs").mkdir()
+    calls = daemon_up([{"status": "done", "result": {"indexed": 1, "skipped": 0, "excluded": 1, "errors": []}}])
+    cli.cmd_ingest(_Args(path="docs", no_recursive=True, force=True, exclude="Logs,*.tmp", local=False))
+    tool, args = calls[0]
+    assert tool == "ingest_folder_bg"
+    assert args["source_path"] == str((tmp_path / "docs").resolve())
+    assert args["recursive"] is False
+    assert args["force"] is True
+    assert args["exclude"] == ["Logs", "*.tmp"]
 
 
 def test_local_flag_bypasses_a_running_daemon(configured, monkeypatch, capsys):

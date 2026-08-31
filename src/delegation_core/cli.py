@@ -414,15 +414,32 @@ def cmd_ingest(args):
         sys.exit(1)
 
     recursive = not getattr(args, "no_recursive", False)
+    force = bool(getattr(args, "force", False))
+    raw_exclude = getattr(args, "exclude", None)
+    if isinstance(raw_exclude, str) and raw_exclude.strip():
+        exclude = [p.strip() for p in raw_exclude.split(",") if p.strip()]
+    elif isinstance(raw_exclude, list):
+        exclude = raw_exclude
+    else:
+        exclude = None
+
     # Resolved before it goes anywhere: the daemon runs as a service with its own
     # working directory, so a relative path that means one thing in this shell
     # means something else (or nothing) there. Doing it for the local path too
     # keeps one interpretation of the argument.
     source = str(Path(args.path).expanduser().resolve())
-    console.print(f"Ingesting [bold]{source}[/bold] (recursive={recursive}) ...")
+    flags = []
+    if not recursive:
+        flags.append("non-recursive")
+    if force:
+        flags.append("force")
+    if exclude:
+        flags.append(f"exclude={exclude}")
+    extra_info = f" ({', '.join(flags)})" if flags else ""
+    console.print(f"Ingesting [bold]{source}[/bold]{extra_info} ...")
 
     job = _delegate(cfg, args, "ingest_folder_bg",
-                    {"source_path": source, "recursive": recursive},
+                    {"source_path": source, "recursive": recursive, "force": force, "exclude": exclude},
                     lambda msg: console.print(f"[dim]{msg}[/dim]"))
     result = job.get("result") if job is not None else None
 
@@ -432,15 +449,16 @@ def cmd_ingest(args):
 
         vault  = VaultManager(cfg)
         ingest = IngestManager(vault)
-        result = ingest.ingest(source, recursive=recursive)
+        result = ingest.ingest(source, recursive=recursive, force=force, exclude=exclude)
 
     if "error" in result:
         console.print(f"[red]Error:[/red] {result['error']}")
         sys.exit(1)
 
+    excluded_info = f", {result['excluded']} excluded" if "excluded" in result else ""
     console.print(
         f"[green]✓[/green]  {result['indexed']} files indexed, "
-        f"{result['skipped']} skipped, {len(result['errors'])} errors."
+        f"{result['skipped']} skipped{excluded_info}, {len(result['errors'])} errors."
     )
     if result["errors"]:
         console.print("[dim]Errors:[/dim]")
@@ -1188,6 +1206,8 @@ def main():
     p_ingest = sub.add_parser("ingest", help="Index files from an external folder without moving them")
     p_ingest.add_argument("path",           help="Absolute path to a file or directory to index")
     p_ingest.add_argument("--no-recursive", action="store_true", help="Only index top-level files")
+    p_ingest.add_argument("--force",        action="store_true", help="Re-index even if file mtime and size are unchanged")
+    p_ingest.add_argument("--exclude",      default="", help="Comma-separated glob patterns to exclude (e.g. Logs,*.tmp)")
     _add_local_flag(p_ingest)
 
     p_relink = sub.add_parser("relink", help="Add wikilinks to notes in a vault subfolder")
