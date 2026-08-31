@@ -1,12 +1,13 @@
 """extractor: which extensions become text, and which are silently nothing.
 
-An extension outside SUPPORTED never becomes an ingest candidate at all — it is
+An extension outside SUPPORTED never becomes an ingest candidate at all: it is
 filtered before extraction and reported only as a count. So a format that reads
 as plain text but is missing from the set is content the vault cannot see and
 does not say it is missing: openclaw's docs skipped three real deploy guides
 because they were written as .mdx.
 """
 
+import json
 import pytest
 
 from delegation_core.extractor import SUPPORTED, extract
@@ -41,10 +42,21 @@ def test_mdx_is_in_supported_or_ingest_never_offers_it(tmp_path):
     assert ".mdx" in SUPPORTED
 
 
-@pytest.mark.parametrize("suffix", [".json", ".png", ".svg", ".js", ".css"])
+def test_json_is_in_supported_and_extracts(tmp_path):
+    """JSON files (exports, schemas, design systems) are supported and formatted."""
+    assert ".json" in SUPPORTED
+    f = tmp_path / "design_system.json"
+    f.write_text('{"name": "Soteria", "version": 1, "tokens": ["color", "spacing"]}', encoding="utf-8")
+
+    text = extract(f)
+    assert text is not None
+    assert '"name": "Soteria"' in text
+    assert '"tokens": [\n    "color",\n    "spacing"\n  ]' in text
+
+
+@pytest.mark.parametrize("suffix", [".png", ".svg", ".js", ".css"])
 def test_formats_that_are_deliberately_not_documents(tmp_path, suffix):
-    """Not an oversight. JSON in a docs tree is navigation and i18n tables, and
-    images carry no extractable prose — both would add rows without content."""
+    """Images and script files carry no document prose: they would add rows without content."""
     f = tmp_path / f"asset{suffix}"
     f.write_text("{}", encoding="utf-8")
 

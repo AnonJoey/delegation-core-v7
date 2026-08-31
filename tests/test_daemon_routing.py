@@ -22,6 +22,11 @@ from delegation_core import config as config_module
 from delegation_core.config import Config
 
 
+@pytest.fixture(autouse=True)
+def isolate_config(monkeypatch, tmp_path):
+    monkeypatch.setattr(config_module, "CONFIG_DIR", tmp_path)
+
+
 def _cfg(**over):
     base = dict(vault_path="/tmp", server_host="127.0.0.1", server_port=8787,
                 server_path="/mcp", server_token="tok-abc",
@@ -33,7 +38,7 @@ def _cfg(**over):
 
 
 class _Args:
-    """argparse.Namespace stand-in — only the attributes a command reads."""
+    """argparse.Namespace stand-in : only the attributes a command reads."""
 
     def __init__(self, **kw):
         self.__dict__.update(kw)

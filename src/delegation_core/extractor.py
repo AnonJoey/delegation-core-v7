@@ -1,17 +1,18 @@
 """
-extractor.py — Convert file formats to plain text for vault ingestion.
+extractor.py : Convert file formats to plain text for vault ingestion.
 
-Supported: .md/.markdown/.mdx  .txt/.text  .csv  .html/.htm  .pdf  .docx  .xlsx  .pptx
-Images are not supported — convert to .txt before dropping in the inbox.
+Supported: .md/.markdown/.mdx  .txt/.text  .csv  .html/.htm  .pdf  .docx  .xlsx  .pptx  .json
+Images are not supported: convert to .txt before dropping in the inbox.
 
 All extractors return a string. Callers treat None or empty string as a failure
 and route the file to _failed/.
 
 Recursive split helpers (v0.3):
-  extract_pages(path)    → list[str]  per-page text for PDFs; [] otherwise
+  extract_pages(path)    -> list[str]  per-page text for PDFs; [] otherwise
 """
 
 import csv as _csv
+import json
 import logging
 from pathlib import Path
 
@@ -30,6 +31,7 @@ SUPPORTED: frozenset[str] = frozenset({
     ".docx",
     ".xlsx",
     ".pptx",
+    ".json",
 })
 
 
@@ -120,6 +122,7 @@ def extract(path: Path) -> str | None:
         ".docx": _docx,
         ".xlsx": _xlsx,
         ".pptx": _pptx,
+        ".json": _json,
     }
     fn = _map.get(suffix)
     if fn is None:
@@ -144,6 +147,7 @@ def format_label(path: Path) -> str:
         ".txt": "Text", ".text": "Text", ".csv": "CSV",
         ".html": "HTML", ".htm": "HTML", ".pdf": "PDF",
         ".docx": "Word", ".xlsx": "Excel", ".pptx": "PowerPoint",
+        ".json": "JSON",
     }
     return labels.get(path.suffix.lower(), path.suffix.upper().lstrip("."))
 
@@ -152,6 +156,15 @@ def format_label(path: Path) -> str:
 
 def _text(path: Path) -> str:
     return path.read_text(encoding="utf-8", errors="replace")
+
+
+def _json(path: Path) -> str:
+    raw = path.read_text(encoding="utf-8", errors="replace")
+    try:
+        data = json.loads(raw)
+        return json.dumps(data, indent=2, ensure_ascii=False)
+    except Exception:
+        return raw
 
 
 def _csv_to_md(path: Path) -> str:
@@ -190,7 +203,7 @@ def _pdf(path: Path) -> str:
             pages.append(f"[Page {i + 1}]\n{text.strip()}")
     if not pages:
         return (
-            f"[Scanned PDF — no extractable text]\n"
+            f"[Scanned PDF: no extractable text]\n"
             f"File: {path.name}\n"
             f"Pages: {len(reader.pages)}\n"
             "To make this searchable, export the text manually and drop it as a .txt file."
