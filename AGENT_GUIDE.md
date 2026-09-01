@@ -93,9 +93,9 @@ Write a markdown note to the vault and index it immediately with BGE embeddings.
 The note is searchable in the same session as soon as it is written.
 
 Valid folders are the `heartbeat()` → `vault.folder_counts` keys, and are matched
-**case-sensitively** — `write_note(folder="decisions")` is rejected as an invalid
-folder, only `Decisions` works. On this vault they are: `Projects`, `Decisions`,
-`Fixes`, `Sessions`, `Procedures`, `Reference`, `Tools`, `Scratch`,
+**case-insensitively** — passing `write_note(folder="decisions")` or `write_note(folder="Decisions")`
+automatically resolves to the vault's configured folder casing. On this vault they are: `Projects`,
+`Decisions`, `Fixes`, `Sessions`, `Procedures`, `Reference`, `Tools`, `Scratch`,
 `Infrastructure`. There is no `research` folder — research notes go to `Reference`.
 
 ```json

@@ -113,7 +113,7 @@ from .organizer import heal as _heal_notes
 from .organizer import relink_folder as _relink_folder
 from .organizer import run as _run_maintenance
 from .tracker import ProcessTracker
-from .vault import VaultManager
+from .vault import VaultManager, resolve_vault_folder
 
 
 def _post_write_links(note_path: Path, rel_path: str, folder: str, stem: str) -> None:
@@ -756,8 +756,10 @@ async def vault_list_notes(folder: str, limit: int = 20) -> str:
     When `truncated` is true you are seeing only the newest `limit` — raise the
     limit or narrow with search_vault rather than concluding the folder is small.
     """
-    if folder not in _vault.cfg.vault_folders:
+    resolved_folder = resolve_vault_folder(_vault.cfg, folder)
+    if not resolved_folder:
         return json.dumps({"error": f"Invalid folder '{folder}'. Valid: {_vault.cfg.vault_folders}"})
+    folder = resolved_folder
     notes = _vault.list_notes(folder, limit=limit)
     total = _vault.count_notes(folder)
     return json.dumps({"folder": folder, "count": len(notes), "total": total,

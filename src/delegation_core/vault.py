@@ -123,6 +123,25 @@ def link_names_for_stem(stem: str) -> set[str]:
     return names
 
 
+def resolve_vault_folder(cfg, folder: str | None) -> str | None:
+    """Resolve a folder name against cfg.vault_folders case-insensitively.
+
+    Vaults configure their own casing (e.g. "Projects" vs "projects"), and
+    agents or callers may pass different capitalization or trailing slashes.
+    Matches case-insensitively, returning the exact configured string from
+    cfg.vault_folders on hit, or None on miss.
+    """
+    if not folder:
+        return None
+    target = str(folder).strip().rstrip("/\\").lower()
+    folders = getattr(cfg, "vault_folders", None) or []
+    for f in folders:
+        if str(f).strip().lower() == target:
+            return str(f).strip()
+    return None
+
+
+
 def client_slug(value: str, aliases: dict | None = None) -> str:
     """Normalise a client name to the single form the index is keyed by.
 

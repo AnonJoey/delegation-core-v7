@@ -23,6 +23,7 @@ from .linker import inject_backlinks, wikilinks
 from .vault import (
     compose_note,
     resolve_in_vault,
+    resolve_vault_folder,
     safe_filename,
     unique_note_path,
     yaml_quote_scalar,
@@ -65,8 +66,10 @@ def create_note(vault, folder: str, title: str, content: str) -> dict:
     that collision used to destroy both the file and its index row.
     """
     cfg = vault.cfg
-    if folder not in cfg.vault_folders:
+    resolved_folder = resolve_vault_folder(cfg, folder)
+    if not resolved_folder:
         return {"error": f"Invalid folder '{folder}'. Valid: {cfg.vault_folders}"}
+    folder = resolved_folder
     if not (title or "").strip():
         return {"error": "title is required"}
 

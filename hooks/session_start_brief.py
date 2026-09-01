@@ -102,6 +102,8 @@ def _trigger_maintenance() -> bool:
     """
     if not VENV_BIN.exists():
         return False
+    if (Path.home() / ".delegation_core" / "no_auto_reindex").exists():
+        return False
     try:
         with open(MAINTENANCE_LOG, "a", encoding="utf-8") as log_fh:
             subprocess.Popen(
@@ -125,6 +127,8 @@ def _trigger_reindex() -> bool:
     itself. Returns True if the process was launched.
     """
     if not VENV_BIN.exists():
+        return False
+    if (Path.home() / ".delegation_core" / "no_auto_reindex").exists():
         return False
     try:
         with open(REINDEX_LOG, "a", encoding="utf-8") as log_fh:

@@ -586,16 +586,18 @@ def cmd_note_write(args):
     from datetime import datetime
     from rich.console import Console
     from .config import Config
-    from .vault import VaultManager, safe_filename, yaml_quote_scalar
+    from .vault import VaultManager, resolve_vault_folder, safe_filename, yaml_quote_scalar
 
     console = Console()
     cfg = Config.load()
     if not cfg.is_configured():
         console.print("[yellow]Not configured.[/yellow] Run: delegation-core setup")
         sys.exit(1)
-    if args.folder not in cfg.vault_folders:
+    resolved_folder = resolve_vault_folder(cfg, args.folder)
+    if not resolved_folder:
         console.print(f"[red]Invalid folder[/red] '{args.folder}'. Valid: {cfg.vault_folders}")
         sys.exit(1)
+    args.folder = resolved_folder
 
     content = _read_content(args.file, "note content")
     vault = VaultManager(cfg)
@@ -658,16 +660,18 @@ def cmd_note_update(args):
 def cmd_note_list(args):
     from rich.console import Console
     from .config import Config
-    from .vault import VaultManager
+    from .vault import VaultManager, resolve_vault_folder
 
     console = Console()
     cfg = Config.load()
     if not cfg.is_configured():
         console.print("[yellow]Not configured.[/yellow] Run: delegation-core setup")
         sys.exit(1)
-    if args.folder not in cfg.vault_folders:
+    resolved_folder = resolve_vault_folder(cfg, args.folder)
+    if not resolved_folder:
         console.print(f"[red]Invalid folder[/red] '{args.folder}'. Valid: {cfg.vault_folders}")
         sys.exit(1)
+    args.folder = resolved_folder
     vault = VaultManager(cfg)
     notes = vault.list_notes(args.folder, limit=args.limit)
     if not notes:

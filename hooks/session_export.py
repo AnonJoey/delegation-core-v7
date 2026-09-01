@@ -108,9 +108,12 @@ def _trigger_reindex() -> bool:
     — see daemon.py. It still does the work in-process when no daemon answers,
     which is what keeps this hook working on a machine without the service.
 
+    Guarded: skips immediately if the `no_auto_reindex` sentry file exists.
     Best-effort: returns False if the venv binary isn't installed yet.
     """
     if not VENV_BIN.exists():
+        return False
+    if (Path.home() / ".delegation_core" / "no_auto_reindex").exists():
         return False
     try:
         with open(REINDEX_LOG, "a", encoding="utf-8") as log_fh:

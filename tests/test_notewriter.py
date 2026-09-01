@@ -106,3 +106,29 @@ def test_save_note_refuses_a_non_markdown_file(vault):
     other = vault.cfg.vault / "Reference" / "data.txt"
     other.write_text("x", encoding="utf-8")
     assert "error" in notewriter.save_note(vault, "Reference/data.txt", "y")
+
+
+def test_create_note_resolves_case_insensitive_folder(vault):
+    # configured folder is "Reference"
+    res1 = notewriter.create_note(vault, "reference", "Lower", "content")
+    assert res1["status"] == "ok"
+    assert res1["folder"] == "Reference"
+    assert res1["path"].startswith("Reference/")
+
+    res2 = notewriter.create_note(vault, "DECISIONS", "Upper", "content")
+    assert res2["status"] == "ok"
+    assert res2["folder"] == "Decisions"
+    assert res2["path"].startswith("Decisions/")
+
+
+def test_resolve_vault_folder():
+    from delegation_core.vault import resolve_vault_folder
+    cfg = Config(vault_folders=["Projects", "Decisions", "weekly-reports"])
+    assert resolve_vault_folder(cfg, "projects") == "Projects"
+    assert resolve_vault_folder(cfg, "PROJECTS") == "Projects"
+    assert resolve_vault_folder(cfg, "Decisions/") == "Decisions"
+    assert resolve_vault_folder(cfg, "WEEKLY-REPORTS") == "weekly-reports"
+    assert resolve_vault_folder(cfg, "nonexistent") is None
+    assert resolve_vault_folder(cfg, None) is None
+    assert resolve_vault_folder(cfg, "") is None
+
