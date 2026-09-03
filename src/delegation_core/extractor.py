@@ -101,6 +101,46 @@ def materialize_if_dataless(path: Path, timeout: float = 10.0) -> bool:
         return False
 
 
+#: Marca que identifica um toco de "nao deu para extrair", para que o codigo
+#: que consome o texto possa distinguir documento de aviso.
+#:
+#: Existe porque o toco e texto valido: ele passa por qualquer guarda de
+#: `if not texto.strip()` e segue adiante como se fosse conteudo. Foi assim que
+#: um deck de slides renderizados como imagem virou nota com resumo, topicos,
+#: pessoas e decisoes, tudo inventado, e com `quality_score: 1.0`, porque o
+#: avaliador de sintese so reprova saida com menos de 30 caracteres.
+#:
+#: A marca fica na PRIMEIRA linha de proposito, para que a checagem seja barata
+#: e nao encontre a frase por acidente no meio de um documento que fale sobre
+#: extracao de texto.
+NO_TEXT_MARKER = "[no extractable text]"
+
+
+def no_text_stub(path: Path, *, formato: str, unidade: str, total: int) -> str:
+    """O registro de um arquivo do qual nao se extraiu uma linha de texto.
+
+    Um arquivo assim nao pode virar nota sintetizada, mas tambem nao deve
+    desaparecer: o PDF escaneado ja tinha esse piso e era o unico. Um deck de
+    slides que sao imagens, um .docx sem paragrafo de texto e uma planilha sem
+    celula preenchida caiam todos no mesmo buraco, e o que sobrava era um erro
+    seco em vez de um registro de que o arquivo existe.
+    """
+    return (
+        f"{NO_TEXT_MARKER}\n"
+        f"File: {path.name}\n"
+        f"Format: {formato}\n"
+        f"{unidade}: {total}\n"
+        "Nothing in this file carries a text layer, so there is nothing to "
+        "summarise and no note will be synthesised from it.\n"
+        "To make it searchable, export the text yourself and drop it in as .txt."
+    )
+
+
+def is_no_text_stub(texto: str | None) -> bool:
+    """O texto e um toco de extracao vazia, e nao um documento?"""
+    return bool(texto) and texto.lstrip().startswith(NO_TEXT_MARKER)
+
+
 def extract(path: Path) -> str | None:
     """
     Return extracted plain text from path.
@@ -202,12 +242,8 @@ def _pdf(path: Path) -> str:
         if text.strip():
             pages.append(f"[Page {i + 1}]\n{text.strip()}")
     if not pages:
-        return (
-            f"[Scanned PDF: no extractable text]\n"
-            f"File: {path.name}\n"
-            f"Pages: {len(reader.pages)}\n"
-            "To make this searchable, export the text manually and drop it as a .txt file."
-        )
+        return no_text_stub(path, formato="PDF (scanned or image-only)",
+                            unidade="Pages", total=len(reader.pages))
     return "\n\n".join(pages)
 
 
@@ -223,6 +259,9 @@ def _docx(path: Path) -> str:
             cells = [cell.text.strip() for cell in row.cells]
             if any(cells):
                 parts.append(" | ".join(cells))
+    if not parts:
+        return no_text_stub(path, formato="Word (no text paragraphs)",
+                            unidade="Paragraphs", total=len(doc.paragraphs))
     return "\n\n".join(parts)
 
 
@@ -245,7 +284,11 @@ def _xlsx(path: Path) -> str:
                 break
         if rows:
             parts.append(f"## {sheet_name}\n\n" + "\n".join(rows))
+    n_abas = len(wb.sheetnames)
     wb.close()
+    if not parts:
+        return no_text_stub(path, formato="Excel (no filled cells)",
+                            unidade="Sheets", total=n_abas)
     return "\n\n".join(parts)
 
 
@@ -261,6 +304,12 @@ def _pptx(path: Path) -> str:
         ]
         if texts:
             slides.append(f"[Slide {i}]\n" + "\n".join(texts))
+    if not slides:
+        # Decks exportados como imagem renderizada: cada slide e um grafico e
+        # nao existe uma linha de texto dentro do arquivo. Este era o caso que
+        # nao tinha piso nenhum.
+        return no_text_stub(path, formato="PowerPoint (slides are images)",
+                            unidade="Slides", total=len(prs.slides))
     return "\n\n".join(slides)
 
 

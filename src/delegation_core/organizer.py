@@ -25,7 +25,7 @@ from datetime import datetime
 from pathlib import Path
 
 from .classifier import classify
-from .extractor import SUPPORTED, extract, format_label
+from .extractor import SUPPORTED, extract, format_label, is_no_text_stub
 from .junk import is_junk
 from .linker import (  # noqa: F401 — some re-exported
     clean_display, ensure_aliases, inject_backlinks, relink_folder, wikilinks,
@@ -37,6 +37,11 @@ from .synthesizer import synthesize
 from .vault import safe_filename, unique_note_path, yaml_quote_scalar, yaml_unquote_scalar
 
 from .config import lang_instruction as _frase_de_idioma, with_lang as _com_idioma
+
+#: Onde vai a nota-toco quando o arquivo nao traz pista de pasta.
+#: `Reference` porque o toco e um registro de que o arquivo existe, nao uma
+#: decisao, um conserto nem uma sessao.
+_PASTA_DE_TOCOS = "Reference"
 
 logger = logging.getLogger("organizer")
 
@@ -326,6 +331,39 @@ async def run(engine, vault_manager) -> dict:
             if not raw_text or not raw_text.strip():
                 results["errors"].append(f"{f.name}: extraction returned no text (scanned or protected?)")
                 shutil.move(str(f), str(failed / f.name))
+                continue
+
+            # Um toco de extracao vazia e texto VALIDO: nao-vazio, com mais de
+            # 30 caracteres, e portanto passa pela guarda acima, por `classify()`
+            # e por `synthesize()` sem que nada o barre. O avaliador de sintese
+            # tambem nao ajuda: ele so reprova saida curta demais e nomes
+            # alucinados conhecidos, entao uma nota inteira derivada de
+            # "[no extractable text] File: deck.pptx" sai com quality_score 1.0
+            # e cara de registro de verdade.
+            #
+            # Foi assim que 22 notas com resumo, topicos, pessoas e decisoes
+            # foram sintetizadas a partir de decks cujos slides eram imagens
+            # renderizadas. O modelo nao errou ao resumir: recebeu nada e
+            # preencheu o formulario.
+            #
+            # O toco vira o corpo da nota literalmente, sem passar pelo modelo.
+            # O arquivo continua achavel pelo nome, que e o ponto de existir uma
+            # nota, e nao existe uma frase inventada dentro dela.
+            if is_no_text_stub(raw_text):
+                folder = resolve_folder_hint(
+                    (sc_toco := load_sidecar(f)) and sc_toco.get("folder_hint"),
+                    cfg.vault_folders,
+                ) or _PASTA_DE_TOCOS
+                caminho = vault_manager.write_note(
+                    folder, f"{today_str}-{f.stem}", raw_text,
+                )
+                results.setdefault("stubs", []).append(
+                    f"{f.name}: no text layer, filed as a stub in {folder}/ "
+                    "without synthesis"
+                )
+                shutil.move(str(f), str(processed / f.name))
+                _archive_sidecar(f, processed, results)
+                logger.info("No-text stub for %s → %s", f.name, caminho)
                 continue
 
             junk_reason = is_junk(f.name, raw_text)
