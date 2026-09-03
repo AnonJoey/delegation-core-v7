@@ -598,3 +598,338 @@ def uninstall(dry_run: bool = False) -> dict:
         except OSError as e:
             relatorio["venv_pending"]["sentinel_error"] = str(e)
     return relatorio
+
+
+# ── post-install: everything install.sh/.bat did after `pip install` ─────────
+
+DEFAULT_REPO_SLUG = "AnonJoey/delegation-core-v7"
+
+
+def repo_slug(root: Path) -> str:
+    """The GitHub `owner/name` to pull dashboard releases from.
+
+    `origin` is the repo that publishes releases. `fork` is only consulted for
+    checkouts predating the 2026-08-31 remote rename, where the active repo was
+    named `fork` and `origin` pointed at the frozen v6.4: asking the wrong one
+    makes the release download look in a repo with no releases.
+    """
+    for remote in ("origin", "fork"):
+        codigo, url = _git(root, "remote", "get-url", remote)
+        if codigo != 0:
+            continue
+        limpo = url.strip().removesuffix(".git")
+        for prefixo in ("https://github.com/", "git@github.com:", "ssh://git@github.com/"):
+            if limpo.startswith(prefixo):
+                caminho = limpo[len(prefixo):]
+                if caminho.count("/") == 1:
+                    return caminho
+    return DEFAULT_REPO_SLUG
+
+
+def install_skills(root: Path) -> dict:
+    """Copy bundled Claude skills into ~/.claude/skills, never clobbering.
+
+    Personal skills there are available in every Claude Code session on the
+    machine, independent of any plugin config. A skill the user already has by
+    that name is theirs: kept, and reported as kept.
+    """
+    origem = root / "skills"
+    resultado: dict = {"installed": [], "kept_yours": [], "available": bool(origem.is_dir())}
+    if not origem.is_dir():
+        return resultado
+
+    destino_raiz = Path.home() / ".claude" / "skills"
+    destino_raiz.mkdir(parents=True, exist_ok=True)
+    for pasta in sorted(p for p in origem.iterdir() if p.is_dir()):
+        destino = destino_raiz / pasta.name
+        if destino.exists():
+            resultado["kept_yours"].append(pasta.name)
+            continue
+        try:
+            shutil.copytree(pasta, destino)
+            resultado["installed"].append(pasta.name)
+        except OSError as e:
+            resultado.setdefault("errors", []).append({"skill": pasta.name, "error": str(e)})
+    return resultado
+
+
+def _dashboard_artifact(root: Path, subdir: str, sufixo: str) -> Path | None:
+    pasta = root / "dashboard" / "src-tauri" / "target" / "release" / "bundle" / subdir
+    if not pasta.is_dir():
+        return None
+    achados = sorted(pasta.glob(f"*{sufixo}"))
+    return achados[0] if achados else None
+
+
+def _download_release_asset(root: Path, padrao: str, destino: Path) -> Path | None:
+    """Fetch one asset from the latest GitHub release via `gh`, or None.
+
+    Best-effort throughout: `gh` absent, not logged in, no release, no matching
+    asset are all "no dashboard", never a failed install. The MCP side is what
+    matters, and it is already in place by the time this runs.
+    """
+    if shutil.which("gh") is None:
+        return None
+    destino.mkdir(parents=True, exist_ok=True)
+    try:
+        subprocess.run(
+            ["gh", "release", "download", "--repo", repo_slug(root),
+             "--pattern", padrao, "--dir", str(destino)],
+            capture_output=True, text=True, timeout=600,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    achados = sorted(destino.glob(padrao))
+    return achados[0] if achados else None
+
+
+def _desktop_entry_text(exec_path: Path, icone: str) -> str:
+    return (
+        "[Desktop Entry]\n"
+        "Type=Application\n"
+        "Name=delegation-core Dashboard\n"
+        f"Exec={exec_path}\n"
+        f"Icon={icone}\n"
+        "Categories=Utility;\n"
+    )
+
+
+def _install_appimage(root: Path, appimage: Path) -> dict:
+    """Place the AppImage and give it a real menu entry with a real icon.
+
+    The icon goes into the XDG hicolor theme so the .desktop file can name it
+    and every desktop environment resolves it. Falls back to a stock icon name
+    when the source assets are not in this checkout, which is the case for a
+    stripped-down distribution.
+    """
+    destino_dir = CONFIG_DIR / "app"
+    destino_dir.mkdir(parents=True, exist_ok=True)
+    destino = destino_dir / "delegation-core-dashboard.AppImage"
+    shutil.copyfile(appimage, destino)
+    destino.chmod(0o755)
+
+    icones = root / "dashboard" / "src-tauri" / "icons"
+    nome_icone = "utilities-terminal"
+    if (icones / "128x128.png").is_file():
+        for origem, tamanho in ((icones / "128x128.png", "128x128"),
+                                (icones / "32x32.png", "32x32"),
+                                (icones / "128x128@2x.png", "256x256@2")):
+            if not origem.is_file():
+                continue
+            alvo_dir = Path.home() / ".local" / "share" / "icons" / "hicolor" / tamanho / "apps"
+            alvo_dir.mkdir(parents=True, exist_ok=True)
+            shutil.copyfile(origem, alvo_dir / "delegation-core-dashboard.png")
+        nome_icone = "delegation-core-dashboard"
+
+    apps = Path.home() / ".local" / "share" / "applications"
+    apps.mkdir(parents=True, exist_ok=True)
+    (apps / "delegation-core-dashboard.desktop").write_text(
+        _desktop_entry_text(destino, nome_icone), encoding="utf-8")
+    if shutil.which("update-desktop-database"):
+        subprocess.run(["update-desktop-database", "-q", str(apps)],
+                       capture_output=True, timeout=60)
+    return {"method": "appimage", "status": "installed", "path": str(destino)}
+
+
+def install_dashboard(root: Path) -> dict:
+    """Install the Tauri dashboard, preferring a local build over a release.
+
+    Never fails the install. Every branch that cannot proceed returns a status
+    the caller prints as a note, because the Python/MCP side is the part that
+    matters and a missing dashboard is a missing convenience.
+    """
+    import platform as _platform
+    import tempfile
+
+    sistema = _platform.system()
+    manual = ("Build it manually: cd dashboard && npm install && npm run tauri build")
+
+    try:
+        if sistema == "Linux":
+            deb = _dashboard_artifact(root, "deb", ".deb")
+            rpm = _dashboard_artifact(root, "rpm", ".rpm")
+            appimage = _dashboard_artifact(root, "appimage", ".AppImage")
+
+            if not (deb or rpm or appimage):
+                tmp = Path(tempfile.mkdtemp(prefix="dc-dashboard-"))
+                if shutil.which("dpkg"):
+                    deb = _download_release_asset(root, "*.deb", tmp)
+                elif shutil.which("rpm"):
+                    rpm = _download_release_asset(root, "*.rpm", tmp)
+                else:
+                    appimage = _download_release_asset(root, "*.AppImage", tmp)
+
+            if deb and shutil.which("dpkg"):
+                p = subprocess.run(["sudo", "dpkg", "-i", str(deb)],
+                                   capture_output=True, text=True, timeout=600)
+                if p.returncode != 0 and shutil.which("apt-get"):
+                    p = subprocess.run(["sudo", "apt-get", "install", "-f", "-y"],
+                                       capture_output=True, text=True, timeout=600)
+                return {"method": "deb", "status": "installed" if p.returncode == 0 else "failed",
+                        "path": str(deb), "detail": (p.stdout + p.stderr).strip()[-400:]}
+            if rpm and shutil.which("rpm"):
+                p = subprocess.run(["sudo", "rpm", "-i", str(rpm)],
+                                   capture_output=True, text=True, timeout=600)
+                if p.returncode != 0 and shutil.which("dnf"):
+                    p = subprocess.run(["sudo", "dnf", "install", "-y", str(rpm)],
+                                       capture_output=True, text=True, timeout=600)
+                return {"method": "rpm", "status": "installed" if p.returncode == 0 else "failed",
+                        "path": str(rpm), "detail": (p.stdout + p.stderr).strip()[-400:]}
+            if appimage:
+                return _install_appimage(root, appimage)
+            return {"method": None, "status": "not_found", "detail": manual}
+
+        if sistema == "Darwin":
+            dmg = _dashboard_artifact(root, "dmg", ".dmg")
+            if dmg is None:
+                dmg = _download_release_asset(root, "*.dmg", Path(tempfile.mkdtemp(prefix="dc-dashboard-")))
+            if dmg is None:
+                return {"method": None, "status": "not_found", "detail": manual}
+
+            p = subprocess.run(["hdiutil", "attach", str(dmg), "-nobrowse", "-readonly"],
+                               capture_output=True, text=True, timeout=300)
+            # `hdiutil attach` exit status is what decides, not the last word of
+            # its output. The shell version piped it and lost the status, so a
+            # garbled mount left an empty path and `"$mnt"/*.app` collapsed to
+            # `/*.app`, matching unrelated bundles at the filesystem root and
+            # copying them into /Applications.
+            montagem = None
+            if p.returncode == 0 and p.stdout.strip():
+                ultima = p.stdout.strip().splitlines()[-1].split("\t")[-1].strip()
+                if ultima.startswith("/") and Path(ultima).is_dir():
+                    montagem = Path(ultima)
+            if montagem is None:
+                return {"method": "dmg", "status": "failed",
+                        "detail": f"could not mount {dmg.name}: {(p.stdout + p.stderr).strip()[-300:]}"}
+            try:
+                apps = sorted(montagem.glob("*.app"))
+                if not apps:
+                    return {"method": "dmg", "status": "not_found", "detail": manual}
+                alvo = Path("/Applications") / apps[0].name
+                if alvo.exists():
+                    shutil.rmtree(alvo)
+                shutil.copytree(apps[0], alvo)
+                return {"method": "dmg", "status": "installed", "path": str(alvo)}
+            finally:
+                subprocess.run(["hdiutil", "detach", str(montagem), "-quiet"],
+                               capture_output=True, timeout=120)
+
+        if sistema == "Windows":
+            msi = _dashboard_artifact(root, "msi", ".msi")
+            nsis = _dashboard_artifact(root, "nsis", ".exe")
+            if not (msi or nsis):
+                tmp = Path(tempfile.mkdtemp(prefix="dc-dashboard-"))
+                msi = _download_release_asset(root, "*.msi", tmp) or None
+                if msi is None:
+                    nsis = _download_release_asset(root, "*.exe", tmp)
+            if msi:
+                p = subprocess.run(["msiexec", "/i", str(msi), "/qb"],
+                                   capture_output=True, text=True, timeout=1800)
+                return {"method": "msi", "status": "installed" if p.returncode == 0 else "failed",
+                        "path": str(msi), "detail": (p.stdout + p.stderr).strip()[-400:]}
+            if nsis:
+                p = subprocess.run([str(nsis), "/S"], capture_output=True, text=True, timeout=1800)
+                return {"method": "nsis", "status": "installed" if p.returncode == 0 else "failed",
+                        "path": str(nsis), "detail": (p.stdout + p.stderr).strip()[-400:]}
+            return {"method": None, "status": "not_found", "detail": manual}
+
+    except (OSError, subprocess.SubprocessError) as e:
+        return {"method": None, "status": "failed", "detail": str(e)}
+
+    return {"method": None, "status": "unsupported", "detail": f"no dashboard bundle for {sistema}"}
+
+
+def repair_client_configs() -> dict:
+    """Refresh the MCP client entries that an upgrade must not leave stale.
+
+    Two things this fixes, both of them divergences rather than oversights:
+
+    `install.bat` ran `clients --claude-code` on an upgrade and `install.sh` did
+    not, so the same upgrade refreshed the client config on Windows and left it
+    untouched on Linux and macOS.
+
+    Neither ran `--claude-desktop`, which matters more since the Desktop entry
+    turned out to be actively destructive: written in the Claude Code shape it
+    carries a `url`, and Desktop responds to that by rewriting the file and
+    dropping the WHOLE `mcpServers` section. Someone upgrading to the code that
+    fixes this would still be carrying the entry that causes it.
+
+    Only ever a REPAIR for Desktop: an entry is rewritten when one already
+    exists, and no entry is created for someone who never configured Desktop.
+    An installer that adds itself to a client the user did not ask for is a
+    different thing from one that fixes what it previously wrote wrong.
+    """
+    from .config import Config
+
+    resultado: dict = {}
+    try:
+        cfg = Config.load()
+    except Exception as e:
+        return {"status": "skipped", "detail": f"config not loadable: {e}"}
+
+    from . import clients
+
+    try:
+        resultado["claude_code"] = clients.install_claude_code(cfg)
+    except Exception as e:
+        resultado["claude_code"] = {"status": "error", "detail": str(e)}
+
+    alvo = clients.claude_desktop_config_path()
+    ja_configurado = False
+    if alvo.is_file():
+        try:
+            dados = json.loads(alvo.read_text(encoding="utf-8"))
+            ja_configurado = "delegation-core" in (dados.get("mcpServers") or {})
+        except (OSError, json.JSONDecodeError):
+            ja_configurado = False
+
+    if ja_configurado:
+        try:
+            resultado["claude_desktop"] = clients.install_claude_desktop(cfg)
+        except Exception as e:
+            resultado["claude_desktop"] = {"status": "error", "detail": str(e)}
+    else:
+        resultado["claude_desktop"] = {
+            "status": "not_configured",
+            "detail": ("No delegation-core entry in Claude Desktop's config, so "
+                       "none was written. Run `delegation-core clients "
+                       "--claude-desktop` to add one."),
+        }
+    return resultado
+
+
+def post_install(root: Path) -> dict:
+    """Everything install.sh and install.bat did after `pip install`.
+
+    Shared by the three platforms instead of transcribed into each. Whether the
+    setup wizard should run is reported, not decided: the shell wrapper is what
+    can hand the terminal over to an interactive program.
+    """
+    relatorio: dict = {"root": str(root)}
+
+    relatorio["docs_and_hooks"] = refresh_shipped_files(root)
+    relatorio["skills"] = install_skills(root)
+    relatorio["dashboard"] = install_dashboard(root)
+
+    # The cached health file predates the recursive broken-link metric. Dropping
+    # it makes the next start recompute rather than serve a stale count.
+    try:
+        (CONFIG_DIR / "vault_health.json").unlink(missing_ok=True)
+        relatorio["health_cache"] = "invalidated"
+    except OSError as e:
+        relatorio["health_cache"] = f"could not remove: {e}"
+
+    fresca = not (CONFIG_DIR / "config.json").is_file()
+    relatorio["fresh_install"] = fresca
+
+    if fresca:
+        # Nothing to register or repair yet: the wizard writes the config that
+        # both of those read.
+        relatorio["needs_wizard"] = True
+        return relatorio
+
+    relatorio["needs_wizard"] = False
+    relatorio["service"] = service.install()
+    relatorio["clients"] = repair_client_configs()
+    relatorio["stale_dist_copies"] = stale_dist_copies()
+    return relatorio

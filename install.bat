@@ -121,149 +121,22 @@ echo.
 echo    Installation complete.
 echo.
 
-rem == 4b. Copy agent docs and hooks to a stable location ======================
-rem independent of where this project folder ends up (the wizard wires
-rem Claude Code/Desktop up to these paths).
-rem Portability guard: never clobber a doc or hook the user customized: if one exists,
-rem keep theirs and drop the shipped copy alongside as <name>.dist.md.
-echo  Installing agent docs and hooks to %%USERPROFILE%%\.delegation_core...
-if not exist "%USERPROFILE%\.delegation_core\hooks" mkdir "%USERPROFILE%\.delegation_core\hooks"
-if exist "%USERPROFILE%\.delegation_core\AGENT_GUIDE.md" (
-    copy /Y "%SCRIPT_DIR%\AGENT_GUIDE.md" "%USERPROFILE%\.delegation_core\AGENT_GUIDE.dist.md" >nul 2>&1
-    echo    - AGENT_GUIDE.md already present: kept yours; shipped copy saved as AGENT_GUIDE.dist.md
-) else (
-    copy /Y "%SCRIPT_DIR%\AGENT_GUIDE.md" "%USERPROFILE%\.delegation_core\" >nul 2>&1
-)
-if exist "%USERPROFILE%\.delegation_core\CLAUDE_SYSTEM_PROMPT.md" (
-    copy /Y "%SCRIPT_DIR%\CLAUDE_SYSTEM_PROMPT.md" "%USERPROFILE%\.delegation_core\CLAUDE_SYSTEM_PROMPT.dist.md" >nul 2>&1
-    echo    - CLAUDE_SYSTEM_PROMPT.md already present: kept yours; shipped copy saved as CLAUDE_SYSTEM_PROMPT.dist.md
-) else (
-    copy /Y "%SCRIPT_DIR%\CLAUDE_SYSTEM_PROMPT.md" "%USERPROFILE%\.delegation_core\" >nul 2>&1
-)
-
-for %%H in ("%SCRIPT_DIR%\hooks\*.py") do (
-    if exist "%USERPROFILE%\.delegation_core\hooks\%%~nxH" (
-        copy /Y "%%H" "%USERPROFILE%\.delegation_core\hooks\%%~nH.dist.py" >nul 2>&1
-        echo    - %%~nxH already present: kept yours, shipped copy saved as %%~nH.dist.py
-    ) else (
-        copy /Y "%%H" "%USERPROFILE%\.delegation_core\hooks\" >nul 2>&1
-        echo    + %%~nxH
-    )
-)
-echo    OK
-echo.
-
-rem == 4c. Install bundled Claude skills to %USERPROFILE%\.claude\skills =======
-rem Personal skills are available in every Claude Code session on this machine,
-rem independent of plugin config. Guard: never clobber a skill already present.
-if exist "%SCRIPT_DIR%\skills" (
-    echo  Installing bundled skills to %USERPROFILE%\.claude\skills...
-    if not exist "%USERPROFILE%\.claude\skills" mkdir "%USERPROFILE%\.claude\skills"
-    for /d %%S in ("%SCRIPT_DIR%\skills\*") do (
-        if exist "%USERPROFILE%\.claude\skills\%%~nxS" (
-            echo    - %%~nxS already present: kept yours
-        ) else (
-            xcopy /E /I /Q /Y "%%S" "%USERPROFILE%\.claude\skills\%%~nxS" >nul
-            echo    + %%~nxS
-        )
-    )
-    echo    OK: skills available on next Claude Code session start.
+rem == 4b-5. Finish the install ==============================================
+rem Everything from here used to be ~145 more lines of batch, transcribed from
+rem install.sh and already drifted from it: this file refreshed the MCP client
+rem config on an upgrade and install.sh did not, and neither of them ever
+rem repaired the Claude Desktop entry. It now lives in
+rem delegation_core/installer.post_install(), shared by the three platforms:
+rem agent docs and hooks, bundled skills, the Tauri dashboard, the health
+rem cache, the service registration, and the client configs. It also launches
+rem the setup wizard when this turns out to be a fresh install.
+echo  Finishing the install...
+"%VENV%\Scripts\delegation-core" post-install --root "%SCRIPT_DIR%"
+if errorlevel 1 (
     echo.
-)
-
-rem == 4d. Install the Tauri dashboard app ====================================
-rem Prefer a bundle already built locally (dev/CI convenience); otherwise fall
-rem back to the latest GitHub release via `gh` if it's installed. Never fail the
-rem whole install over this: a missing dashboard just prints manual build
-rem instructions, since the Python/MCP side above is what matters most.
-echo  Installing delegation-core Dashboard app...
-set "DASH_BUNDLE_DIR=%SCRIPT_DIR%\dashboard\src-tauri\target\release\bundle"
-set "MSI_FILE="
-set "NSIS_FILE="
-
-rem Determine the repo slug for the `gh release download` fallback below.
-rem Prefer "origin": the actively-published repo. "fork" is legacy.
-set "REPO_SLUG="
-set "REMOTE_URL="
-for %%R in (origin fork) do (
-    if not defined REPO_SLUG (
-        for /f "delims=" %%U in ('git -C "%SCRIPT_DIR%" remote get-url %%R 2^>nul') do set "REMOTE_URL=%%U"
-        if defined REMOTE_URL (
-            set "_slug=!REMOTE_URL:https://github.com/=!"
-            set "_slug=!_slug:git@github.com:=!"
-            set "_slug=!_slug:.git=!"
-            if not "!_slug!"=="!REMOTE_URL!" set "REPO_SLUG=!_slug!"
-        )
-        set "REMOTE_URL="
-    )
-)
-if not defined REPO_SLUG set "REPO_SLUG=AnonJoey/delegation-core-v7"
-
-if exist "%DASH_BUNDLE_DIR%\msi\*.msi" (
-    for %%F in ("%DASH_BUNDLE_DIR%\msi\*.msi") do if not defined MSI_FILE set "MSI_FILE=%%F"
-)
-if exist "%DASH_BUNDLE_DIR%\nsis\*.exe" (
-    for %%F in ("%DASH_BUNDLE_DIR%\nsis\*.exe") do if not defined NSIS_FILE set "NSIS_FILE=%%F"
-)
-
-if not defined MSI_FILE if not defined NSIS_FILE (
-    where gh >nul 2>&1
-    if not errorlevel 1 (
-        echo    No local dashboard build found: checking the latest GitHub release...
-        set "DASH_TMP=%TEMP%\delegation_core_dashboard_dl"
-        rmdir /S /Q "!DASH_TMP!" >nul 2>&1
-        mkdir "!DASH_TMP!" >nul 2>&1
-        gh release download --repo %REPO_SLUG% --pattern "*.msi" --dir "!DASH_TMP!" >nul 2>&1
-        if exist "!DASH_TMP!\*.msi" (
-            for %%F in ("!DASH_TMP!\*.msi") do if not defined MSI_FILE set "MSI_FILE=%%F"
-        ) else (
-            gh release download --repo %REPO_SLUG% --pattern "*.exe" --dir "!DASH_TMP!" >nul 2>&1
-            for %%F in ("!DASH_TMP!\*.exe") do if not defined NSIS_FILE set "NSIS_FILE=%%F"
-        )
-    )
-)
-
-if defined MSI_FILE (
-    echo    Installing !MSI_FILE! ...
-    msiexec /i "!MSI_FILE!" /qb
-    if errorlevel 1 (
-        echo    WARNING: msiexec reported an error installing the dashboard.
-        echo    Try running it manually: msiexec /i "!MSI_FILE!"
-    ) else (
-        echo    OK: find "delegation-core Dashboard" in your Start Menu.
-    )
-) else if defined NSIS_FILE (
-    echo    Installing !NSIS_FILE! ...
-    "!NSIS_FILE!" /S
-    if errorlevel 1 (
-        echo    WARNING: the dashboard installer reported an error.
-        echo    Try running it manually: "!NSIS_FILE!"
-    ) else (
-        echo    OK: find "delegation-core Dashboard" in your Start Menu.
-    )
-) else (
-    echo    No dashboard build found locally or on GitHub releases.
-    echo    Build it manually:  cd dashboard ^&^& npm install ^&^& npm run tauri build
+    echo  WARNING: the finishing step reported a problem. The package itself is
+    echo  installed; rerun it with:
+    echo    "%VENV%\Scripts\delegation-core" post-install --root "%SCRIPT_DIR%"
 )
 echo.
-
-rem Invalidate cached health so the corrected recursive metric recomputes.
-del /Q "%USERPROFILE%\.delegation_core\vault_health.json" >nul 2>&1
-
-rem == 5. Launch wizard only on a FRESH install ================================
-rem On an existing deployment the wizard would re-prompt and could overwrite a
-rem working config.json, so an upgrade must leave configuration untouched.
-if exist "%USERPROFILE%\.delegation_core\config.json" (
-    echo  Existing config.json detected: preserved. Skipping setup wizard.
-    echo.
-    rem Maintain background service registration and client configs on upgrades
-    "%VENV%\Scripts\delegation-core" service install >nul 2>&1
-    "%VENV%\Scripts\delegation-core" clients --claude-code >nul 2>&1
-    echo  Upgrade complete. Restart delegation-core ^(or quit and reopen Claude^)
-    echo  to load the new code.
-    echo  To reconfigure manually later:  "%VENV%\Scripts\delegation-core" setup
-) else (
-    echo  Launching setup wizard...
-    echo.
-    "%VENV%\Scripts\delegation-core" setup
-)
+pause

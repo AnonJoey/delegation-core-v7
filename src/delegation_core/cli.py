@@ -196,6 +196,61 @@ def cmd_update(args):
     return 0 if estado == "ok" else 1
 
 
+def cmd_post_install(args):
+    """Finish an install: docs, hooks, skills, dashboard, service, clients.
+
+    Called by install.sh / install.bat once the venv exists and the package is
+    in it. Everything it does used to be transcribed into both of those scripts
+    and had already drifted between them.
+    """
+    from rich.console import Console
+
+    from . import installer
+
+    console = Console()
+    raiz = Path(args.root).expanduser().resolve() if args.root else installer.source_root()
+    if raiz is None:
+        console.print("[red]Cannot finish the install:[/red] no source directory given "
+                      "and none recorded. Pass --root PATH.")
+        return 1
+
+    r = installer.post_install(raiz)
+
+    docs = r["docs_and_hooks"]
+    console.print(f"  docs and hooks: {len(docs['installed'])} installed, "
+                  f"{len(docs['unchanged'])} unchanged, {len(docs['kept_yours'])} kept yours")
+    pele = r["skills"]
+    if pele["available"]:
+        console.print(f"  skills: {len(pele['installed'])} installed, "
+                      f"{len(pele['kept_yours'])} kept yours")
+    painel = r["dashboard"]
+    console.print(f"  dashboard: {painel['status']}"
+                  + (f" ({painel['method']})" if painel.get("method") else ""))
+    if painel["status"] not in ("installed",):
+        console.print(f"    [dim]{painel.get('detail', '')}[/dim]")
+
+    if r["needs_wizard"]:
+        if args.no_wizard:
+            console.print("\n[bold]Fresh install.[/bold] Run `delegation-core setup` next.")
+            return 0
+        # The CLI launches the wizard, not `installer.post_install`. The library
+        # function reports that setup is owed; handing the terminal to an
+        # interactive program is a decision for the layer that has the terminal,
+        # and post_install is also reached from non-interactive paths.
+        console.print("\n[bold]Fresh install.[/bold] Launching setup wizard...\n")
+        from .wizard import run_wizard
+        run_wizard()
+        return 0
+
+    console.print(f"  service: {r['service'].get('status')}")
+    for cliente, estado in r["clients"].items():
+        console.print(f"  {cliente}: {estado.get('status')}")
+        if estado.get("status") == "not_configured":
+            console.print(f"    [dim]{estado.get('detail', '')}[/dim]")
+    console.print("\n[green]Upgrade complete.[/green] Restart your MCP client to load the new code.")
+    return 0
+
+
 def cmd_uninstall(args):
     """Remove the installation, keeping the vault and the downloaded models."""
     from rich.console import Console
@@ -1322,6 +1377,14 @@ def main():
     p_update.add_argument("--no-restart", action="store_true",
                           help="Leave the daemon stopped after updating")
 
+    p_post = sub.add_parser(
+        "post-install",
+        help="Finish an install: docs, hooks, skills, dashboard, service, clients")
+    p_post.add_argument("--root", default=None,
+                        help="The source checkout; defaults to the recorded install source")
+    p_post.add_argument("--no-wizard", action="store_true",
+                        help="On a fresh install, report that setup is needed instead of running it")
+
     p_uninstall = sub.add_parser(
         "uninstall",
         help="Remove the installation (keeps your vault and downloaded models)")
@@ -1500,6 +1563,7 @@ def main():
         "run":      cmd_run,
         "service":  cmd_service,
         "update":   cmd_update,
+        "post-install": cmd_post_install,
         "uninstall": cmd_uninstall,
         "mcp-stdio": cmd_mcp_stdio,
         "clients":  cmd_clients,

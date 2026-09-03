@@ -67,11 +67,21 @@ def test_sem_travessao(nome):
 
 # ── o tamanho, que e a medida da duplicacao ──────────────────────────────────
 
-@pytest.mark.parametrize("nome,teto", [("uninstall.sh", 100), ("uninstall.bat", 110)])
+@pytest.mark.parametrize("nome,teto", [
+    ("uninstall.sh", 100), ("uninstall.bat", 110),
+    ("install.sh", 170), ("install.bat", 165),
+])
 def test_o_stub_nao_voltou_a_crescer(nome, teto):
-    """Medido: uninstall.sh saiu de 193 linhas e uninstall.bat de 158, com a
-    logica de ambos agora em installer.uninstall(). Se um deles passar destes
-    tetos, alguem reescreveu em shell algo que ja existe em Python."""
+    """Medido: uninstall.sh 193 -> 79, uninstall.bat 158 -> 88, install.sh
+    373 -> 150, install.bat 269 -> 142, com a logica agora em installer.py.
+    Se um deles passar destes tetos, alguem reescreveu em shell algo que ja
+    existe em Python.
+
+    Os instaladores tem teto mais alto que os desinstaladores por um motivo
+    real e nao por folga: o bootstrap deles roda ANTES do venv existir, entao
+    achar um Python 3.11+, instalar pacotes de sistema com sudo e criar o venv
+    nao tem como ser Python. E so a partir do `pip install` que ha um
+    interpretador para chamar."""
     linhas = len(_ler(nome).splitlines())
     assert linhas <= teto, (
         f"{nome} tem {linhas} linhas (teto {teto}). Logica de uninstall pertence "
@@ -146,3 +156,36 @@ def test_o_nome_do_sentinel_e_o_mesmo_dos_dois_lados():
 
     for nome in ("uninstall.sh", "uninstall.bat"):
         assert installer.VENV_PENDING_NAME in _ler(nome), nome
+
+
+# ── os instaladores delegam em vez de transcrever ───────────────────────────
+
+@pytest.mark.parametrize("nome", ("install.sh", "install.bat"))
+def test_o_instalador_chama_post_install(nome):
+    assert "post-install" in _ler(nome), (
+        f"{nome} nao delega o pos-install; era ali que os dois divergiam"
+    )
+
+
+@pytest.mark.parametrize("nome", ("install.sh", "install.bat"))
+def test_o_instalador_nao_refaz_o_pos_install_em_shell(nome):
+    """As tarefas que viviam duplicadas nos dois. Qualquer uma delas de volta
+    aqui e a divergencia recomecando: foi assim que o `.bat` passou a atualizar
+    a config do cliente MCP num upgrade e o `.sh` nao."""
+    executadas = "\n".join(_linhas_executadas(_ler(nome)))
+    for proibido in ("gh release download", "hdiutil", "msiexec",
+                     "dpkg -i", "rpm -i", "update-desktop-database",
+                     "service install", "clients --claude"):
+        assert proibido not in executadas, (
+            f"{nome} voltou a fazer `{proibido}` em shell; isso vive em "
+            "installer.post_install(), onde as tres plataformas compartilham"
+        )
+
+
+@pytest.mark.parametrize("nome", ("install.sh", "install.bat"))
+def test_o_instalador_ainda_faz_o_que_so_ele_pode(nome):
+    """O contraponto do teste acima: o bootstrap NAO pode ter migrado, porque
+    ele roda antes de existir um interpretador para chamar."""
+    texto = _ler(nome)
+    assert "venv" in texto
+    assert "pip" in texto
