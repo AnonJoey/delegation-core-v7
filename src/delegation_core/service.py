@@ -69,9 +69,11 @@ def _executable() -> str:
     found = shutil.which(SERVICE_NAME)
     if found:
         return found
-    candidate = Path(sys.executable).parent / SERVICE_NAME
-    if candidate.exists():
-        return str(candidate)
+    parent = Path(sys.executable).parent
+    for name in (SERVICE_NAME, f"{SERVICE_NAME}.exe", f"{SERVICE_NAME}.cmd"):
+        candidate = parent / name
+        if candidate.exists():
+            return str(candidate)
     return SERVICE_NAME
 
 
