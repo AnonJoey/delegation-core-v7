@@ -988,6 +988,51 @@ class VaultManager:
         except Exception as e:
             logger.warning("Could not save index state: %s", e)
 
+    def stamp_indexed(self, rel_paths: list[str]) -> int:
+        """Record that these notes are current in the index. Returns how many.
+
+        `reindex_vault(force=False)` skips a note whose mtime matches the value
+        recorded in `.chroma_index.json`, and it is the ONLY writer of that file
+        besides `delete_notes`. Every other path that indexes a note leaves it
+        unstamped, so the next "incremental" run re-embeds a note that is
+        already correctly indexed and has not changed.
+
+        Measured on this vault on 2026-09-02: the Reference folder held 8.262
+        notes on disk with 3.469 stamped. graph_build writes its report and one
+        article per community straight through `index_note`, thousands at a
+        time, and never stamps any of them. So 4.793 generated notes were
+        re-embedded on EVERY incremental reindex, turning a run that had five
+        genuinely new notes to index into a near-full rebuild that held the GPU
+        for around twenty-five minutes.
+
+        That cost is not academic: the SessionEnd hook fires
+        `delegation-core reindex` after every Claude Code session, and this
+        machine carries a `no_auto_reindex` sentry file that switches that off
+        entirely — which is also why hook-written transcripts stopped reaching
+        the index.
+
+        Bulk on purpose. Stamping inside `index_note` would rewrite the whole
+        state file once per note, which during a reindex of 8.581 notes is 8.581
+        full-file writes. One read, one write, however many paths.
+
+        A path whose file is gone is skipped rather than stamped: stamping a
+        mtime for a file that does not exist would make the next reindex skip a
+        note it needs to reap.
+        """
+        if not rel_paths:
+            return 0
+        state = self._load_index_state()
+        stamped = 0
+        for rel in rel_paths:
+            try:
+                state[rel] = (self.cfg.vault / rel).stat().st_mtime
+                stamped += 1
+            except OSError:
+                continue
+        if stamped:
+            self._save_index_state(state)
+        return stamped
+
     def _unindexed_notes(self, notes: list[dict]) -> list[dict]:
         """Notes that exist on disk and have no rows in the index.
 

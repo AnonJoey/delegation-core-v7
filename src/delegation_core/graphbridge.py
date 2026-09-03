@@ -209,12 +209,19 @@ def _write_artifacts_to_vault(vault_manager, graph_name: str, report_md: str,
         for article in sorted(wiki_dir.glob("*.md")):
             wiki_written.append(_write_wiki_article(vault_manager, wiki_folder, graph_name, article))
 
+    todos = written + wiki_written
+    # Sem isto, cada uma destas notas fica sem carimbo em .chroma_index.json e o
+    # proximo reindex incremental a reembute inteira, mesmo intocada. Num grafo
+    # de tamanho real sao milhares: e o que transformava um reindex de cinco
+    # notas novas em uma reconstrucao de vinte e cinco minutos.
+    vault_manager.stamp_indexed(todos)
+
     return {
         "report_path": written[0],
         "wiki_folder": wiki_folder,
         "wiki_count": len(wiki_written),
         "replaced_stale": removed,
-        "written_paths": written + wiki_written,
+        "written_paths": todos,
     }
 
 

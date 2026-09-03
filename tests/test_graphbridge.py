@@ -48,6 +48,7 @@ class FakeVaultManager:
         self.cfg = cfg
         self.indexed = []
         self.search_calls = []
+        self.stamped = []
         self._search_hits = search_hits or []
         self._search_error = search_error
 
@@ -62,6 +63,14 @@ class FakeVaultManager:
 
     def delete_notes(self, rel_paths):
         self.deleted = getattr(self, "deleted", []) + list(rel_paths)
+        return len(rel_paths)
+
+    def stamp_indexed(self, rel_paths):
+        # graph_build escrevia milhares de artigos sem carimbar nenhum, e o
+        # reindex "incremental" seguinte reembutia todos eles. Este dublê tem
+        # que acompanhar a interface real, senão o teste passa contra um
+        # colaborador que não existe.
+        self.stamped.extend(rel_paths)
         return len(rel_paths)
 
     def note_metadata(self, rel_path, title, folder):
@@ -497,3 +506,30 @@ def test_build_graph_forwards_exclude_patterns_to_detect(cfg, monkeypatch, tmp_p
         file_to_vault=False, exclude=["tests/", "website/"]))
 
     assert seen["extra_excludes"] == ["tests/", "website/"]
+
+
+def test_write_artifacts_stamps_every_note_it_filed(cfg, tmp_path):
+    """Sem carimbo, o proximo reindex incremental reembute tudo isto de novo.
+
+    `reindex_vault(force=False)` pula a nota cujo mtime bate com o carimbo em
+    .chroma_index.json, e ate 02/09/2026 os unicos escritores desse arquivo
+    eram reindex_vault e delete_notes. graph_build escreve o relatorio mais um
+    artigo por comunidade direto por index_note, aos milhares, sem carimbar.
+    Medido neste vault: Reference com 8.262 notas e 3.469 carimbadas, ou seja
+    4.793 reembutidas a cada run.
+    """
+    vm = FakeVaultManager(cfg)
+
+    wiki = tmp_path / "wiki"
+    wiki.mkdir()
+    for nome in ("Community_0.md", "Community_1.md", "index.md"):
+        (wiki / nome).write_text(f"# {nome}\n", encoding="utf-8")
+
+    resultado = graphbridge._write_artifacts_to_vault(
+        vm, "meu-grafo", "# relatorio\n", wiki, [])
+
+    assert vm.stamped, "arquivou notas no vault e nao carimbou nenhuma"
+    assert set(vm.stamped) == set(resultado["written_paths"]), (
+        "o que foi carimbado tem que ser exatamente o que foi arquivado"
+    )
+    assert len(vm.stamped) == 4          # 1 relatorio + 3 artigos

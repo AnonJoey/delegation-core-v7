@@ -700,38 +700,3 @@ def _menu_index(prompt: str, count: int) -> int:
         console.print(f"  [red]Please enter a number between 1 and {count}.[/red]")
 
 
-def _find_obsidian_vaults() -> list[Path]:
-    search_roots = [Path.home() / "Documents", Path.home()]
-
-    # iCloud Obsidian on macOS
-    icloud = Path.home() / "Library" / "Mobile Documents" / "iCloud~md~obsidian" / "Documents"
-    if icloud.exists():
-        search_roots.insert(0, icloud)
-
-    found: list[Path] = []
-    seen: set[Path] = set()
-
-    for root in search_roots:
-        _scan_for_vaults(root, found, seen, depth=0, max_depth=3)
-        if len(found) >= 8:
-            break
-
-    return found
-
-
-def _scan_for_vaults(directory: Path, found: list, seen: set, depth: int, max_depth: int):
-    if depth > max_depth or not directory.is_dir():
-        return
-    try:
-        for child in directory.iterdir():
-            if child.name == ".obsidian" and child.is_dir():
-                parent = child.parent
-                if parent not in seen:
-                    seen.add(parent)
-                    found.append(parent)
-                return  # this directory is a vault, no need to recurse further
-        for child in directory.iterdir():
-            if child.is_dir() and not child.name.startswith(".") and len(found) < 8:
-                _scan_for_vaults(child, found, seen, depth + 1, max_depth)
-    except PermissionError:
-        pass
