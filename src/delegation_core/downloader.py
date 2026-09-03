@@ -336,8 +336,20 @@ def _get_release_asset(system: str, machine: str) -> tuple[str, str] | None:
         # but llama.cpp has renamed the Windows CPU asset before (e.g. to
         # win-cpu-x64.zip) — fall back to any win+x64 archive so a naming change
         # upstream doesn't silently break the installer again. _is_plain_cpu_asset
-        # keeps the fallback from grabbing a GPU-backend build or cudart helper.
-        candidates = [k for k in assets if "win" in k and "avx2" in k and "x64" in k and _archive(k)]
+        # guards BOTH branches, not just the fallback: it was on the fallback
+        # alone until 2026-09-03, and the preferred branch was correct only by
+        # alphabetical luck. No llama.cpp GPU build carries "avx2" in its name
+        # today, so `sorted(...)[0]` happened to land on the CPU asset. Given an
+        # asset list where the GPU build sorts first, as
+        # "llama-...-bin-win-cuda-avx2-x64.zip" does against
+        # "llama-...-bin-win-x64-avx2.zip", the preferred branch selected the
+        # CUDA build and the installer put a GPU binary on a machine that may
+        # have no GPU. The comment already claimed this protection; now it is
+        # true. Upstream has renamed this asset before, which is the whole
+        # reason the fallback exists, so depending on their naming order is
+        # depending on the thing that already broke once.
+        candidates = [k for k in assets if "win" in k and "avx2" in k and "x64" in k
+                      and _archive(k) and _is_plain_cpu_asset(k)]
         if not candidates:
             candidates = [k for k in assets if "win" in k and "x64" in k and _archive(k) and _is_plain_cpu_asset(k)]
     else:
