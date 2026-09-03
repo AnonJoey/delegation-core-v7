@@ -85,6 +85,26 @@ def claude_code_entry(cfg: Config) -> dict:
     }
 
 
+def claude_desktop_entry(cfg: Config) -> dict:
+    """The claude_desktop_config.json value. stdio, and never a URL.
+
+    Its own function instead of reusing `claude_code_entry`, which is the
+    mistake this replaces: the two files look alike and validate differently.
+    `~/.claude.json` accepts `type: http`; `claude_desktop_config.json` does
+    not, and an entry carrying `url` there makes Desktop rewrite the file on
+    startup and drop the whole `mcpServers` section plus some `preferences`
+    keys, with no error. So the wrong shape here does not just fail to connect,
+    it can delete every other MCP server the user had configured.
+
+    stdio, but NOT `{"command": ..., "args": ["run"]}`: that starts a second
+    daemon fighting the first for the port, the index and the GPU. `mcp-stdio`
+    is the bridge in stdio_bridge.py, which opens nothing and forwards every
+    call to the one daemon.
+    """
+    from . import service
+    return {"command": service._executable(), "args": ["mcp-stdio"]}
+
+
 def codex_block(cfg: Config) -> str:
     """The ~/.codex/config.toml table pointing at the daemon."""
     return (
@@ -192,10 +212,15 @@ def install_claude_desktop(cfg: Config, target_path: Path | None = None) -> dict
         }
 
     before = servers.get(SELF)
-    servers[SELF] = claude_code_entry(cfg)
+    servers[SELF] = claude_desktop_entry(cfg)
     if before == servers[SELF]:
         return {"client": "claude-desktop", "path": str(config_file),
                 "status": "already-configured"}
+
+    # Writing the right entry IS the repair: the dangerous one is the value
+    # being replaced. Reported so the user learns their file was at risk, and
+    # so a support conversation has something concrete to point at.
+    reparado = isinstance(before, dict) and "url" in before
 
     if config_file.exists() and config_file.stat().st_size:
         backup = config_file.with_suffix(".json.dc-backup")
@@ -206,7 +231,8 @@ def install_claude_desktop(cfg: Config, target_path: Path | None = None) -> dict
     tmp.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
     tmp.replace(config_file)
     return {"client": "claude-desktop", "path": str(config_file),
-            "status": "updated" if before else "installed"}
+            "status": "updated" if before else "installed",
+            "repaired_unsafe_url_entry": reparado}
 
 
 def install_claude_code(cfg: Config) -> dict:

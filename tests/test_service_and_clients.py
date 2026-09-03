@@ -263,6 +263,15 @@ def test_malformed_config_is_refused_not_overwritten(tmp_path, monkeypatch):
 
 
 # ── Claude Desktop ────────────────────────────────────────────────────────────
+#
+# As duas asercoes originais desta secao exigiam `type: "http"` e um header
+# `Authorization` dentro de claude_desktop_config.json. Elas descreviam o que o
+# codigo fazia, nao o que o Claude Desktop aceita, e ficaram verdes enquanto a
+# funcionalidade estava quebrada em campo: o Desktop recusa entrada sem
+# `command` e, pior, com um campo `url` presente ele reescreve o arquivo na
+# inicializacao e descarta a secao mcpServers inteira.
+#
+# Reescritas para exigir a forma que funciona. Ver tests/test_claude_desktop_entry.py.
 
 def test_claude_desktop_installs_into_missing_file(tmp_path):
     from delegation_core import clients
@@ -273,8 +282,9 @@ def test_claude_desktop_installs_into_missing_file(tmp_path):
     assert result["status"] == "installed"
     assert path.exists()
     data = json.loads(path.read_text())
-    assert data["mcpServers"]["delegation-core"]["type"] == "http"
-    assert data["mcpServers"]["delegation-core"]["headers"]["Authorization"] == "Bearer desktop-tok"
+    entrada = data["mcpServers"]["delegation-core"]
+    assert entrada["args"] == ["mcp-stdio"], "o Desktop so valida stdio"
+    assert "url" not in entrada, "url faz o Desktop apagar mcpServers inteiro"
 
 
 def test_claude_desktop_preserves_other_servers(tmp_path):
@@ -289,7 +299,9 @@ def test_claude_desktop_preserves_other_servers(tmp_path):
     assert result["status"] == "installed"
     data = json.loads(path.read_text())
     assert data["mcpServers"]["other-server"] == {"command": "other"}
-    assert data["mcpServers"]["delegation-core"]["headers"]["Authorization"] == "Bearer desktop-tok"
+    entrada = data["mcpServers"]["delegation-core"]
+    assert entrada["args"] == ["mcp-stdio"]
+    assert "desktop-tok" not in json.dumps(entrada), "o token nao vai para este arquivo"
 
 
 def test_claude_desktop_reinstall_is_idempotent(tmp_path):

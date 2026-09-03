@@ -132,6 +132,13 @@ def cmd_run(args):
     run_server(cfg)
 
 
+def cmd_mcp_stdio(args):
+    """Serve MCP on stdio, forwarding to the daemon (for Claude Desktop)."""
+    from . import stdio_bridge
+    from .config import Config
+    return stdio_bridge.run(Config.load())
+
+
 def cmd_update(args):
     """Bring the installed package up to date with its source."""
     from rich.console import Console
@@ -1245,6 +1252,10 @@ def main():
         "--recalibrate", action="store_true",
         help="Reset and rerun tok/sec auto-calibration before starting (use after swapping models)",
     )
+    sub.add_parser(
+        "mcp-stdio",
+        help="Serve MCP on stdio, forwarding to the daemon (how Claude Desktop connects)")
+
     p_update = sub.add_parser(
         "update", help="Update the installed package from its source, stopping the daemon first")
     p_update.add_argument("--check", action="store_true",
@@ -1422,6 +1433,7 @@ def main():
         "run":      cmd_run,
         "service":  cmd_service,
         "update":   cmd_update,
+        "mcp-stdio": cmd_mcp_stdio,
         "clients":  cmd_clients,
         "status":   cmd_status,
         "doctor":   cmd_doctor,
