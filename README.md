@@ -1,8 +1,8 @@
-# delegation-core
+# Delegation-Core Office
 
 A local MCP delegation server: a markdown vault (semantic search via BGE + ChromaDB), an
 optional local LLM (llama.cpp) for summarization/synthesis, and a vendored code-graph
-pipeline — all usable either as an MCP server (Claude Desktop/Code) or directly from a
+pipeline - all usable either as an MCP server (Claude Desktop/Code) or directly from a
 terminal via the `delegation-core` CLI. It runs as one HTTP daemon that every client shares,
 so the model and the index are loaded once per machine rather than once per client.
 
@@ -14,15 +14,15 @@ protocol an AI agent should follow when this MCP server is connected.
 
 - **Vault**: an Obsidian-compatible markdown vault, semantically searchable via BGE
   embeddings + ChromaDB. Drop files into `_inbox/` and they get classified, synthesized into
-  clean notes, wikilinked, and filed — or write/read/search notes directly.
-- **Code graph** (opt-in, `[graph]` extra): build a knowledge graph of a codebase — AST
+  clean notes, wikilinked, and filed - or write/read/search notes directly.
+- **Code graph** (opt-in, `[graph]` extra): build a knowledge graph of a codebase - AST
   extraction across ~30 languages via tree-sitter, community detection, god-node/blast-radius
   analysis. Produces `graph.json`, an interactive `graph.html`, Mermaid architecture diagrams
   (`callflow.html`), a human-readable `GRAPH_REPORT.md`, and per-community wiki articles filed
   into the vault. Vendored and adapted from
-  [Graphify](https://github.com/Graphify-Labs/graphify) — see `THIRD_PARTY_LICENSES/`.
+  [Graphify](https://github.com/Graphify-Labs/graphify) - see `THIRD_PARTY_LICENSES/`.
 - **Process tracking**: lightweight cross-session task tracking that survives restarts.
-- **Dashboard** (`dashboard/`): a native Tauri desktop app — a top status/clients bar, a
+- **Dashboard** (`dashboard/`): a native Tauri desktop app - a top status/clients bar, a
   persistent vault-graph pane, a notes browser, and a cross-session task tracker. See
   `dashboard/README.md`.
 
@@ -32,7 +32,7 @@ The platform installer is the easiest path: it detects Python, creates a venv, i
 delegation-core, installs the native Tauri dashboard app (from a local build if present,
 otherwise the latest GitHub release, falling back to manual build instructions if neither
 is available), then launches the setup wizard automatically. Re-running it on an existing
-install upgrades in place — `config.json` is preserved and the prior install is backed up,
+install upgrades in place - `config.json` is preserved and the prior install is backed up,
 the wizard is not re-run.
 
 ```bash
@@ -42,7 +42,7 @@ install.bat                # Windows (or double-click)
 
 (macOS: `install.command` is a double-clickable Finder shim to `install.sh`.)
 
-To remove everything the installer created — venv, config, logs, hooks — run the matching
+To remove everything the installer created - venv, config, logs, hooks - run the matching
 uninstaller (`uninstall.sh` / `uninstall.bat` / `uninstall.command`). It never touches your
 vault or downloaded model weights.
 
@@ -62,7 +62,7 @@ delegation-core setup
 ```
 
 This finds (or lets you create) an Obsidian vault, downloads/configures a local llama.cpp
-model (or lets you skip it — see "engine modes" below), and optionally registers
+model (or lets you skip it - see "engine modes" below), and optionally registers
 delegation-core to start automatically (systemd/launchd/Task Scheduler).
 
 ## Using it as an MCP server
@@ -79,7 +79,7 @@ a leftover `{"command": ..., "args": ["run"]}` entry spawns a second server that
 daemon for the port, the ChromaDB index, and the GPU. One daemon means one resident copy of
 BGE-m3 instead of one per client.
 
-Once connected, ask the running server what it can do — `capabilities()` reports the live
+Once connected, ask the running server what it can do - `capabilities()` reports the live
 tool list from `mcp.list_tools()` rather than a count written down here that drifts. Full
 protocol and tool reference: `AGENT_GUIDE.md`.
 
@@ -98,7 +98,7 @@ delegation-core graph hook install ~/code/my-project  # auto-rebuild on every co
 delegation-core process create "Migrate auth" --steps "plan,implement,test"
 ```
 
-Run `delegation-core --help` (and `<command> --help`) for the full tree — `setup`, `run`,
+Run `delegation-core --help` (and `<command> --help`) for the full tree - `setup`, `run`,
 `status`, `reindex`, `maintain`, `ingest`, `relink`, `search`, `compress`, `note`, `graph`,
 `process`.
 
@@ -106,11 +106,11 @@ Run `delegation-core --help` (and `<command> --help`) for the full tree — `set
 
 Set in `config.json` (`engine_mode`), chosen during `setup`:
 
-- **`local`** — summarization/synthesis runs on a local llama.cpp model. Fully offline once
+- **`local`** - summarization/synthesis runs on a local llama.cpp model. Fully offline once
   the model is downloaded.
-- **`agent`** — no local model; synthesis/compression is delegated to whichever MCP client
+- **`agent`** - no local model; synthesis/compression is delegated to whichever MCP client
   is calling (e.g. Claude Code). For machines that can't spare the RAM/CPU for a local model.
-- **`hybrid`** — light interactive work delegates to the calling agent; heavy/background work
+- **`hybrid`** - light interactive work delegates to the calling agent; heavy/background work
   (maintenance, healing, bulk synthesis) always runs locally.
 
 BGE embeddings + ChromaDB search always run locally in every mode.
@@ -128,12 +128,12 @@ collaborators are faked), and `tests/conftest.py` keeps a run from touching the 
 the real figure; run `pytest tests/ -q` for the number. They cover config, vault helpers and browsing, search scoping,
 note rename/delete, the daemon's request routing, the dashboard API's routes and CORS,
 client tracking, the graph registry/folder-resolution logic, the git hook installer, and
-process tracking. `organizer.py`'s synthesis pipeline is still the notable gap — it needs a
+process tracking. `organizer.py`'s synthesis pipeline is still the notable gap - it needs a
 real model to say anything useful.
 
 ## More detail
 
-- `AGENT_GUIDE.md` — full MCP tool reference and protocol, written for the AI agent side.
-- `CHANGELOG.md` — version history.
-- `DEPLOYMENT_LOG.md` — per-deployment upgrade notes (this repo runs on more than one machine).
-- `THIRD_PARTY_LICENSES/` — attribution for vendored code (Graphify).
+- `AGENT_GUIDE.md` - full MCP tool reference and protocol, written for the AI agent side.
+- `CHANGELOG.md` - version history.
+- `DEPLOYMENT_LOG.md` - per-deployment upgrade notes (this repo runs on more than one machine).
+- `THIRD_PARTY_LICENSES/` - attribution for vendored code (Graphify).
