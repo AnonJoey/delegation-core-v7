@@ -187,23 +187,38 @@ def _is_connection_error(exc: BaseException) -> bool:
     OSError only indirectly, so the check walks __cause__/__context__; FastMCP
     and anyio both re-wrap transport errors on the way up.
     """
-    seen = set()
-    current: BaseException | None = exc
     conn_error_names = {
         "ConnectError", "ConnectTimeout", "ReadError", "ReadTimeout",
         "WriteError", "WriteTimeout", "PoolTimeout", "RemoteProtocolError",
         "ProtocolError", "LocalProtocolError", "CloseError", "NetworkError",
     }
-    while current is not None and id(current) not in seen:
-        seen.add(id(current))
-        if isinstance(current, (ConnectionError, OSError, TimeoutError)):
-            return True
-        if type(current).__name__ in conn_error_names:
-            return True
-        if isinstance(current, ExceptionGroup):  # anyio task groups wrap in these
-            if any(_is_connection_error(sub) for sub in current.exceptions):
+
+    # Iterative, with ONE `seen` for the whole walk. This used to recurse into
+    # `ExceptionGroup.exceptions`, and each recursive call started a fresh
+    # `seen`: the loop below was cycle-safe, the recursion around it was not.
+    # A group whose member's __context__ points back at the group makes the two
+    # call frames hand the same pair to each other forever, and the walk dies
+    # with RecursionError instead of answering the question.
+    #
+    # That is not hypothetical shape-hunting: anyio task groups wrap in these,
+    # and a re-raised transport error inside a task group is exactly how a
+    # member ends up carrying the group as its context. A linear chain of
+    # deeply nested groups had the same problem more quietly, spending one
+    # stack frame per level.
+    seen: set[int] = set()
+    pendentes: list[BaseException] = [exc]
+
+    while pendentes:
+        current: BaseException | None = pendentes.pop()
+        while current is not None and id(current) not in seen:
+            seen.add(id(current))
+            if isinstance(current, (ConnectionError, OSError, TimeoutError)):
                 return True
-        current = current.__cause__ or current.__context__
+            if type(current).__name__ in conn_error_names:
+                return True
+            if isinstance(current, ExceptionGroup):  # anyio task groups wrap in these
+                pendentes.extend(current.exceptions)
+            current = current.__cause__ or current.__context__
     return False
 
 
