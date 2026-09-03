@@ -122,8 +122,10 @@ pip install -e ".[dev]"
 pytest tests/ -q
 ```
 
-579 tests — fast and offline, with no ChromaDB/BGE/llama.cpp dependency (the heavier
-collaborators are faked). They cover config, vault helpers and browsing, search scoping,
+The suite is fast and offline, with no ChromaDB/BGE/llama.cpp dependency (the heavier
+collaborators are faked), and `tests/conftest.py` keeps a run from touching the real
+`~/.delegation_core`. A test total used to be printed here and drifted to roughly half
+the real figure; run `pytest tests/ -q` for the number. They cover config, vault helpers and browsing, search scoping,
 note rename/delete, the daemon's request routing, the dashboard API's routes and CORS,
 client tracking, the graph registry/folder-resolution logic, the git hook installer, and
 process tracking. `organizer.py`'s synthesis pipeline is still the notable gap — it needs a

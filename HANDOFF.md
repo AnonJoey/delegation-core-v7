@@ -1,6 +1,7 @@
 # delegation-core — Project Handoff
 
-_Last updated: 2026-07-28, at commit `ae4189b` / tag `dashboard-v0.2.0` (core v0.9.0, dashboard v0.2.0)._
+_Last updated: 2026-09-03 (core v0.13.0). Facts below were true and verified at that
+date against the working tree, not carried over from the previous revision._
 
 Written for whoever (human or agent) picks this project up next. Facts below were true and
 verified at the timestamp above — re-verify anything load-bearing before acting on it.
@@ -10,8 +11,10 @@ verified at the timestamp above — re-verify anything load-bearing before actin
 A local MCP delegation server (FastMCP, stdio transport) over an Obsidian vault
 (ChromaDB + BGE embeddings), with an optional local llama.cpp LLM, a vendored
 code-graph pipeline (from Graphify), a full CLI, and a cross-platform Tauri
-desktop dashboard. 31 public MCP tools (32 `@mcp.tool()` registrations; one,
-`_bg_maintenance_wrapper`, is an internal helper).
+desktop dashboard. For the live tool list, call `capabilities()` — it asks the running
+server rather than repeating a number here, and `tests/test_capability_registry.py`
+fails when a new artifact-producing function appears unclassified. The count in this
+paragraph used to be maintained by hand; it said 31 while the server served 54.
 
 ## Repos and remotes
 
@@ -27,8 +30,14 @@ desktop dashboard. 31 public MCP tools (32 `@mcp.tool()` registrations; one,
 
 ## Current state (all verified, not assumed)
 
-- **Tests: 204 passing** (`~/.delegation_core/venv/bin/python3 -m pytest tests/ -q`),
-  19 test files, fast and offline (fakes/monkeypatch; no real BGE/ChromaDB/llama/network).
+- **Tests: run them, do not read a number here.**
+  `~/.delegation_core/venv/bin/python3 -m pytest tests/ -q`. Fast and offline
+  (fakes/monkeypatch; no real BGE/ChromaDB/llama/network), and `tests/conftest.py`
+  redirects every state path so a run cannot touch `~/.delegation_core`.
+  A hardcoded total lived here for two months reading "204 passing, 19 test files"
+  against a suite of 1042 in 67 files, which is the same drift `__version__` had
+  three times before `test_version_consistency.py` ended it. `test_docs_not_stale.py`
+  now fails if a count comes back into this file.
 - **Cargo Check: clean (0.42s)** (`cargo check --manifest-path dashboard/src-tauri/Cargo.toml`).
 - **CI: validated for real.** `.github/workflows/build-dashboard.yml` ran successfully on
   the `dashboard-v0.2.0` tag across ubuntu/windows/macos-latest — first-ever real run of
