@@ -16,6 +16,7 @@ directory from a shell instead.
 
 import json
 import logging
+import os
 import statistics
 import threading
 import uuid
@@ -39,22 +40,55 @@ STARTED_AT = datetime.now()
 _DURATIONS_PATH = Path.home() / ".delegation_core" / "job_durations.json"
 _DURATIONS_KEEP = 10
 
+# The durations file is read-modify-written by whichever job thread happens to
+# finish, and jobs.submit hands every task its own daemon thread. Two finishing
+# together both read the old file, both append their own entry, and the second
+# write erases the first — the classic lost update, on a file whose whole job is
+# to accumulate a history.
+#
+# `_lock` above guards the in-memory `_jobs` dict and nothing else, so it is not
+# this lock. A separate one keeps the two concerns apart: a slow disk write must
+# not block a status poll.
+#
+# localqueue.py, which stores the same kind of thing, already does both halves
+# of this correctly (an RLock plus tmp+fsync+os.replace). This module was the
+# one JSON store in the project with neither.
+_durations_lock = threading.Lock()
+
 
 def _load_durations() -> dict:
     try:
-        return json.loads(_DURATIONS_PATH.read_text(encoding="utf-8"))
-    except Exception:
+        data = json.loads(_DURATIONS_PATH.read_text(encoding="utf-8"))
+    except FileNotFoundError:
         return {}
+    except Exception as e:
+        # Advisory data: a corrupt file must not raise. But it must not vanish
+        # silently either — before this, a truncated write turned into "no
+        # history" for every task at once, and the only symptom was task_status
+        # quietly dropping check_again_in_seconds from its answers.
+        logger.warning("job duration history unreadable (%s) — starting empty", e)
+        return {}
+    return data if isinstance(data, dict) else {}
 
 
 def _record_duration(task_name: str, seconds: float) -> None:
     try:
-        data = _load_durations()
-        history = [s for s in data.get(task_name, []) if isinstance(s, (int, float))]
-        history.append(round(seconds, 1))
-        data[task_name] = history[-_DURATIONS_KEEP:]
-        _DURATIONS_PATH.parent.mkdir(parents=True, exist_ok=True)
-        _DURATIONS_PATH.write_text(json.dumps(data, indent=2), encoding="utf-8")
+        with _durations_lock:
+            data = _load_durations()
+            history = [s for s in data.get(task_name, []) if isinstance(s, (int, float))]
+            history.append(round(seconds, 1))
+            data[task_name] = history[-_DURATIONS_KEEP:]
+            _DURATIONS_PATH.parent.mkdir(parents=True, exist_ok=True)
+            # Atomic, for the same reason localqueue is: write_text truncates
+            # the real file first, so a crash or a full disk mid-write leaves a
+            # half-written store that is indistinguishable from a corrupt one,
+            # and _load_durations then reads it as "no history at all".
+            tmp = _DURATIONS_PATH.with_suffix(".json.tmp")
+            with tmp.open("w", encoding="utf-8") as fh:
+                json.dump(data, fh, indent=2)
+                fh.flush()
+                os.fsync(fh.fileno())
+            os.replace(tmp, _DURATIONS_PATH)
     except Exception as e:  # advisory only — never fail a job over telemetry
         logger.debug("Could not record duration for %s: %s", task_name, e)
 
