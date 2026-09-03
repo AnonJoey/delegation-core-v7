@@ -52,16 +52,40 @@ def load(main_path: Path) -> dict:
         return {}
 
 
-def is_valid_folder_hint(hint, vault_folders: list) -> bool:
-    """Return True if hint's root segment names a configured vault folder.
+def resolve_folder_hint(hint, vault_folders: list) -> str | None:
+    """O `folder_hint` do sidecar, com a caixa do vault, ou None se invalido.
 
-    folder_hint may be a subpath like 'meetings/Gazin/2026-2027' — only the
-    root segment needs to match a configured vault folder.
+    Valida E canoniza numa chamada so, de proposito. A versao anterior era
+    `is_valid_folder_hint`, devolvia bool, e o chamador em organizer.py usava o
+    hint CRU como caminho (`folder = hint.strip("/")`). Separar as duas coisas
+    e o que torna o defeito abaixo dificil de corrigir pela metade: tornar so a
+    validacao insensivel a caixa faria um hint `sessions` criar uma pasta
+    `sessions/` ao lado da `Sessions/` que o vault ja tem.
+
+    O defeito: a comparacao era `head in vault_folders`, sensivel a caixa. A
+    docstring de `config.resolve_folder` descreve exatamente esta armadilha —
+    "code that hardcoded a lowercase name and tested `"sessions" in folders`
+    silently did the wrong thing on such a vault" — e diz que os defaults de
+    fabrica sao minusculos enquanto vaults configurados pelo wizard usam nomes
+    capitalizados. Este modulo nunca adotou o helper.
+
+    Medido nesta maquina em 03/09/2026, vault com `Sessions`, `Decisions`,
+    `Reference`: os hints `sessions`, `decisions`, `sessions/2026` e
+    `reference/x` eram TODOS rejeitados, e o arquivo caia no classificador do
+    modelo em vez de ir para onde o sidecar mandou. Um roteamento explicito,
+    ignorado em silencio.
+
+    Subcaminho e preservado: `meetings/Gazin/2026-2027` continua valendo, e so
+    o segmento raiz e canonizado.
     """
     if not hint or not isinstance(hint, str):
-        return False
-    head = hint.strip("/").split("/", 1)[0]
-    return head in vault_folders
+        return None
+    partes = hint.strip("/").split("/", 1)
+    from .config import resolve_folder
+    raiz = resolve_folder(partes[0], vault_folders)
+    if not raiz:
+        return None
+    return f"{raiz}/{partes[1]}" if len(partes) > 1 and partes[1] else raiz
 
 
 def format_block(sidecar: dict) -> str:

@@ -31,7 +31,7 @@ from .linker import (  # noqa: F401 — some re-exported
     clean_display, ensure_aliases, inject_backlinks, relink_folder, wikilinks,
 )
 from .merger import try_merge
-from .sidecar import is_sidecar, is_valid_folder_hint, load as load_sidecar, sidecar_for
+from .sidecar import is_sidecar, load as load_sidecar, resolve_folder_hint, sidecar_for
 from .splitter import inject_sibling_links, should_split
 from .synthesizer import synthesize
 from .vault import safe_filename, unique_note_path, yaml_quote_scalar, yaml_unquote_scalar
@@ -336,8 +336,11 @@ async def run(engine, vault_manager) -> dict:
             no_merge = _merge_forbidden(sc, raw_text)
 
             hint = sc.get("folder_hint") if sc else None
-            if is_valid_folder_hint(hint, cfg.vault_folders):
-                folder = hint.strip("/")
+            # A pasta ja vem com a caixa do vault: usar o hint cru criaria
+            # `sessions/` ao lado da `Sessions/` existente.
+            roteado = resolve_folder_hint(hint, cfg.vault_folders)
+            if roteado:
+                folder = roteado
                 logger.info("Routing %s → %s/ (sidecar)", f.name, folder)
             else:
                 folder = await classify(engine, cfg.vault_folders, f.name, raw_text, fmt)
