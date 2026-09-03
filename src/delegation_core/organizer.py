@@ -36,6 +36,8 @@ from .splitter import inject_sibling_links, should_split
 from .synthesizer import synthesize
 from .vault import safe_filename, unique_note_path, yaml_quote_scalar, yaml_unquote_scalar
 
+from .config import lang_instruction as _frase_de_idioma, with_lang as _com_idioma
+
 logger = logging.getLogger("organizer")
 
 # ── merge opt-out (ported forward from the 0.1.0 SAAD hardening) ───────────────
@@ -107,6 +109,7 @@ async def _upgrade_section_titles(
         prompt = (
             f"Content summary: {content[:200]}\n"
             "Write a 3-5 word title for this section. Title only, no punctuation:"
+            + (f"\n{_frase_de_idioma(engine.cfg)}" if _frase_de_idioma(engine.cfg) else "")
         )
         try:
             result = await engine.invoke(
@@ -531,7 +534,7 @@ async def _write_summary(engine, cfg, results: dict):
         body = await engine.invoke(
             f"Write a 3-sentence vault maintenance summary.\n"
             f"Classified: {classified}\nMerged: {merged}\nErrors: {errors}\nSkipped as junk: {junk}",
-            system="Vault Reporter",
+            system=_com_idioma("Vault Reporter", engine.cfg),
             max_tokens=engine.budget("summary", 200),
             temperature=0.3,
             task="summary",

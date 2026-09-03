@@ -710,7 +710,7 @@ def cmd_search(args):
 def cmd_compress(args):
     import asyncio
     from rich.console import Console
-    from .config import Config
+    from .config import Config, with_lang
     from .engine import DelegationEngine
 
     console = Console()
@@ -728,7 +728,7 @@ def cmd_compress(args):
             return await engine.invoke(
                 f"Extract only key facts, decisions, and action items. No preamble.\n"
                 f"Source: {args.source}\n\n{raw[:limit]}",
-                system="Compression Engine. Be extremely concise.",
+                system=with_lang("Compression Engine. Be extremely concise.", cfg),
                 max_tokens=engine.budget("compress", 1200),
                 temperature=0.2,
                 task="compress",

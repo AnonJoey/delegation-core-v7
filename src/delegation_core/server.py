@@ -104,7 +104,7 @@ from .client_tracking import current_client_name as _current_client_name
 from .client_tracking import list_connected_clients as _list_connected_clients
 from . import session as _session
 from . import windows as _windows
-from .config import Config
+from .config import Config, with_lang
 from .engine import DelegationEngine
 from .engine import queue_stats as _local_model_queue_stats
 from .ingest import IngestManager
@@ -340,7 +340,9 @@ async def search_vault(query: str, limit: int = 5, use_local: bool = False,
         try:
             summary = await engine.invoke(
                 f"Summarize these vault notes for the query: {query}\n\n{combined}",
-                system="Vault Analyst. Return compressed insight only — no preamble, no headers.",
+                system=with_lang(
+                    "Vault Analyst. Return compressed insight only — no preamble, no headers.",
+                    engine.cfg),
                 max_tokens=engine.budget("search_summary", 800),
                 temperature=0.3,
                 task="search_summary",
@@ -429,21 +431,18 @@ async def compress(source: str, raw_content: str, use_local: bool = False) -> st
         return json.dumps(payload)
 
     async def _compress(engine) -> str:
-        # synthesis_lang is honoured by organizer and exposed in config, but the
+        # synthesis_lang is exposed in config and, until 03/09/2026, was read by
         # compression prompt was hardcoded English and never read it. The local
         # model then chose per call: two consecutive calls over Portuguese
         # conversations came back one in Portuguese and one in English. Across a
         # batch that produces a bilingual vault by accident, and nothing reports
         # it — the compression "succeeded" every time.
-        _lang = {"pt": "Responda em português do Brasil.",
-                 "en": "Answer in English."}.get(
-                     (getattr(engine.cfg, "synthesis_lang", "en") or "en").lower(), "")
         try:
             result = await engine.invoke(
                 f"Extract only key facts, decisions, and action items. No preamble.\n"
                 f"{_lang}\n"
                 f"Source: {source}\n\n{raw_content[:limit]}",
-                system=f"Compression Engine. Be extremely concise. {_lang}".strip(),
+                system=with_lang("Compression Engine. Be extremely concise.", engine.cfg),
                 max_tokens=engine.budget("compress", 1200),
                 temperature=0.2,
                 task="compress",
@@ -943,7 +942,7 @@ async def search_web(query: str, num_results: int = 5, use_local: bool = False) 
         async def _summarize(engine) -> str:
             summary = await engine.invoke(
                 f"Compress these search results into key facts for: {query}\n\n{snippets}",
-                system="Research Compressor. Be extremely concise.",
+                system=with_lang("Research Compressor. Be extremely concise.", engine.cfg),
                 max_tokens=engine.budget("compress", 400),
                 temperature=0.2,
                 task="compress",

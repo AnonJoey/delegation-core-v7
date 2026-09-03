@@ -450,3 +450,47 @@ class Config:
             self.server_token = secrets.token_urlsafe(32)
             self.save()
         return self.server_token
+
+
+# ── a frase de idioma, num lugar so ─────────────────────────────────────────
+
+#: O que `synthesis_lang` diz a cada prompt que produz PROSA para uma pessoa ler.
+#:
+#: O ajuste existe desde a v0.2 e ate 03/09/2026 um unico modulo o lia,
+#: `synthesizer.py`. Todo o resto montava prompt em ingles e deixava o modelo
+#: local escolher o idioma da resposta, o que visto de fora faz o ajuste parecer
+#: simplesmente quebrado: um vault inteiro em portugues, com
+#: `synthesis_lang: "pt"` na config, recebia o resumo do `search_vault` em
+#: ingles.
+#:
+#: Mora aqui, e nao em cada ponto de chamada, porque a copia ja tinha divergido
+#: uma vez: o `compress` da ferramenta MCP ganhou a instrucao e o `cmd_compress`
+#: do CLI, que e a mesma operacao no terminal, nao. Dentro do mesmo commit.
+INSTRUCOES_DE_IDIOMA = {
+    "pt": "Responda em portugues do Brasil.",
+    "en": "Answer in English.",
+}
+
+
+def lang_instruction(cfg) -> str:
+    """A frase de idioma para esta configuracao, ou vazio se o valor e estranho.
+
+    Vazio e resposta legitima: um `synthesis_lang` que ninguem reconhece nao deve
+    virar instrucao inventada, deve virar prompt identico ao que era antes disto
+    existir.
+    """
+    valor = (getattr(cfg, "synthesis_lang", "en") or "en").lower()
+    return INSTRUCOES_DE_IDIOMA.get(valor, "")
+
+
+def with_lang(system: str, cfg) -> str:
+    """Anexa a frase de idioma a um `system`, sem sujeira quando ela e vazia.
+
+    A juncao ingenua (`f"{system} {frase}"`) deixa um espaco pendurado no fim
+    quando a frase nao existe, e esse e exatamente o tipo de detalhe que so
+    aparece na configuracao que ninguem testa.
+    """
+    frase = lang_instruction(cfg)
+    if not frase:
+        return system
+    return f"{system.rstrip()} {frase}"
