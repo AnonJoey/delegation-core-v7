@@ -436,6 +436,38 @@ def rebuild_fts(cfg) -> bool:
         return False
 
 
+def check_local_fallback(cfg) -> dict:
+    """A sentinela `no_auto_reindex` e o fallback em processo, juntos.
+
+    `allow_local_index_fallback` tem default `True` e trabalha em par com essa
+    sentinela: quem cria o arquivo esta dizendo "nao reindexe sozinho", em geral
+    porque quer que o daemon seja o unico escritor do indice. Mas o default `True`
+    faz o fallback em processo voltar sozinho pelo outro caminho: uma CLI que nao
+    encontra o daemon abre o proprio ChromaDB e carrega o proprio BGE.
+
+    Numa maquina com placa unica isso e a contencao que a v0.11 eliminou, e numa
+    com o daemon no ar e o segundo escritor e a corrupcao latente do indice. As
+    duas configuracoes sao legitimas isoladas; juntas quase sempre nao sao o que
+    a pessoa quis dizer, e nada avisava.
+    """
+    sentinela = CONFIG_DIR / "no_auto_reindex"
+    if not sentinela.exists():
+        return {"check": "local_fallback", "status": "ok",
+                "detail": "no sentry file; automatic reindex is allowed"}
+    if not getattr(cfg, "allow_local_index_fallback", True):
+        return {"check": "local_fallback", "status": "ok",
+                "detail": "sentry present and local fallback off: the daemon is "
+                          "the only writer, consistently"}
+    return {
+        "check": "local_fallback", "status": "warn",
+        "detail": (f"{sentinela.name} says do not reindex automatically, but "
+                   "allow_local_index_fallback is on, so a CLI that cannot reach "
+                   "the daemon still opens its own index and loads its own BGE"),
+        "fix": 'set "allow_local_index_fallback": false in config.json, or remove '
+               f"{sentinela}",
+    }
+
+
 def run_all(cfg) -> dict:
     """Run every check. Returns {status, counts, checks[]} with the worst status on top."""
     checks = [
@@ -448,6 +480,7 @@ def run_all(cfg) -> dict:
         check_orphan_segments(cfg),
         check_fts_integrity(cfg),
         check_index_integrity(cfg),
+        check_local_fallback(cfg),
     ]
     counts = {s: sum(1 for c in checks if c["status"] == s)
               for s in ("ok", "warn", "error", "skip")}
