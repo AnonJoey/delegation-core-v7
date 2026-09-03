@@ -31,6 +31,16 @@ from .config import Config
 
 logger = logging.getLogger("engine")
 
+
+class EmptyAnswer(RuntimeError):
+    """The model answered with no text at all.
+
+    Its own type because it is the one failure at this seam that must NOT be
+    retried: the server responded, in time, with an empty message. Same prompt,
+    same budget, same empty answer three retries later.
+    """
+
+
 # Normal-mode per-task token defaults
 _TASK_BUDGETS: dict[str, int] = {
     "classify":       15,
@@ -219,6 +229,14 @@ class DelegationEngine:
             "max_tokens": 100,
             "temperature": 0.0,
         }
+        # Calibrate in the SAME regime inference runs in, or the number it
+        # produces describes a different machine than the one that will serve
+        # the requests. With thinking on, a reasoning model spends most of its
+        # completion tokens on a channel the caller never receives, so the
+        # per-task caps _compute_budgets derives from this measurement are caps
+        # on thought rather than on answer — and every task truncates.
+        if not getattr(self.cfg, "llama_enable_thinking", False):
+            payload["chat_template_kwargs"] = {"enable_thinking": False}
         start = time.monotonic()
         r = await self._async_client.post(
             f"{self.cfg.llama_url}/v1/chat/completions",
@@ -332,6 +350,20 @@ class DelegationEngine:
             "max_tokens": effective_tokens,
             "temperature": temperature,
         }
+        # A reasoning model splits its output in two: `reasoning_content` for
+        # the private thought channel, `content` for the answer. The budget is
+        # spent on the first before a single token of the second is written, so
+        # a long prompt with a bounded budget returns HTTP 200, finish_reason
+        # "length", and an EMPTY answer. Nothing in the response says the model
+        # ran out; the caller just gets "".
+        #
+        # `chat_template_kwargs.enable_thinking` is the server-side off switch
+        # and it is honoured by llama.cpp's OpenAI endpoint. Note that
+        # `reasoning_format: "none"` is NOT the same thing and is not a
+        # substitute: measured here, it leaves thinking on and dumps the raw
+        # `<|channel>thought` text into `content` instead.
+        if not getattr(self.cfg, "llama_enable_thinking", False):
+            payload["chat_template_kwargs"] = {"enable_thinking": False}
 
         for attempt in range(1, max_retries + 1):
             try:
@@ -340,7 +372,7 @@ class DelegationEngine:
                     json=payload,
                 )
                 if r.status_code == 200:
-                    return r.json()["choices"][0]["message"]["content"]
+                    return self._answer_of(r.json())
                 if r.status_code in (503, 429):
                     logger.warning("llama.cpp busy (%s). Retry %d/%d", r.status_code, attempt, max_retries)
                     await asyncio.sleep(retry_delay)
@@ -349,6 +381,14 @@ class DelegationEngine:
             except httpx.TimeoutException:
                 logger.warning("Inference timeout. Retry %d/%d", attempt, max_retries)
                 await asyncio.sleep(retry_delay)
+            except EmptyAnswer:
+                # Not transient. The server answered, in time, with nothing —
+                # the same prompt and the same budget will answer with nothing
+                # again. Retrying it burns three retry_delays (60s at the
+                # default) and then reports "Delegation failed after 3
+                # attempts", which buries the one sentence that says what
+                # actually happened. Raise it as it is.
+                raise
             except Exception as e:
                 if attempt >= max_retries:
                     raise RuntimeError(f"Delegation failed after {max_retries} attempts: {e}")
@@ -357,6 +397,53 @@ class DelegationEngine:
         raise RuntimeError("Exhausted retries without success.")
 
     # ── private ──────────────────────────────────────────────────────────────
+
+    @staticmethod
+    def _answer_of(data: dict) -> str:
+        """The model's answer, and never a silent empty string.
+
+        Three things go wrong at this seam and all three look like success:
+
+        1. `content` is absent, because a reasoning model wrote only into
+           `reasoning_content` before the budget ran out;
+        2. `content` is JSON `null` rather than a string, which used to return
+           `None` from a function annotated `-> str` and blow up at the caller
+           instead of here;
+        3. the answer is whitespace.
+
+        Falling back to `reasoning_content` is deliberate: a truncated thought
+        is worth more to the caller than nothing at all, and it makes the
+        failure visible in the result instead of invisible in its absence. If
+        both are empty the response carried no answer, and that is an error the
+        caller must be told about rather than a task that quietly succeeded.
+        """
+        try:
+            message = data["choices"][0]["message"]
+        except (KeyError, IndexError, TypeError) as e:
+            raise RuntimeError(f"llama.cpp returned no choices: {e}") from e
+
+        content = (message.get("content") or "").strip()
+        if content:
+            return content
+
+        reasoning = (message.get("reasoning_content") or "").strip()
+        if reasoning:
+            finish = (data.get("choices") or [{}])[0].get("finish_reason", "")
+            logger.warning(
+                "Model wrote only into reasoning_content (finish_reason=%s) — "
+                "returning the thought channel. Raise max_tokens or keep "
+                "llama_enable_thinking off.", finish,
+            )
+            return reasoning
+
+        usage = data.get("usage") or {}
+        raise EmptyAnswer(
+            "llama.cpp answered with an empty message "
+            f"(finish_reason={(data.get('choices') or [{}])[0].get('finish_reason')!r}, "
+            f"completion_tokens={usage.get('completion_tokens')}). "
+            "The budget was most likely spent on the reasoning channel."
+        )
+
 
     @staticmethod
     def _extractive_fallback(prompt: str, max_tokens: int) -> str:

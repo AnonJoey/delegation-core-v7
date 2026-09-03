@@ -85,6 +85,15 @@ class Config:
     llama_port: int = 8181
     llama_ctx: int = 4096
     llama_ngl: int = 999   # GPU layers to offload (999 = all)
+    #: Let a reasoning model spend the token budget on its private thought
+    #: channel. Off, because leaving it on fails silently: the model writes
+    #: into `reasoning_content` first and only then into `content`, so a
+    #: budget that runs out mid-thought returns an EMPTY answer with HTTP 200
+    #: and no error anywhere. Measured on this machine with gemma-4-12B, the
+    #: prompt "Responda apenas: TESTE OK" cost 1045 completion tokens with
+    #: thinking on and 4 with it off, same answer. Ten queued reviews of real
+    #: source files came back empty before this existed.
+    llama_enable_thinking: bool = False
 
     # ── embeddings ───────────────────────────────────────────────────────────
     bge_model: str = "BAAI/bge-base-en-v1.5"

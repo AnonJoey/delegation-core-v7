@@ -197,11 +197,27 @@ def claim_next(now: str = "") -> dict | None:
 
 
 def finish(task_id: str, result: str = "", error: str = "") -> dict | None:
+    """Move a task to a terminal state.
+
+    A task that produced nothing is an ERROR, not a completed task. This is not
+    a nicety: ten queued code reviews once came back `status: "done"`,
+    `result: null`, `error: null`, and the only way to notice was to count the
+    characters in every result by hand. `done` has to mean the submitter can
+    read the answer off the record, or polling for `done` tells them nothing.
+
+    The empty case is real and has a known cause — see
+    `Config.llama_enable_thinking` — so the message names it rather than
+    reporting a bare "empty result".
+    """
     with _lock:
         tasks = _read()
         for t in tasks:
             if t["id"] != task_id:
                 continue
+            if not error and not (result or "").strip():
+                error = ("the model returned an empty answer — most likely the "
+                         "token budget went to the reasoning channel "
+                         "(see llama_enable_thinking)")
             t["status"] = "error" if error else "done"
             t["result"] = result or None
             t["error"] = error or None
