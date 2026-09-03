@@ -239,7 +239,9 @@ def _redigir(texto):
     return texto, total
 
 
-def _format_markdown(messages: list[dict], session_id: str, cwd: str) -> str:
+def _format_markdown(
+    messages: list[dict], session_id: str, cwd: str, segredos_removidos: int = 0,
+) -> str:
     date_str = _session_date(messages)
     time_str = datetime.now().strftime("%H:%M")
     short_id = session_id[:8]
@@ -258,6 +260,10 @@ def _format_markdown(messages: list[dict], session_id: str, cwd: str) -> str:
         f"cwd: {cwd}",
         f"messages: {len(messages)}",
         "type: session-transcript",
+    ]
+    if segredos_removidos:
+        lines.append(f"segredos_removidos: {segredos_removidos}")
+    lines.extend([
         "---",
         "",
         f"# Session transcript — {short_id}",
@@ -269,7 +275,7 @@ def _format_markdown(messages: list[dict], session_id: str, cwd: str) -> str:
         "",
         "---",
         "",
-    ]
+    ])
 
     for msg in messages:
         role_label = "### You" if msg["role"] == "user" else "### Claude"
@@ -349,17 +355,18 @@ def main():
         m_copy["text"] = txt
         redacted_messages.append(m_copy)
 
-    content = _format_markdown(redacted_messages, session_id, cwd)
+    content = _format_markdown(
+        redacted_messages, session_id, cwd, segredos_removidos=total_removidos,
+    )
     try:
         tmp = dest.with_suffix(".tmp")
         # Redact BEFORE the first write: the .tmp file is on the same disk and
         # would hold the secret in cleartext for the moment it existed.
         content, extra = _redigir(content)
-        removidos = total_removidos + extra
-        if removidos:
+        if extra and "segredos_removidos:" not in content:
             content = content.replace(
                 "type: session-transcript",
-                f"type: session-transcript\nsegredos_removidos: {removidos}", 1)
+                f"type: session-transcript\nsegredos_removidos: {total_removidos + extra}", 1)
         tmp.write_text(content, encoding="utf-8")
         os.replace(tmp, dest)
         sys.stderr.write(
