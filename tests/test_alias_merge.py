@@ -91,12 +91,20 @@ def test_lista_inline_vazia():
 
 
 def test_nao_duplica_alias_que_o_autor_ja_escreveu():
+    """Contado sobre o CONJUNTO de aliases, nao por substring.
+
+    Contar ocorrencias do titulo no texto e fragil: `title:` carrega uma, e o
+    alias com prefixo de data carrega o titulo dentro dele. A propriedade que
+    importa e que o titulo nu apareca uma unica vez como alias.
+    """
+    from delegation_core.linker import frontmatter_aliases
+
     conteudo = f'---\naliases:\n  - "{TITULO_LONGO}"\n---\n\n## Corpo\n'
-    fm = _frontmatter(compose_note(TITULO_LONGO, conteudo, "2026-09-02"))
-    assert fm.count(TITULO_LONGO) == 2, (
-        "esperado uma vez em aliases e uma em title; "
-        f"veio {fm.count(TITULO_LONGO)}"
-    )
+    nota = compose_note(TITULO_LONGO, conteudo, "2026-09-02")
+
+    todos = [a.lower() for a in frontmatter_aliases(nota)]
+    assert todos.count(TITULO_LONGO.lower()) == 1, f"alias duplicado: {todos}"
+    assert f"2026-09-02-{TITULO_LONGO}".lower() in todos
 
 
 def test_titulo_do_autor_continua_vencendo():
@@ -151,3 +159,57 @@ def test_o_alias_gerado_torna_a_nota_resolvivel_pelo_titulo():
         "o link escrito com o titulo completo continua sem resolver"
     )
     assert "card dos agentes pmo em 02/09" in resolviveis
+
+
+DATA = "2026-09-02"
+
+
+def _aliases(nota: str) -> set[str]:
+    from delegation_core.linker import frontmatter_aliases
+    return {a.lower() for a in frontmatter_aliases(nota)}
+
+
+def test_gera_a_forma_com_data_que_os_links_reais_usam():
+    """A comparacao de link e literal e NAO tira a data do alvo.
+
+    get_health_summary faz `key = link.lower()` e procura em `resolvable`.
+    link_names_for_stem tira a data do STEM, nunca do alvo. Entao um alias so
+    com o titulo nu nao resolve `[[2026-09-02-Titulo completo]]`.
+
+    Medido neste vault: dos seis alvos quebrados que apontam para notas reais,
+    os SEIS usam a forma com data. A primeira versao desta correcao gerava so o
+    titulo nu e nao teria consertado nenhum deles.
+    """
+    nota = compose_note(TITULO_LONGO, "## Corpo\n", DATA)
+    assert f"{DATA}-{TITULO_LONGO}".lower() in _aliases(nota)
+    assert TITULO_LONGO.lower() in _aliases(nota)
+
+
+def test_as_duas_formas_sobrevivem_a_aliases_do_autor():
+    conteudo = '---\naliases:\n  - "Card dos Agentes PMO em 02/09"\n---\n\n## Corpo\n'
+    nota = compose_note(TITULO_LONGO, conteudo, DATA)
+    als = _aliases(nota)
+
+    assert f"{DATA}-{TITULO_LONGO}".lower() in als
+    assert TITULO_LONGO.lower() in als
+    assert "card dos agentes pmo em 02/09" in als
+
+
+def test_um_link_com_data_resolve_de_ponta_a_ponta(tmp_path):
+    """O caminho real: escreve a nota, e o alvo que estava quebrado resolve.
+
+    Usa a mesma funcao de resolucao que get_health_summary usa, em vez de
+    reimplementar a regra aqui.
+    """
+    from delegation_core.linker import frontmatter_aliases
+    from delegation_core.vault import link_names_for_stem, safe_filename
+
+    nota = compose_note(TITULO_LONGO, "## Corpo\n", DATA)
+    stem = f"{DATA}-{safe_filename(TITULO_LONGO)}"
+
+    resolvable = link_names_for_stem(stem) | {a.lower() for a in frontmatter_aliases(nota)}
+
+    alvo_real = f"{DATA}-{TITULO_LONGO}"
+    assert alvo_real.lower() in resolvable, (
+        f"o link [[{alvo_real}]] continua quebrado; o arquivo e {stem}.md"
+    )

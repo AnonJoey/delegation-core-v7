@@ -322,7 +322,19 @@ def compose_note(title: str, content: str, date_str: str) -> str:
     # never held. Added only when truncation actually happened, so the ordinary
     # note does not carry an alias identical to its own name.
     if len(safe_filename(title)) < len(safe_filename(title, max_len=10**6)):
-        generated.append(("aliases", "\n  - " + yaml_quote_scalar(title)))
+        # Duas formas, porque links reais aparecem nas duas e a comparacao e
+        # literal: get_health_summary faz `key = link.lower()` e procura em
+        # `resolvable`, sem tirar prefixo de data do ALVO. link_names_for_stem
+        # tira a data do STEM, o que cobre o link sem data para uma nota nao
+        # truncada, e nao ajuda em nada aqui.
+        #
+        # Medido neste vault: dos seis alvos quebrados que apontam para notas
+        # reais, SEIS usam a forma com data ("2026-08-07-Dailies Sotéria ...").
+        # Um alias so com o titulo nu nao resolveria nenhum deles, que era o
+        # defeito da primeira versao desta correcao.
+        aliases = [f"{date_str}-{title}", title]
+        generated.append(("aliases",
+                          "".join("\n  - " + yaml_quote_scalar(a) for a in aliases)))
 
     # A block-list value carries its own newline, so it must not get the space a
     # scalar needs after the colon — "aliases: \n" leaves trailing whitespace on
@@ -361,7 +373,10 @@ def compose_note(title: str, content: str, date_str: str) -> str:
     if "aliases" in have:
         for chave, valor in generated:
             if chave == "aliases":
-                merged = _merge_alias(merged, valor.strip().lstrip("- ").strip())
+                for item in valor.strip().split("\n"):
+                    item = item.strip().lstrip("- ").strip()
+                    if item:
+                        merged = _merge_alias(merged, item)
                 break
 
     return f"---\n{merged}\n---\n\n{body[m.end():].lstrip(chr(10))}"
