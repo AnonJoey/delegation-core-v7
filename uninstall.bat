@@ -1,158 +1,88 @@
 @echo off
-setlocal EnableDelayedExpansion
-:: delegation-core uninstaller — Windows
-:: Double-click to run.
-::
-:: Removes the venv, config, logs, sessions, process tracker, graphs, hooks/
-:: docs, the Scheduled Task autostart entry, and the installed dashboard app.
-::
-:: NEVER touches: your Obsidian vault, or downloaded model weights under
-:: %USERPROFILE%\.delegation_core\models\. Those are yours regardless of
-:: whether delegation-core itself stays installed.
+setlocal
+rem delegation-core uninstaller: Windows
+rem Usage: double-click, or uninstall.bat [--yes] [--dry-run]
+rem
+rem A stub on purpose, with exactly two jobs Python cannot do for itself:
+rem   1. find the interpreter, and
+rem   2. delete the venv AFTER that interpreter has exited, which on Windows is
+rem      the only moment it can be deleted at all.
+rem
+rem Everything else lives in delegation_core/installer.py and is shared with
+rem Linux and macOS. The previous version of this file was 158 lines of batch
+rem that had already drifted from its bash twin: every removal here ended in
+rem ">nul 2>&1" with no errorlevel check, so a half-removed install printed OK.
+rem It also never stopped the daemon first, which on Windows is precisely why
+rem those removals failed: a running process holds its own files open.
+rem
+rem Plain ASCII throughout, and "rem" rather than "::" for comments. An em dash
+rem or a box-drawing character in a "::" line breaks the cmd.exe parser for the
+rem whole file, which is a defect this project has already catalogued.
+rem
+rem NEVER touched: your vault, or the model weights under
+rem %USERPROFILE%\.delegation_core\models\.
 
 set "CFG_DIR=%USERPROFILE%\.delegation_core"
-set "SCRIPT_DIR=%~dp0"
-if "%SCRIPT_DIR:~-1%"=="\" set "SCRIPT_DIR=%SCRIPT_DIR:~0,-1%"
+set "VENV=%CFG_DIR%\venv"
+set "EXE=%VENV%\Scripts\delegation-core.exe"
+set "SENTINEL=%CFG_DIR%\.venv-pending-removal"
 
 echo.
-echo  +-------------------------------+
-echo  ^|  delegation-core uninstaller ^|
-echo  +-------------------------------+
+echo  +---------------------------------+
+echo  ^|  delegation-core  uninstaller   ^|
+echo  +---------------------------------+
 echo.
 
 if not exist "%CFG_DIR%" (
-    echo  Nothing to uninstall - %CFG_DIR% does not exist.
+    echo Nothing to uninstall: %CFG_DIR% does not exist.
     pause
     exit /b 0
 )
 
-:: ── Read the vault path before anything is touched, purely to tell the user
-:: where it still lives afterward. Never write to it. ────────────────────────
-set "VAULT_PATH="
-if exist "%CFG_DIR%\config.json" (
-    for /f "delims=" %%V in ('python -c "import json;print(json.load(open(r'%CFG_DIR%\config.json')).get('vault_path',''))" 2^>nul') do set "VAULT_PATH=%%V"
-)
-
-:: ── Hard safety check: if the vault itself resolves to %CFG_DIR% or somewhere
-:: inside it (e.g. a user who typed "%%USERPROFILE%%\.delegation_core" or a
-:: subfolder of it as their vault path during setup), the targeted removals
-:: below are not safe — several of them (sessions\, config.json, etc.) are
-:: named exactly like things a real vault could contain. Refuse rather than
-:: risk it. ────────────────────────────────────────────────────────────────
-if defined VAULT_PATH (
-    set "VAULT_UNDER_CFG="
-    for /f "delims=" %%X in ('python -c "import os; v=os.path.realpath(os.path.expanduser(r'%VAULT_PATH%')); c=os.path.realpath(os.path.expanduser(r'%CFG_DIR%')); print('1' if (v==c or v.startswith(c+os.sep)) else '')" 2^>nul') do set "VAULT_UNDER_CFG=%%X"
-    if defined VAULT_UNDER_CFG (
-        echo ERROR: your configured vault path is %VAULT_PATH%,
-        echo which is the same as ^(or lives inside^) %CFG_DIR%.
-        echo.
-        echo This uninstaller removes several specifically-named items inside
-        echo %CFG_DIR% ^(sessions\, config.json, graphs\, ...^) - if the vault
-        echo lives there too, that removal could delete real vault content.
-        echo.
-        echo Move your vault outside of %CFG_DIR% ^(and update vault_path in
-        echo config.json^) before uninstalling, or remove things manually.
-        pause
-        exit /b 1
-    )
-)
-
-:: ── Detect an installed dashboard app (Start Menu shortcut is the reliable
-:: signal on Windows; MSI/NSIS installers don't leave a simple registry name
-:: this script can query without extra tooling). ─────────────────────────────
-set "DASH_FOUND="
-if exist "%ProgramFiles%\delegation-core Dashboard" set "DASH_FOUND=1"
-if exist "%LocalAppData%\Programs\delegation-core Dashboard" set "DASH_FOUND=1"
-
-:: ── Skills that may have been installed by install.bat — list only, never
-:: removed automatically (general Claude Code layer, not delegation-core-
-:: specific). Best-effort: only checked if run from the original checkout. ──
-set "FOUND_SKILLS="
-if exist "%SCRIPT_DIR%\skills" if exist "%USERPROFILE%\.claude\skills" (
-    for /d %%S in ("%SCRIPT_DIR%\skills\*") do (
-        if exist "%USERPROFILE%\.claude\skills\%%~nxS" set "FOUND_SKILLS=!FOUND_SKILLS! %%~nxS"
-    )
-)
-
-echo This will remove:
-echo   - Python venv             %CFG_DIR%\venv
-echo   - Config                  %CFG_DIR%\config.json
-echo   - Logs                    %CFG_DIR%\*.log
-echo   - Client session files    %CFG_DIR%\sessions\
-echo   - Process tracker         %CFG_DIR%\processes.json
-echo   - Code graphs             %CFG_DIR%\graphs\, graphs_registry.json
-echo   - llama.cpp binary dir    %CFG_DIR%\llama\  (not the model weights - see below)
-echo   - Hooks + agent docs      %CFG_DIR%\hooks\, AGENT_GUIDE*.md, CLAUDE_SYSTEM_PROMPT*.md
-echo   - Misc state              last_brief.json, vault_health.json, backups_pre_upgrade_*
-echo   - Autostart entry         Scheduled Task 'delegation-core-llama'
-if defined DASH_FOUND (
-    echo   - Installed dashboard app  (uninstall via Windows "Apps ^& features")
-)
-echo.
-echo This will NEVER touch:
-if defined VAULT_PATH (
-    echo   - Your vault              !VAULT_PATH!
-) else (
-    echo   - Your vault              ^(unknown - config.json missing or unreadable^)
-)
-echo   - Downloaded model weights %CFG_DIR%\models\
-echo.
-if defined FOUND_SKILLS (
-    echo NOTE: these bundled skills are present in %USERPROFILE%\.claude\skills and
-    echo will NOT be removed ^(general Claude Code layer, not delegation-core-specific^):
-    for %%N in (!FOUND_SKILLS!) do echo     - %%N
-    echo   Remove manually if you want: rmdir /S /Q "%USERPROFILE%\.claude\skills\NAME"
+if not exist "%EXE%" (
+    echo ERROR: %EXE% is missing.
     echo.
-)
-
-set /p CONFIRM="Type 'yes' to proceed: "
-if /i not "%CONFIRM%"=="yes" (
-    echo Aborted. Nothing was removed.
+    echo Without it the uninstall cannot stop the daemon or unregister its
+    echo services, and deleting files while those are live is what this script
+    echo exists to avoid. If the install is already broken, remove it by hand:
+    echo.
+    echo   schtasks /delete /tn "delegation-core" /f
+    echo   schtasks /delete /tn "delegation-core-llama" /f
+    echo   rmdir /S /Q "%VENV%"
+    echo.
+    echo Your vault and %CFG_DIR%\models\ are not part of that.
     pause
-    exit /b 0
+    exit /b 1
 )
-echo.
 
-:: ── Stop and remove the autostart entry ──────────────────────────────────────
-echo Removing autostart entry...
-schtasks /end /tn "delegation-core-llama" >nul 2>&1
-schtasks /delete /tn "delegation-core-llama" /f >nul 2>&1
-echo   OK
+rem The sentinel is the handshake. Python writes it only when it has actually
+rem finished removing state and the venv is the one thing still standing.
+rem Clearing it first means a stale one cannot authorise a deletion this run
+rem did not ask for.
+if exist "%SENTINEL%" del /Q "%SENTINEL%"
 
-:: ── Point at the installed dashboard app, but let Windows own the actual
-:: removal — MSI/NSIS installers register a real uninstaller; running that
-:: is more correct than trying to reverse-engineer it here. ──────────────────
-if defined DASH_FOUND (
+"%EXE%" uninstall %*
+set "CODE=%ERRORLEVEL%"
+
+rem Deliberately NOT keyed on ERRORLEVEL 0: exit 0 also covers "the user typed
+rem something other than yes at the prompt" and "--dry-run". Deleting the venv
+rem in either case would destroy the install of someone who just declined to
+rem uninstall it.
+if exist "%SENTINEL%" (
     echo.
-    echo NOTE: an installed dashboard app was detected. Remove it via:
-    echo   Settings ^> Apps ^> Apps ^& features ^> "delegation-core Dashboard" ^> Uninstall
+    echo Removing the virtual environment...
+    rmdir /S /Q "%VENV%"
+    if exist "%VENV%" (
+        echo   WARNING: %VENV% could not be fully removed.
+        echo   Something still holds a file open in it. Close Claude Desktop
+        echo   and any terminal using it, then delete the folder by hand.
+        set "CODE=1"
+    ) else (
+        del /Q "%SENTINEL%" 2>nul
+        echo   done: %VENV%
+    )
 )
 
-:: ── Remove everything else. NEVER touch config.json's vault_path, and NEVER
-:: touch %CFG_DIR%\models\. ──────────────────────────────────────────────────
 echo.
-echo Removing venv, config, logs, and remaining state...
-rmdir /S /Q "%CFG_DIR%\venv" >nul 2>&1
-del /Q "%CFG_DIR%\config.json" >nul 2>&1
-del /Q "%CFG_DIR%\*.log" >nul 2>&1
-rmdir /S /Q "%CFG_DIR%\sessions" >nul 2>&1
-del /Q "%CFG_DIR%\processes.json" >nul 2>&1
-rmdir /S /Q "%CFG_DIR%\graphs" >nul 2>&1
-del /Q "%CFG_DIR%\graphs_registry.json" >nul 2>&1
-rmdir /S /Q "%CFG_DIR%\llama" >nul 2>&1
-rmdir /S /Q "%CFG_DIR%\hooks" >nul 2>&1
-del /Q "%CFG_DIR%\AGENT_GUIDE.md" "%CFG_DIR%\AGENT_GUIDE.dist.md" >nul 2>&1
-del /Q "%CFG_DIR%\CLAUDE_SYSTEM_PROMPT.md" "%CFG_DIR%\CLAUDE_SYSTEM_PROMPT.dist.md" >nul 2>&1
-del /Q "%CFG_DIR%\last_brief.json" "%CFG_DIR%\vault_health.json" >nul 2>&1
-for /d %%D in ("%CFG_DIR%\backups_pre_upgrade_*") do rmdir /S /Q "%%D" >nul 2>&1
-echo   OK
-echo.
-
-echo Uninstall complete.
-if defined VAULT_PATH (
-    echo Your vault was left untouched at: !VAULT_PATH!
-) else (
-    echo Your vault ^(path unknown - config.json was missing^) was not touched.
-)
-echo Downloaded model weights were left untouched at: %CFG_DIR%\models\
 pause
+exit /b %CODE%

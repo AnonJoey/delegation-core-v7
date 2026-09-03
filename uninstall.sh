@@ -1,192 +1,79 @@
 #!/usr/bin/env bash
-# delegation-core uninstaller — Linux / macOS
-# Usage: ./uninstall.sh
+# delegation-core uninstaller: Linux / macOS
+# Usage: ./uninstall.sh [--yes] [--dry-run]
 #
-# Removes the venv, config, logs, sessions, process tracker, graphs, the
-# llama.cpp binary dir, hooks/docs, the autostart entry, and the installed
-# dashboard app.
+# This script is a stub on purpose. It has exactly two jobs that Python cannot
+# do for itself:
 #
-# NEVER touches: your Obsidian vault, or downloaded model weights under
-# ~/.delegation_core/models/. Those are yours regardless of whether
-# delegation-core itself stays installed.
+#   1. find the interpreter, and
+#   2. delete the venv AFTER that interpreter has exited.
+#
+# Everything else (reading the vault path, refusing unsafe configurations,
+# stopping the daemon, removing BOTH service registrations, and checking each
+# removal) lives in delegation_core/installer.py, so Linux, macOS and Windows
+# run the same code instead of three transcriptions of it that drift.
+#
+# The previous version of this file was 193 lines of bash with a batch twin, and
+# the two had already diverged: this one checked the result of its removals and
+# the batch one discarded every error with `>nul 2>&1`. Both removed the
+# llama.cpp autostart entry and left the MCP daemon's own systemd unit enabled,
+# pointing at the venv they had just deleted.
+#
+# NEVER touched, by this or by the Python it calls: your vault, or the model
+# weights under ~/.delegation_core/models/.
 set -e
 
 CFG_DIR="$HOME/.delegation_core"
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-OS="$(uname -s)"
-DASH_PKG="delegation-core-dashboard"
+VENV="$CFG_DIR/venv"
+SENTINEL="$CFG_DIR/.venv-pending-removal"
 
-_banner() {
-    echo ""
-    echo "┌─────────────────────────────────┐"
-    echo "│  delegation-core  uninstaller   │"
-    echo "└─────────────────────────────────┘"
-    echo ""
-}
-
-_banner
+echo ""
+echo "+---------------------------------+"
+echo "|  delegation-core  uninstaller   |"
+echo "+---------------------------------+"
+echo ""
 
 if [ ! -d "$CFG_DIR" ]; then
-    echo "Nothing to uninstall — $CFG_DIR does not exist."
+    echo "Nothing to uninstall: $CFG_DIR does not exist."
     exit 0
 fi
 
-# ── Read the vault path before anything is touched, purely to tell the user
-# where it still lives afterward. Never write to it. ────────────────────────
-VAULT_PATH=""
-if [ -f "$CFG_DIR/config.json" ]; then
-    VAULT_PATH=$(python3 -c "
-import json
-try:
-    print(json.load(open('$CFG_DIR/config.json')).get('vault_path', ''))
-except Exception:
-    pass
-" 2>/dev/null || true)
-fi
-
-# ── Hard safety check: if the vault itself resolves to $CFG_DIR or somewhere
-# inside it (e.g. a user who typed "~/.delegation_core" or a subfolder of it
-# as their vault path during setup), none of the targeted removals below are
-# safe — several of them (sessions/, config.json, etc.) are named exactly like
-# things a real vault could contain. Refuse to run rather than risk it. ──────
-if [ -n "$VAULT_PATH" ]; then
-    VAULT_UNDER_CFG=$(python3 -c "
-import os
-v = os.path.realpath(os.path.expanduser('$VAULT_PATH'))
-c = os.path.realpath(os.path.expanduser('$CFG_DIR'))
-print('1' if (v == c or v.startswith(c + os.sep)) else '')
-" 2>/dev/null || true)
-    if [ -n "$VAULT_UNDER_CFG" ]; then
-        echo "ERROR: your configured vault path is $VAULT_PATH,"
-        echo "which is the same as (or lives inside) $CFG_DIR."
-        echo ""
-        echo "This uninstaller removes several specifically-named items inside"
-        echo "$CFG_DIR (sessions/, config.json, graphs/, ...) — if the vault lives"
-        echo "there too, that removal could delete real vault content."
-        echo ""
-        echo "Move your vault outside of $CFG_DIR (and update vault_path in"
-        echo "config.json) before uninstalling, or remove things manually."
-        exit 1
-    fi
-fi
-
-# ── Detect an installed dashboard app ────────────────────────────────────────
-DASH_INSTALLED=""
-if command -v dpkg &>/dev/null && dpkg -s "$DASH_PKG" &>/dev/null 2>&1; then
-    DASH_INSTALLED="deb"
-elif command -v rpm &>/dev/null && rpm -q "$DASH_PKG" &>/dev/null 2>&1; then
-    DASH_INSTALLED="rpm"
-elif [ -f "$CFG_DIR/app/delegation-core-dashboard.AppImage" ]; then
-    DASH_INSTALLED="appimage"
-elif [ "$OS" = "Darwin" ] && [ -d "/Applications/delegation-core Dashboard.app" ]; then
-    DASH_INSTALLED="macapp"
-fi
-
-# ── Skills that may have been installed by install.sh — list only, never
-# removed automatically (they're a general Claude Code layer, not
-# delegation-core-specific). Best-effort: only checked if this script is
-# still run from within the original project checkout. ─────────────────────
-FOUND_SKILLS=""
-if [ -d "$SCRIPT_DIR/skills" ] && [ -d "$HOME/.claude/skills" ]; then
-    for d in "$SCRIPT_DIR/skills"/*/; do
-        [ -d "$d" ] || continue
-        sname=$(basename "$d")
-        [ -e "$HOME/.claude/skills/$sname" ] && FOUND_SKILLS="$FOUND_SKILLS $sname"
-    done
-fi
-
-echo "This will remove:"
-echo "  • Python venv             $CFG_DIR/venv"
-echo "  • Config                  $CFG_DIR/config.json"
-echo "  • Logs                    $CFG_DIR/*.log"
-echo "  • Client session files    $CFG_DIR/sessions/"
-echo "  • Process tracker         $CFG_DIR/processes.json"
-echo "  • Code graphs             $CFG_DIR/graphs/, graphs_registry.json"
-echo "  • llama.cpp binary dir    $CFG_DIR/llama/  (not the model weights — see below)"
-echo "  • Hooks + agent docs      $CFG_DIR/hooks/, AGENT_GUIDE*.md, CLAUDE_SYSTEM_PROMPT*.md"
-echo "  • Misc state              last_brief.json, vault_health.json, backups_pre_upgrade_*"
-case "$OS" in
-    Linux)  echo "  • Autostart entry         systemd --user service 'delegation-core-llama'" ;;
-    Darwin) echo "  • Autostart entry         LaunchAgent com.delegation-core.llama" ;;
-esac
-if [ -n "$DASH_INSTALLED" ]; then
-    echo "  • Installed dashboard app ($DASH_INSTALLED)"
-fi
-echo ""
-echo "This will NEVER touch:"
-echo "  • Your vault              ${VAULT_PATH:-<unknown — config.json missing or unreadable>}"
-echo "  • Downloaded model weights $CFG_DIR/models/"
-echo ""
-if [ -n "$FOUND_SKILLS" ]; then
-    echo "Note: these bundled skills are present in ~/.claude/skills and will NOT be"
-    echo "removed (they're a general Claude Code layer, not delegation-core-specific):"
-    for s in $FOUND_SKILLS; do echo "    - $s"; done
-    echo "  Remove manually if you want: rm -rf ~/.claude/skills/<name>"
+if [ ! -x "$VENV/bin/delegation-core" ]; then
+    echo "ERROR: $VENV/bin/delegation-core is missing."
     echo ""
+    echo "Without it the uninstall cannot stop the daemon or unregister its"
+    echo "services, and deleting files while those are live is what this script"
+    echo "exists to avoid. If the install is already broken, remove it by hand:"
+    echo ""
+    echo "  systemctl --user disable --now delegation-core delegation-core-llama   # Linux"
+    echo "  launchctl unload -w ~/Library/LaunchAgents/com.delegation-core*.plist  # macOS"
+    echo "  rm -rf $CFG_DIR/venv $CFG_DIR/hooks $CFG_DIR/sessions"
+    echo ""
+    echo "Your vault and $CFG_DIR/models/ are not part of that."
+    exit 1
 fi
 
-read -r -p "Type 'yes' to proceed: " CONFIRM
-if [ "$CONFIRM" != "yes" ]; then
-    echo "Aborted. Nothing was removed."
-    exit 0
-fi
-echo ""
+# The sentinel is the handshake. Python writes it only when it has actually
+# finished removing state and the venv is the one thing still standing. Clearing
+# it first means a stale one from an earlier run cannot authorise a deletion
+# this run did not ask for.
+rm -f "$SENTINEL"
 
-# ── Stop and remove the autostart entry ──────────────────────────────────────
-echo "Removing autostart entry..."
-if [ "$OS" = "Linux" ]; then
-    systemctl --user disable --now delegation-core-llama &>/dev/null || true
-    rm -f "$HOME/.config/systemd/user/delegation-core-llama.service"
-    systemctl --user daemon-reload &>/dev/null || true
-elif [ "$OS" = "Darwin" ]; then
-    launchctl unload "$HOME/Library/LaunchAgents/com.delegation-core.llama.plist" &>/dev/null || true
-    rm -f "$HOME/Library/LaunchAgents/com.delegation-core.llama.plist"
-fi
-echo "  ✓ Done."
+set +e
+"$VENV/bin/delegation-core" uninstall "$@"
+CODE=$?
+set -e
 
-# ── Remove the installed dashboard app ───────────────────────────────────────
-if [ -n "$DASH_INSTALLED" ]; then
-    echo "Removing dashboard app ($DASH_INSTALLED)..."
-    # `|| true` on the package-manager calls: this script runs under `set -e`,
-    # and a dpkg/rpm removal failure (e.g. dependency conflict, lock held by
-    # another process) must not abort the rest of the uninstall — the venv,
-    # config, and state cleanup below still needs to run.
-    case "$DASH_INSTALLED" in
-        deb) sudo dpkg -r "$DASH_PKG" || echo "  ⚠  Failed to remove $DASH_PKG via dpkg — remove manually if needed." ;;
-        rpm) sudo rpm -e "$DASH_PKG" || echo "  ⚠  Failed to remove $DASH_PKG via rpm — remove manually if needed." ;;
-        appimage)
-            rm -f "$CFG_DIR/app/delegation-core-dashboard.AppImage"
-            rm -f "$HOME/.local/share/applications/delegation-core-dashboard.desktop"
-            ;;
-        macapp) rm -rf "/Applications/delegation-core Dashboard.app" ;;
-    esac
-    echo "  ✓ Done."
+# Deliberately NOT `if [ $CODE -eq 0 ]`. Exit 0 also covers "the user typed
+# something other than yes at the prompt" and "--dry-run", and deleting the venv
+# in either case would destroy the install of someone who had just declined to
+# uninstall it.
+if [ -f "$SENTINEL" ]; then
+    echo ""
+    echo "Removing the virtual environment..."
+    rm -rf "$VENV"
+    rm -f "$SENTINEL"
+    echo "  done: $VENV"
 fi
 
-# ── Remove everything else. NEVER touch config.json's vault_path, and NEVER
-# touch $CFG_DIR/models/. ────────────────────────────────────────────────────
-echo "Removing venv, config, logs, and remaining state..."
-rm -rf "$CFG_DIR/venv"
-rm -f "$CFG_DIR/config.json"
-rm -f "$CFG_DIR"/*.log
-rm -rf "$CFG_DIR/sessions"
-rm -f "$CFG_DIR/processes.json"
-rm -rf "$CFG_DIR/graphs"
-rm -f "$CFG_DIR/graphs_registry.json"
-rm -rf "$CFG_DIR/llama"
-rm -rf "$CFG_DIR/hooks"
-rm -f "$CFG_DIR"/AGENT_GUIDE.md "$CFG_DIR"/AGENT_GUIDE.dist.md
-rm -f "$CFG_DIR"/CLAUDE_SYSTEM_PROMPT.md "$CFG_DIR"/CLAUDE_SYSTEM_PROMPT.dist.md
-rm -f "$CFG_DIR/last_brief.json" "$CFG_DIR/vault_health.json"
-rm -rf "$CFG_DIR"/backups_pre_upgrade_*
-rm -rf "$CFG_DIR/app"
-echo "  ✓ Done."
-echo ""
-
-echo "Uninstall complete."
-if [ -n "$VAULT_PATH" ]; then
-    echo "Your vault was left untouched at: $VAULT_PATH"
-else
-    echo "Your vault (path unknown — config.json was missing) was not touched."
-fi
-echo "Downloaded model weights were left untouched at: $CFG_DIR/models/"
+exit $CODE

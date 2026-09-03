@@ -377,6 +377,26 @@ REMOVE_GLOBS = ("*.log", "backups_pre_upgrade_*")
 #: it is not listed here only because it does not live under CONFIG_DIR.
 KEEP_ALWAYS = ("models", "venv")
 
+#: Written when `uninstall()` finishes and leaves the venv standing, read by the
+#: shell wrapper that then removes it. A file rather than an exit code or a
+#: printed line: exit 0 also means "the user typed something other than yes at
+#: the prompt", and a wrapper that deleted the venv on exit 0 would destroy the
+#: install of someone who had just declined to uninstall it.
+VENV_PENDING_NAME = ".venv-pending-removal"
+
+
+def venv_pending_path() -> Path:
+    """Where the sentinel lives, resolved when asked and not at import.
+
+    A module-level `CONFIG_DIR / name` would freeze the directory at import
+    time. That is the exact shape of the bug this project already paid for once
+    with `config.CONFIG_FILE`: every `from .config import CONFIG_DIR` holds its
+    own copy, so redirecting the source module leaves the copies pointing at the
+    user's real home. Here that would mean a test writing a sentinel into a live
+    installation.
+    """
+    return CONFIG_DIR / VENV_PENDING_NAME
+
 
 def configured_vault_path() -> str:
     """The vault path recorded in config.json, or "" if unreadable.
@@ -569,4 +589,12 @@ def uninstall(dry_run: bool = False) -> dict:
                 "The wrapper that launched this removes it on the way out."
             ),
         }
+        # A sentinel, not a printed line, because the consumer is a shell script
+        # that must not have to parse this program's output to know whether the
+        # last step is owed. Its absence is what stops the wrapper from deleting
+        # a venv after an uninstall that was aborted at the prompt or refused.
+        try:
+            venv_pending_path().write_text(str(venv) + "\n", encoding="utf-8")
+        except OSError as e:
+            relatorio["venv_pending"]["sentinel_error"] = str(e)
     return relatorio

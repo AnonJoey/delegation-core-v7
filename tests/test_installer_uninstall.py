@@ -325,3 +325,47 @@ def test_o_plano_do_dry_run_lista_so_o_que_existe(instalacao, servico):
     plano = installer.uninstall(dry_run=True)["plan"]
     assert not any(p.endswith("processes.json") for p in plano["files"])
     assert any(p.endswith("config.json") for p in plano["files"])
+
+
+# ── o sentinel, que e o contrato com o stub de shell ────────────────────────
+
+def test_escreve_o_sentinel_quando_deixa_o_venv_de_pe(instalacao, servico):
+    installer.uninstall()
+    sentinel = installer.venv_pending_path()
+    assert sentinel.exists()
+    assert sentinel.read_text().strip() == str(instalacao / "venv")
+
+
+def test_o_dry_run_NAO_escreve_o_sentinel(instalacao, servico):
+    """O stub apaga o venv quando ve o sentinel. Um dry-run que o escrevesse
+    faria o `--dry-run` apagar o venv, que e o oposto do que ele promete."""
+    installer.uninstall(dry_run=True)
+    assert not installer.venv_pending_path().exists()
+
+
+def test_uma_recusa_NAO_escreve_o_sentinel(instalacao, servico):
+    servico["no_ar"] = [True]
+    installer.uninstall()
+    assert not installer.venv_pending_path().exists()
+
+
+def test_o_sentinel_nao_aparece_se_nao_ha_venv(instalacao, servico):
+    import shutil as _shutil
+    _shutil.rmtree(instalacao / "venv")
+    installer.uninstall()
+    assert not installer.venv_pending_path().exists()
+
+
+def test_o_caminho_do_sentinel_segue_o_CONFIG_DIR_do_momento(instalacao):
+    """Se fosse `CONFIG_DIR / nome` no topo do modulo, congelaria no import e um
+    teste escreveria dentro da instalacao de verdade. Ja aconteceu com
+    `config.CONFIG_FILE`."""
+    assert installer.venv_pending_path().parent == instalacao
+
+
+def test_o_sentinel_nao_e_removido_pelo_proprio_uninstall(instalacao, servico):
+    """Ele e escrito no fim, e o stub e quem o apaga. Se entrasse nas listas de
+    remocao, o proprio uninstall o apagaria antes de o stub olhar."""
+    assert installer.VENV_PENDING_NAME not in installer.REMOVE_FILES
+    installer.uninstall()
+    assert installer.venv_pending_path().exists()
