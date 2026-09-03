@@ -154,18 +154,42 @@ def test_todo_formato_que_pode_voltar_vazio_tem_piso():
 # ── o guarda, que e a metade que importa ────────────────────────────────────
 
 class _VaultFalso:
-    """O minimo que `organizer.run` usa, e um registro do que foi escrito."""
+    """Dublê do `VaultManager`, limitado a metodos que a classe real TEM.
+
+    A primeira versao deste dublê expunha `write_note`, um metodo que eu supus
+    e que nao existe. O organizer o chamava, todos os testes passavam, e o
+    defeito so apareceu quando um deck de verdade atravessou o daemon no ar:
+    `'VaultManager' object has no attribute 'write_note'`.
+
+    Por isso o dublê agora e conferido contra a superficie real no
+    `__init_subclass__` abaixo, e a nota e lida do disco em vez de um registro
+    que o proprio dublê mantem: o teste passa a olhar o efeito, nao a intencao.
+    """
 
     def __init__(self, cfg):
         self.cfg = cfg
-        self.escritas = []
+        self.indexadas = []
 
-    def write_note(self, folder, title, content, **kw):
-        caminho = self.cfg.vault / folder / f"{title}.md"
-        caminho.parent.mkdir(parents=True, exist_ok=True)
-        caminho.write_text(content, encoding="utf-8")
-        self.escritas.append({"folder": folder, "title": title, "content": content})
-        return caminho
+    def index_note(self, content, meta, **kw):
+        self.indexadas.append({"content": content, "meta": meta})
+
+    def search(self, *a, **k):
+        return []
+
+
+def test_o_duble_so_expoe_metodos_que_o_VaultManager_real_tem():
+    """A guarda que teria evitado tudo isto.
+
+    Um dublê livre para inventar metodo transforma o teste num espelho da
+    suposicao de quem o escreveu.
+    """
+    from delegation_core.vault import VaultManager
+    for nome in dir(_VaultFalso):
+        if nome.startswith("_"):
+            continue
+        assert hasattr(VaultManager, nome), (
+            f"o duble expoe `{nome}`, que o VaultManager real nao tem"
+        )
 
 
 @pytest.fixture
@@ -217,21 +241,43 @@ def test_o_toco_NAO_passa_pelo_modelo(cenario):
     assert chamou["classify"] == 0, "classificou um toco, escolhendo pasta a esmo"
 
 
+def _notas_escritas(vault):
+    """As notas do usuario, sem as pastas internas e sem o resumo semanal.
+
+    `run()` sempre escreve `YYYY-Wnn-maintenance.md` no fim; contá-lo aqui faria
+    o teste falhar por um motivo que nao tem nada a ver com o toco.
+    """
+    return [p for p in vault.rglob("*.md")
+            if not p.relative_to(vault).parts[0].startswith("_")
+            and "-maintenance" not in p.stem]
+
+
 def test_a_nota_escrita_e_o_toco_literal(cenario):
-    organizer, vm, _chamou, toco, _vault = cenario
+    organizer, vm, _chamou, toco, vault = cenario
     _rodar(organizer, vm)
 
-    assert len(vm.escritas) == 1
-    assert vm.escritas[0]["content"] == toco
-    assert "Sarah Chen" not in vm.escritas[0]["content"]
+    notas = _notas_escritas(vault)
+    assert len(notas) == 1
+    corpo = notas[0].read_text(encoding="utf-8")
+    assert toco in corpo
+    assert "Sarah Chen" not in corpo
 
 
 def test_o_arquivo_continua_achavel_pelo_nome(cenario):
     """O toco existe justamente para o arquivo nao sumir. Se fosse so um erro,
     ninguem descobriria que o deck passou por aqui."""
+    organizer, vm, _chamou, _toco, vault = cenario
+    _rodar(organizer, vm)
+    assert "GFK 30 Dias" in _notas_escritas(vault)[0].stem
+
+
+def test_o_toco_e_indexado_como_qualquer_nota(cenario):
+    """Sem indexar, a nota existe no disco e some da busca, que e metade do
+    motivo de ela existir."""
     organizer, vm, _chamou, _toco, _vault = cenario
     _rodar(organizer, vm)
-    assert "GFK 30 Dias" in vm.escritas[0]["title"]
+    assert len(vm.indexadas) == 1
+    assert vm.indexadas[0]["meta"]["title"] == "GFK 30 Dias"
 
 
 def test_o_resultado_relata_o_toco_em_separado(cenario):

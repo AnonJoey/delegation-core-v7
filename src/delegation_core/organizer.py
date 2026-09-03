@@ -354,12 +354,24 @@ async def run(engine, vault_manager) -> dict:
                     (sc_toco := load_sidecar(f)) and sc_toco.get("folder_hint"),
                     cfg.vault_folders,
                 ) or _PASTA_DE_TOCOS
-                caminho = vault_manager.write_note(
-                    folder, f"{today_str}-{f.stem}", raw_text,
-                )
+                # Escrito pelo mesmo caminho do fluxo normal, logo abaixo:
+                # `VaultManager` nao tem `write_note`, e a primeira versao disto
+                # chamava um metodo que nao existe. A suite nao pegou porque o
+                # dublê do teste tinha o metodo que eu tinha suposto, em vez da
+                # superficie da classe de verdade. Quem pegou foi um deck real
+                # passando pelo daemon no ar.
+                safe = safe_filename(f.stem)
+                caminho = cfg.vault / folder / f"{today_str}-{safe}.md"
+                caminho.parent.mkdir(parents=True, exist_ok=True)
+                caminho = unique_note_path(caminho)
+                corpo = ensure_aliases(
+                    raw_text, [clean_display(f"{today_str}-{safe}"), f.stem])
+                caminho.write_text(corpo, encoding="utf-8")
+                rel_toco = str(caminho.relative_to(cfg.vault))
+                vault_manager.index_note(
+                    corpo, {"title": f.stem, "path": rel_toco, "folder": folder})
                 results.setdefault("stubs", []).append(
-                    f"{f.name}: no text layer, filed as a stub in {folder}/ "
-                    "without synthesis"
+                    f"{f.name} → {rel_toco} (no text layer, no synthesis)"
                 )
                 shutil.move(str(f), str(processed / f.name))
                 _archive_sidecar(f, processed, results)
