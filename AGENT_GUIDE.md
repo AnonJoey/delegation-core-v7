@@ -258,7 +258,8 @@ creating a duplicate note.
 
 ---
 
-### `relink_folder(folder, threshold=0.70)` / `relink_folder_bg(folder, ...)`
+### `relink_folder(folder, days=None, min_similarity=None, max_links_per_note=8)`
+### `relink_folder_bg(folder, days=None, min_similarity=None, max_links_per_note=8)`
 Walk any vault subfolder and additively inject `[[wikilinks]]` into existing notes based on
 semantic similarity. Use after bulk imports or vault growth to materialise connections that
 did not exist at ingestion time. Strictly additive — never removes existing links.
@@ -266,6 +267,15 @@ Supports sub-paths (`meetings/Client/2026`).
 
 ```json
 → { "folder": "Reference", "relinked": 12, "links_added": 34 }
+```
+
+`min_similarity` e o corte de similaridade (nao `threshold`, que nunca
+existiu na assinatura). `days` limita a notas tocadas nos ultimos N dias, e
+`max_links_per_note` limita quantos `## Related` cada nota recebe.
+`tests/test_docs_not_stale.py` falha se esta assinatura voltar a divergir
+do que `server.py` expoe.
+
+```json
 ```
 
 **Use `relink_folder_bg` on any folder of real size.** The synchronous tool embeds

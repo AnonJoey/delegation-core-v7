@@ -23,6 +23,7 @@ que le "31" e planeja em cima disso planeja errado: esse fica, e e verificado.
 """
 from __future__ import annotations
 
+import ast
 import re
 from pathlib import Path
 
@@ -125,3 +126,85 @@ def test_conftest_existe_e_e_autouse():
     conftest = (RAIZ / "tests" / "conftest.py").read_text(encoding="utf-8")
     assert "autouse=True" in conftest
     assert "CONFIG_FILE" in conftest
+
+
+# ── assinaturas que o AGENT_GUIDE promete ───────────────────────────────────
+
+AGENT_GUIDE = RAIZ / "AGENT_GUIDE.md"
+
+
+def _parametros_reais(nome_da_tool: str) -> set[str]:
+    """Os parametros da funcao que o servidor realmente expoe, por AST.
+
+    Por AST e nao por import: importar server.py levanta o FastMCP inteiro e
+    puxa chromadb junto, o que este teste nao precisa e nao deve pagar.
+    """
+    arvore = ast.parse(SERVER.read_text(encoding="utf-8"))
+    for no in ast.walk(arvore):
+        if isinstance(no, (ast.FunctionDef, ast.AsyncFunctionDef)) and no.name == nome_da_tool:
+            args = no.args
+            return {a.arg for a in (args.posonlyargs + args.args + args.kwonlyargs)}
+    pytest.fail(f"a ferramenta {nome_da_tool!r} sumiu de server.py")
+
+
+def _parametros_ou_none(nome: str) -> set[str] | None:
+    """Como _parametros_reais, mas devolve None em vez de falhar.
+
+    Deliberadamente estreito. A primeira versao usava `except Exception:
+    continue` em volta da busca, e como eu tinha esquecido o `import ast`, o
+    NameError era engolido para TODA ferramenta: o teste varria a lista inteira,
+    nao verificava nada, e passava verde sobre uma deriva que existia. O mesmo
+    defeito que este arquivo existe para pegar, dentro do proprio arquivo.
+    """
+    arvore = ast.parse(SERVER.read_text(encoding="utf-8"))
+    for no in ast.walk(arvore):
+        if isinstance(no, (ast.FunctionDef, ast.AsyncFunctionDef)) and no.name == nome:
+            args = no.args
+            return {a.arg for a in (args.posonlyargs + args.args + args.kwonlyargs)}
+    return None
+
+
+def test_o_teste_de_assinatura_realmente_olha_alguma_coisa():
+    """Guarda da guarda: pelo menos uma ferramenta do guia tem que ser achada.
+
+    Sem isto, um erro que faca `_parametros_ou_none` devolver None sempre deixa
+    o teste acima verde sem conferir nada.
+    """
+    assert _parametros_ou_none("relink_folder") is not None
+    assert _parametros_ou_none("search_vault") is not None
+    assert _parametros_ou_none("uma_ferramenta_que_nao_existe") is None
+
+
+def test_o_guia_nao_promete_parametro_que_nao_existe():
+    """Um agente que segue o AGENT_GUIDE tem que conseguir chamar a ferramenta.
+
+    Medido em 03/09/2026: o guia documenta
+    `relink_folder(folder, threshold=0.70)` e a assinatura real e
+    `relink_folder(folder, days, min_similarity, max_links_per_note)`. Chamar
+    como o guia manda devolve erro de validacao do pydantic, o que aconteceu
+    de verdade nesta sessao. O parametro tem outro nome e ha dois que o guia
+    nem menciona.
+
+    capabilities() ja avisa que "prose has no guard against drifting from the
+    code". Este teste e a guarda para as assinaturas que a prosa fixa.
+    """
+    texto = AGENT_GUIDE.read_text(encoding="utf-8")
+    problemas = []
+
+    # `### \`nome(param=valor, ...)\`` — as assinaturas que o guia declara.
+    for achado in re.finditer(r"^### `(\w+)\(([^)]*)\)`", texto, re.MULTILINE):
+        nome, assinatura = achado.group(1), achado.group(2)
+        if not assinatura.strip():
+            continue
+        reais = _parametros_ou_none(nome)
+        if reais is None:
+            continue          # ferramenta que nao mora em server.py
+        for parte in assinatura.split(","):
+            param = parte.split("=")[0].strip()
+            if param and param not in reais:
+                problemas.append(f"{nome}({param}) — reais: {sorted(reais)}")
+
+    assert not problemas, (
+        "o AGENT_GUIDE documenta parametro que a ferramenta nao aceita:\n  "
+        + "\n  ".join(problemas)
+    )
