@@ -771,6 +771,14 @@ class VaultManager:
         """
         self._ensure_ready()
         if not self.collection:
+            # Silent until 2026-09-02, and it is the worst of the two failure
+            # paths: every write path in the project reaches here, twenty of the
+            # twenty-one discard the return value, and the note simply stops
+            # existing as far as search is concerned. Not a warning — an error.
+            logger.error(
+                "index_note: no collection, %r was NOT indexed and is invisible "
+                "to search until the next reindex", metadata.get("path", "<sem path>"),
+            )
             return False
         # Only vault-relative paths can be classified. External content scopes on
         # is_external, and an absolute path must never be stamped: classify_path
@@ -886,7 +894,12 @@ class VaultManager:
                 # reads it as a foreign change and reopens on every single write.
                 self._disk_state = self._read_disk_state()
         except Exception as e:
-            logger.warning("Index error: %s", e)
+            # Naming the note is the whole difference between a log line someone
+            # can act on and one that only proves something went wrong. The
+            # delete above may already have landed, so this note can be on disk
+            # with no rows at all.
+            logger.error("index_note: %r was NOT indexed (%s: %s) — it is on disk "
+                         "and invisible to search", raw_path, type(e).__name__, e)
             return False
         return True
 
@@ -974,6 +987,57 @@ class VaultManager:
             )
         except Exception as e:
             logger.warning("Could not save index state: %s", e)
+
+    def _unindexed_notes(self, notes: list[dict]) -> list[dict]:
+        """Notes that exist on disk and have no rows in the index.
+
+        This is the failure this project keeps having and keeps not seeing.
+        `index_note()` returns False when the write does not land, and of its
+        21 call expressions exactly one — `reindex_vault` — reads that return.
+        The other twenty discard it, so a note that fails to index stays on
+        disk, drops out of every search, and nothing anywhere says so. One of
+        the two failure paths inside `index_note` did not even log.
+
+        Measured on this vault on 2026-09-02: 8.581 notes on disk against 8.576
+        distinct indexed paths. The five missing were three Daily transcripts
+        and two session transcripts, none of them stamped in
+        `.chroma_index.json` and none of them named in any log. Finding them
+        took a hand-written sqlite query against the Chroma store, which is
+        exactly the kind of throwaway script `vault_health_detail` exists to
+        make unnecessary.
+
+        Counted the same way as the rest of health: collected in the same pass
+        that produces the number, so the list and the count cannot disagree.
+        The reverse direction — rows whose file is gone — is the orphan sweep in
+        `reindex_vault`, which is a different question with a different fix.
+        """
+        if not self.collection:
+            return []
+        try:
+            rows = self._paged_get(include=["metadatas"])
+        except Exception as e:
+            # Health must degrade to "cannot tell" rather than to "all fine":
+            # returning [] here would report `unindexed: 0` for an index that
+            # could not be read at all, which is the fabricated-value failure
+            # this whole function exists to catch.
+            logger.warning("Could not read indexed paths for the health scan: %s", e)
+            return [{"rel": "", "folder": "", "error": f"index unreadable: {e}"}]
+
+        indexed: set[str] = set()
+        for meta in rows.get("metadatas") or []:
+            if not meta:
+                continue
+            # External rows are keyed by absolute path and are not vault notes;
+            # comparing them against a vault walk would report every ingested
+            # file as missing.
+            if str(meta.get("is_external", "")).lower() == "true":
+                continue
+            path = meta.get("path")
+            if path:
+                indexed.add(str(path))
+
+        return [{"rel": n["rel"], "folder": n["folder"], "stem": n["stem"]}
+                for n in notes if n.get("rel") and n["rel"] not in indexed]
 
     def _paged_get(self, limit: int = 5000, **kwargs) -> dict:
         """Safely fetch all matching rows from ChromaDB in batches to prevent SQLite variable limits."""
@@ -1497,7 +1561,8 @@ class VaultManager:
                 note_stem = f.name[:-3].strip()
                 resolvable.update(link_names_for_stem(note_stem))
                 resolvable.update(a.lower() for a in frontmatter_aliases(content))
-                notes.append({"stem": note_stem, "folder": folder, "content": content})
+                notes.append({"stem": note_stem, "folder": folder, "content": content,
+                              "rel": str(f.relative_to(self.cfg.vault))})
 
         # Obsidian resolves a wikilink against every note in the vault, not just
         # the folders delegation-core manages. Notes do live outside them —
@@ -1599,6 +1664,8 @@ class VaultManager:
                 orphans += 1
                 orphan_notes.append({"stem": n["stem"], "folder": n["folder"]})
 
+        unindexed_notes = self._unindexed_notes(notes)
+
         result = {
             "total_notes": total,
             "needs_repair": needs_repair,
@@ -1606,6 +1673,7 @@ class VaultManager:
             "orphans": orphans,
             "generated_notes": generated,
             "broken_links": broken_links,
+            "unindexed": len(unindexed_notes),
             "computed_at": datetime.now().isoformat(),
         }
         self._last_health_detail = {
@@ -1616,6 +1684,7 @@ class VaultManager:
             "needs_repair_items": repair_notes,
             "truncated_items": truncated_notes,
             "folder_marker_items": markers,
+            "unindexed_items": unindexed_notes,
         }
         try:
             cache_path.write_text(
@@ -1656,14 +1725,21 @@ class VaultManager:
         self._force_health_recompute()
         detail = self._last_health_detail
         capped = {"limit": limit}
-        for key in ("broken_link_items", "orphan_items", "needs_repair_items",
-                    "truncated_items", "folder_marker_items"):
-            items = detail.get(key, [])
-            capped[key] = items[:limit]
-            capped[f"{key}_total"] = len(items)
-        for key in ("total_notes", "needs_repair", "truncated", "orphans",
-                    "generated_notes", "broken_links", "computed_at"):
-            capped[key] = detail.get(key)
+        # Derived from what the health pass actually produced, not from a
+        # hardcoded list of keys. The list was the brittle kind: adding
+        # `unindexed_items` to the pass and forgetting to add it here would
+        # compute the finding correctly and then drop it on the floor, with
+        # nothing failing. Any `*_items` list is capped and counted; every other
+        # scalar is copied through. `_vault` stays out — it is the pass's own
+        # bookkeeping, not a finding.
+        for key, value in detail.items():
+            if key == "_vault":
+                continue
+            if key.endswith("_items") and isinstance(value, list):
+                capped[key] = value[:limit]
+                capped[f"{key}_total"] = len(value)
+            else:
+                capped[key] = value
         return capped
 
     def _force_health_recompute(self) -> None:
