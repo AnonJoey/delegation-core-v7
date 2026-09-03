@@ -43,8 +43,30 @@ def _lock_is_stale(lock_path: Path) -> bool:
     if platform.system() == "Windows":
         return False
     try:
-        pid = int(lock_path.read_text().strip())
-    except (OSError, ValueError):
+        conteudo = lock_path.read_text().strip()
+    except OSError:
+        return True
+
+    if not conteudo:
+        # Lock recem-criado, ainda sem PID escrito.
+        #
+        # O lock nasce em duas syscalls: `os.open(O_CREAT|O_EXCL)` e depois
+        # `os.write(pid)`. Entre as duas o arquivo existe e esta VAZIO. A versao
+        # anterior fazia `int("")`, caia no ValueError e devolvia True: um
+        # segundo processo nessa janela declarava o lock obsoleto, apagava, e
+        # tomava para si. Os dois rebuilds passavam a escrever no mesmo
+        # `graphs_dir/<nome>/` ao mesmo tempo, que e exatamente a colisao que o
+        # lock existe para impedir.
+        #
+        # A janela e de microssegundos e o teste de idade acima nao a fecha,
+        # porque um lock recem-criado tem idade ~0 e nao passa do corte. Um
+        # arquivo vazio e novo significa "alguem acabou de pegar", nao
+        # "abandonado": so vira obsoleto pelo corte de idade.
+        return False
+
+    try:
+        pid = int(conteudo)
+    except ValueError:
         return True
     try:
         os.kill(pid, 0)
