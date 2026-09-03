@@ -24,7 +24,7 @@ def export(vault, title: str, summary: str, key_decisions: str = "") -> dict:
     from .config import resolve_folder
     folder = resolve_folder("sessions", cfg.vault_folders) or cfg.vault_folders[0]
 
-    from .vault import safe_filename, unique_note_path, yaml_quote_scalar
+    from .vault import compose_note, safe_filename, unique_note_path
     safe = safe_filename(title)
     date_str = datetime.now().strftime("%Y-%m-%d")
     dest = cfg.vault / folder / f"{date_str}-{safe}.md"
@@ -34,13 +34,6 @@ def export(vault, title: str, summary: str, key_decisions: str = "") -> dict:
     decisions_list = [d.strip() for d in key_decisions.split(",") if d.strip()] if key_decisions else []
 
     lines = [
-        "---",
-        f"title: {yaml_quote_scalar(title)}",
-        f"date: {date_str}",
-        "type: session",
-        "ai_generated: true",
-        "---",
-        "",
         f"# {title}",
         f"*{datetime.now().strftime('%Y-%m-%d %H:%M')}*",
         "",
@@ -55,7 +48,22 @@ def export(vault, title: str, summary: str, key_decisions: str = "") -> dict:
             lines.append(f"- {d}")
         lines.append("")
 
-    full = "\n".join(lines)
+    # compose_note, e nao um bloco de frontmatter montado a mao aqui.
+    #
+    # safe_filename corta o nome do arquivo em 50 caracteres, e compose_note
+    # responde a isso gravando o titulo inteiro em `aliases:`, para que um link
+    # escrito com o titulo real resolva. Montando o bloco a mao, export_session
+    # nunca recebia esse alias.
+    #
+    # Medido neste vault em 03/09/2026: DEZ notas de Sessions tem titulo maior
+    # que o proprio nome de arquivo e NENHUMA tem alias. A maior delas tem 95
+    # caracteres de titulo contra 49 de stem. Todo wikilink escrito com o titulo
+    # real dessas notas resolve para nada, e export_session e justamente a
+    # ferramenta que o AGENT_GUIDE manda chamar ao fim de toda sessao.
+    #
+    # `type: session` vai no bloco do chamador porque compose_note preserva o
+    # que o autor fornece e so acrescenta o que falta.
+    full = compose_note(title, "---\ntype: session\n---\n\n" + "\n".join(lines), date_str)
     dest.write_text(full, encoding="utf-8")
     vault.index_note(
         full,

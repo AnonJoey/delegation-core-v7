@@ -20,7 +20,36 @@ logger = logging.getLogger("merger")
 _MAX_INCOMING = 32 * 1024    # characters of extracted text
 _MAX_TARGET   = 150 * 1024   # bytes of existing note on disk
 
+#: Pastas que nunca recebem merge, mesmo que a config nao as liste. Sao os
+#: casos de campo que motivaram a guarda; a config acrescenta, nunca remove.
 _NEVER_MERGE_FOLDERS = frozenset({"sessions", "meetings"})
+
+
+def _never_merge(cfg) -> frozenset[str]:
+    """As pastas protegidas de merge, minusculas, config mais os padroes.
+
+    Duas coisas estavam erradas aqui e as duas eram silenciosas.
+
+    **Caso.** A comparacao era `folder.split("/")[0] in _NEVER_MERGE_FOLDERS`,
+    com o conjunto em minusculas. Esta maquina tem a pasta `Sessions` com
+    maiuscula, entao a guarda NAO DISPARAVA: medido em 03/09/2026, nenhuma das
+    nove pastas do vault era bloqueada. A guarda existe porque numa instalacao
+    de campo o merge empilhou varias sessoes nao relacionadas numa nota so, que
+    e o caso MAURICIO citado no topo deste modulo. `vault.py:1553` ja fazia isto
+    certo, com um comentario dizendo exatamente que "a vault whose folder is
+    'Sessions' would otherwise match nothing here". A licao foi aprendida la e
+    nunca chegou aqui.
+
+    **Config ignorada.** `cfg.never_merge_folders` existe, esta documentada em
+    config.py e e lida por `vault.py`. Este modulo usava so a constante, entao
+    quem configurasse a chave era obedecido no passe de heal e ignorado no
+    merge de verdade.
+
+    Uniao e nao substituicao: o default da config e `["sessions"]`, e trocar a
+    constante por ela sozinha tiraria `meetings` da protecao sem ninguem pedir.
+    """
+    da_config = getattr(cfg, "never_merge_folders", None) or ["sessions"]
+    return frozenset({f.lower() for f in da_config} | _NEVER_MERGE_FOLDERS)
 
 
 def try_merge(
@@ -42,14 +71,14 @@ def try_merge(
       - raw_text exceeds _MAX_INCOMING (this is a standalone artifact)
       - the best matching existing note exceeds _MAX_TARGET
     """
-    root_folder = folder.split("/", 1)[0]
-    if root_folder in _NEVER_MERGE_FOLDERS:
+    cfg = vault_manager.cfg
+    root_folder = folder.split("/", 1)[0].lower()
+    if root_folder in _never_merge(cfg):
         return False, ""
 
     if len(raw_text) > _MAX_INCOMING:
         return False, ""
 
-    cfg = vault_manager.cfg
     for hit in hits:
         if hit.get("similarity", 0) < cfg.merge_threshold:
             continue
