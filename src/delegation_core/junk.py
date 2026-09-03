@@ -13,11 +13,30 @@ import re
 from pathlib import Path
 
 # Matches the filename stem (after stripping any chunk-staging prefix).
+#
+# O sufixo e `[._-]` mais UM token alfanumerico curto, nao `.*`. Essa e a forma
+# de uma variante de boilerplate (`requirements-dev`, `LICENSE-MIT`,
+# `CHANGELOG-2024`); nao e a forma de um titulo de nota.
+#
+# Com `.*` qualquer frase depois de um hifen entrava. Medido em 03/09/2026,
+# nomes que um usuario deste vault escreveria e que eram DESCARTADOS:
+#   todo-lista-do-projeto.md        install-do-cliente.md
+#   changes-que-precisamos-fazer.md notice-de-reuniao.md
+#   version-final-do-contrato.md    help-para-o-abner.md
+#   authors-do-artigo.md            manifest-de-entrega.md
+# Todos sumiam do inbox para `_processed/` sem virar nota.
+#
+# O aperto troca um erro por outro, e a troca e deliberada: um
+# `requirements-dev-test.txt` agora escapa e vira nota, enquanto antes um
+# `install-do-cliente.md` era jogado fora. Arquivar um boilerplate a mais custa
+# uma nota inutil no vault; descartar a nota de alguem custa a nota. Num sistema
+# cujo proposito e ser a memoria permanente do usuario, o vies vai para o lado
+# de nunca descartar.
 JUNK_STEM_RE = re.compile(
     r"^(license|licence|copying|notice|readme|changelog|changes|contributing|"
     r"contributors|authors|requirements|install|installation|help|todo|"
     r"version|manifest|makefile|dockerfile|codeowners|gitignore|gitattributes|"
-    r"editorconfig|pylintrc|flake8|mypy)([._\-].*)?$",
+    r"editorconfig|pylintrc|flake8|mypy)([._\-][A-Za-z0-9]{1,12})?$",
     re.IGNORECASE,
 )
 
@@ -42,7 +61,14 @@ def is_junk(filename: str, content: str = "") -> str | None:
     Checks filename stem first (fast path), then content markers if text is provided.
     """
     name = Path(filename).name
-    stem = Path(filename).stem.lower()
+    # O ponto da frente sai antes de comparar. `Path(".gitignore").stem` e
+    # ".gitignore", COM o ponto, entao seis entradas do padrao nunca casavam
+    # nada: gitignore, gitattributes, editorconfig, pylintrc, flake8 e mypy sao
+    # todas convencionalmente dotfiles. Estavam listadas como intencao e eram
+    # inalcancaveis. Medido em 03/09/2026, e o organizer nao pula arquivo
+    # oculto (`inbox.iterdir()` filtra so por is_file), entao um `.gitignore`
+    # largado no inbox virava nota.
+    stem = Path(filename).stem.lower().lstrip(".")
 
     if _OFFICE_LOCK_RE.match(name):
         return f"Office lock file ({name})"
