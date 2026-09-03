@@ -344,7 +344,65 @@ def compose_note(title: str, content: str, date_str: str) -> str:
     }
     additions = [_emit(k, v) for k, v in generated if k not in have]
     merged = supplied + ("\n" + "\n".join(additions) if additions else "")
+
+    # `aliases` is the one generated key that must MERGE rather than defer.
+    #
+    # For every other key, "the caller wins" is right: an explicit `title:` is
+    # how a note carries a short display name independent of its filename. But
+    # the generated alias is not an opinion about naming, it is the bridge back
+    # to a title the filename could not hold. Deferring to the caller's list
+    # dropped it entirely, and the note became unlinkable by its own title.
+    #
+    # Found in this vault: "Descompassos entre o card dos Agentes PMO e o que
+    # foi decidido" and "Apresentacao Agentes PMO ao Max - digestao da reuniao
+    # de 31-08" both supplied two descriptive aliases of their own, so neither
+    # got the truncation alias, and both are linked-to by their full titles from
+    # other notes. Those links resolve to nothing.
+    if "aliases" in have:
+        for chave, valor in generated:
+            if chave == "aliases":
+                merged = _merge_alias(merged, valor.strip().lstrip("- ").strip())
+                break
+
     return f"---\n{merged}\n---\n\n{body[m.end():].lstrip(chr(10))}"
+
+
+def _merge_alias(frontmatter: str, alias: str) -> str:
+    """Add `alias` to an existing `aliases:` value, block-list or inline.
+
+    The caller's block is preserved verbatim everywhere else in compose_note, so
+    this inserts a line (or one bracket entry) rather than re-serialising YAML
+    that this module does not model.
+    """
+    despido = alias.strip().strip('"').strip("'").lower()
+    linhas = frontmatter.split("\n")
+    for i, linha in enumerate(linhas):
+        if not linha.lower().startswith("aliases:"):
+            continue
+
+        inline = linha.split(":", 1)[1].strip()
+        if inline.startswith("[") and inline.endswith("]"):
+            # aliases: [A, B]
+            dentro = inline[1:-1].strip()
+            existentes = {x.strip().strip('"').strip("'").lower()
+                          for x in dentro.split(",") if x.strip()}
+            if despido in existentes:
+                return frontmatter
+            novo_inline = f"[{dentro}, {alias}]" if dentro else f"[{alias}]"
+            linhas[i] = f"aliases: {novo_inline}"
+            return "\n".join(linhas)
+
+        # aliases:\n  - "A"\n  - "B"
+        j = i + 1
+        while j < len(linhas) and (linhas[j].startswith((" ", "\t"))
+                                   or linhas[j].lstrip().startswith("- ")):
+            item = linhas[j].strip().lstrip("- ").strip().strip('"').strip("'").lower()
+            if item == despido:
+                return frontmatter
+            j += 1
+        linhas.insert(j, f"  - {alias}")
+        return "\n".join(linhas)
+    return frontmatter
 
 
 _chroma_write_lock = threading.Lock()
