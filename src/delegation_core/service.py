@@ -130,14 +130,27 @@ def launchd_plist_text() -> str:
 """
 
 
-def _run(cmd: list[str]) -> tuple[int, str]:
+#: How long to wait for a stop before giving up, in seconds.
+#:
+#: Matched to `TimeoutStopSec` in the unit above, deliberately. The daemon holds
+#: a ChromaDB index that cannot be interrupted safely, and its normal work (a
+#: full reindex, a relink pass) runs for minutes. Measured on this machine: an
+#: idle daemon stops in 648 ms, so the wait costs nothing in the common case.
+#: It is the uncommon case that matters: with the 30-second default this
+#: function used to carry, stopping a daemon mid-reindex would report
+#: "timed out" while systemd was still shutting it down correctly, and a caller
+#: reading that as failure would go on to replace files under a live process.
+STOP_TIMEOUT_SEC = 600
+
+
+def _run(cmd: list[str], timeout: int = 30) -> tuple[int, str]:
     try:
-        p = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+        p = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
         return p.returncode, (p.stdout + p.stderr).strip()
     except FileNotFoundError:
         return 127, f"{cmd[0]} not found"
     except subprocess.TimeoutExpired:
-        return 124, f"{cmd[0]} timed out"
+        return 124, f"{cmd[0]} timed out after {timeout}s"
 
 
 def install() -> dict:
@@ -211,6 +224,110 @@ def uninstall() -> dict:
                 "detail": out}
 
     return {"platform": system, "status": "unsupported"}
+
+
+def stop(timeout: int = STOP_TIMEOUT_SEC) -> dict:
+    """Stop the running daemon, leaving its registration in place.
+
+    Separate from `uninstall()` on purpose: this is the pause an upgrade needs,
+    not a removal. Nothing here touches the unit file, the plist, or the
+    scheduled task, so whatever was configured to start at login still is.
+
+    macOS uses `launchctl unload` WITHOUT `-w`. The `-w` in `install()` is what
+    marks the agent enabled across logins; passing it here would disable it, and
+    a caller that only meant to pause the daemon would find it gone after the
+    next reboot.
+    """
+    system = platform.system()
+
+    if system == "Linux":
+        code, out = _run(["systemctl", "--user", "stop", SERVICE_NAME], timeout=timeout)
+        return {"platform": system, "action": "stop",
+                "status": "stopped" if code == 0 else "failed", "detail": out}
+
+    if system == "Darwin":
+        if not LAUNCHD_PLIST.exists():
+            return {"platform": system, "action": "stop", "status": "not_installed",
+                    "detail": f"{LAUNCHD_PLIST} does not exist"}
+        code, out = _run(["launchctl", "unload", str(LAUNCHD_PLIST)], timeout=timeout)
+        return {"platform": system, "action": "stop",
+                "status": "stopped" if code == 0 else "failed", "detail": out}
+
+    if system == "Windows":
+        code, out = _run(["schtasks", "/End", "/TN", SERVICE_NAME], timeout=timeout)
+        if code == 0:
+            return {"platform": system, "action": "stop", "status": "stopped", "detail": out}
+        # No scheduled task: the Startup-folder fallback leaves no handle to end,
+        # so say that rather than reporting a failure the caller cannot act on.
+        return {"platform": system, "action": "stop",
+                "status": "not_installed" if WIN_STARTUP_CMD.exists() else "failed",
+                "detail": out}
+
+    return {"platform": system, "action": "stop", "status": "unsupported", "detail": ""}
+
+
+def start() -> dict:
+    """Start the daemon. Returns as soon as the service manager accepts.
+
+    `started` means the manager took the request, NOT that the daemon is ready:
+    measured here, `systemctl start` returns in 3 ms while the process goes on
+    to load BGE onto the GPU. Callers that need readiness poll `is_up()`.
+    """
+    system = platform.system()
+
+    if system == "Linux":
+        code, out = _run(["systemctl", "--user", "start", SERVICE_NAME])
+        return {"platform": system, "action": "start",
+                "status": "started" if code == 0 else "failed", "detail": out}
+
+    if system == "Darwin":
+        if not LAUNCHD_PLIST.exists():
+            return {"platform": system, "action": "start", "status": "not_installed",
+                    "detail": f"{LAUNCHD_PLIST} does not exist"}
+        code, out = _run(["launchctl", "load", str(LAUNCHD_PLIST)])
+        return {"platform": system, "action": "start",
+                "status": "started" if code == 0 else "failed", "detail": out}
+
+    if system == "Windows":
+        code, out = _run(["schtasks", "/Run", "/TN", SERVICE_NAME])
+        return {"platform": system, "action": "start",
+                "status": "started" if code == 0 else "failed", "detail": out}
+
+    return {"platform": system, "action": "start", "status": "unsupported", "detail": ""}
+
+
+def restart(timeout: int = STOP_TIMEOUT_SEC) -> dict:
+    """Stop then start, reporting both halves.
+
+    Not `systemctl restart`, even on Linux where that exists: the other two
+    platforms have no equivalent, and a caller comparing results across
+    platforms should not have to special-case which half failed.
+    """
+    parada = stop(timeout=timeout)
+    if parada["status"] == "failed":
+        return {"action": "restart", "status": "failed", "stop": parada, "start": None}
+    partida = start()
+    return {"action": "restart",
+            "status": "restarted" if partida["status"] == "started" else "failed",
+            "stop": parada, "start": partida}
+
+
+def is_up(wait_seconds: float = 0.0) -> bool:
+    """Is the daemon answering on its port? Optionally wait for it to come up.
+
+    `start()` returns before the daemon is ready, so an upgrade that restarts
+    and reports success without this is reporting that the manager accepted a
+    request, not that the service works.
+    """
+    import time as _time
+
+    prazo = _time.monotonic() + max(wait_seconds, 0.0)
+    while True:
+        if _port_answers():
+            return True
+        if _time.monotonic() >= prazo:
+            return False
+        _time.sleep(0.5)
 
 
 def status() -> dict:

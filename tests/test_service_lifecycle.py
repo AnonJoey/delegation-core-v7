@@ -1,0 +1,221 @@
+"""Parar e religar o daemon, que e o que faltava para um upgrade seguro.
+
+`service.py` sabia instalar, desinstalar e consultar, e nao sabia PARAR. O
+instalador, que e o unico caminho de update que este projeto tem, roda
+`pip install` dentro do venv de onde o daemon esta rodando e nunca o para
+antes. No Linux isso passa e o daemon segue com o codigo velho ate alguem
+reinicia-lo a mao; no Windows o pip nao consegue substituir arquivo que um
+processo mantem aberto, e o erro era engolido por `>nul 2>&1`.
+
+Tudo aqui usa fakes. A regra do projeto e explicita: nenhum teste toca o
+gerenciador de servico real, o vault real ou carrega modelo. O comportamento
+contra o daemon de verdade foi medido a mao antes destes testes existirem:
+
+    stop()     stopped   em 516 ms
+    start()    started   em   4 ms
+    is_up()                False logo apos start, True 1,0 s depois
+    restart()  restarted em 223 ms
+
+Esse ultimo par e o motivo de `is_up` existir: `start` devolve quando o
+gerenciador ACEITA o pedido, nao quando o daemon atende.
+"""
+from __future__ import annotations
+
+import pytest
+
+from delegation_core import service
+
+
+@pytest.fixture
+def comandos(monkeypatch):
+    """Captura o que teria sido executado, e deixa o teste ditar o resultado."""
+    registro = {"chamadas": [], "resultado": (0, "")}
+
+    def _fake_run(cmd, timeout=30):
+        registro["chamadas"].append({"cmd": cmd, "timeout": timeout})
+        return registro["resultado"]
+
+    monkeypatch.setattr(service, "_run", _fake_run)
+    return registro
+
+
+def _em(sistema, monkeypatch):
+    monkeypatch.setattr(service.platform, "system", lambda: sistema)
+
+
+# ── o timeout, que e a razao de stop existir separado ───────────────────────
+
+def test_o_teto_de_parada_acompanha_a_unit():
+    """A unit declara TimeoutStopSec=600. Um stop que desiste antes disso
+    reporta falha enquanto o systemd ainda esta encerrando corretamente."""
+    assert service.STOP_TIMEOUT_SEC == 600
+    assert "TimeoutStopSec=600" in service.systemd_unit_text()
+
+
+def test_stop_usa_o_teto_longo_e_nao_o_padrao_de_30s(comandos, monkeypatch):
+    _em("Linux", monkeypatch)
+    service.stop()
+    assert comandos["chamadas"][0]["timeout"] == service.STOP_TIMEOUT_SEC
+
+
+def test_start_nao_precisa_do_teto_longo(comandos, monkeypatch):
+    """Subir e imediato; so a parada pode levar minutos."""
+    _em("Linux", monkeypatch)
+    service.start()
+    assert comandos["chamadas"][0]["timeout"] == 30
+
+
+def test_o_teto_pode_ser_encurtado_por_quem_chama(comandos, monkeypatch):
+    _em("Linux", monkeypatch)
+    service.stop(timeout=5)
+    assert comandos["chamadas"][0]["timeout"] == 5
+
+
+# ── por plataforma ──────────────────────────────────────────────────────────
+
+def test_linux_para_e_sobe_pelo_systemctl(comandos, monkeypatch):
+    _em("Linux", monkeypatch)
+    assert service.stop()["status"] == "stopped"
+    assert service.start()["status"] == "started"
+    assert comandos["chamadas"][0]["cmd"] == ["systemctl", "--user", "stop", "delegation-core"]
+    assert comandos["chamadas"][1]["cmd"] == ["systemctl", "--user", "start", "delegation-core"]
+
+
+def test_macos_para_SEM_o_dash_w(comandos, monkeypatch, tmp_path):
+    """`-w` e o que marca o agente habilitado entre logins.
+
+    `install()` usa `-w` de proposito. Passa-lo aqui desabilitaria o agente, e
+    quem so queria pausar o daemon para um upgrade o encontraria sumido depois
+    do proximo reboot.
+    """
+    _em("Darwin", monkeypatch)
+    plist = tmp_path / "com.delegation-core.plist"
+    plist.write_text("<plist/>", encoding="utf-8")
+    monkeypatch.setattr(service, "LAUNCHD_PLIST", plist)
+
+    service.stop()
+    cmd = comandos["chamadas"][0]["cmd"]
+    assert cmd[:2] == ["launchctl", "unload"]
+    assert "-w" not in cmd, "stop desabilitaria o agente entre logins"
+
+
+def test_macos_sem_plist_diz_que_nao_esta_instalado(comandos, monkeypatch, tmp_path):
+    _em("Darwin", monkeypatch)
+    monkeypatch.setattr(service, "LAUNCHD_PLIST", tmp_path / "nao_existe.plist")
+    assert service.stop()["status"] == "not_installed"
+    assert service.start()["status"] == "not_installed"
+    assert comandos["chamadas"] == [], "chamou launchctl para um plist inexistente"
+
+
+def test_windows_encerra_e_roda_a_tarefa(comandos, monkeypatch):
+    _em("Windows", monkeypatch)
+    service.stop(); service.start()
+    assert comandos["chamadas"][0]["cmd"] == ["schtasks", "/End", "/TN", "delegation-core"]
+    assert comandos["chamadas"][1]["cmd"] == ["schtasks", "/Run", "/TN", "delegation-core"]
+
+
+def test_windows_com_fallback_de_startup_nao_reporta_falha(comandos, monkeypatch, tmp_path):
+    """Quando a instalacao caiu no atalho da pasta Startup nao ha tarefa para
+    encerrar. Isso e "nao instalado", nao "falhou": o chamador nao tem o que
+    fazer com uma falha aqui."""
+    _em("Windows", monkeypatch)
+    comandos["resultado"] = (1, "ERROR: The system cannot find the file specified.")
+    cmd = tmp_path / "delegation-core.cmd"
+    cmd.write_text("@echo off", encoding="utf-8")
+    monkeypatch.setattr(service, "WIN_STARTUP_CMD", cmd)
+
+    assert service.stop()["status"] == "not_installed"
+
+
+def test_windows_sem_tarefa_e_sem_fallback_e_falha(comandos, monkeypatch, tmp_path):
+    _em("Windows", monkeypatch)
+    comandos["resultado"] = (1, "ERROR")
+    monkeypatch.setattr(service, "WIN_STARTUP_CMD", tmp_path / "nao_existe.cmd")
+    assert service.stop()["status"] == "failed"
+
+
+def test_plataforma_desconhecida_nao_explode(comandos, monkeypatch):
+    _em("Haiku", monkeypatch)
+    assert service.stop()["status"] == "unsupported"
+    assert service.start()["status"] == "unsupported"
+
+
+# ── falha propagada ─────────────────────────────────────────────────────────
+
+def test_stop_que_falha_e_reportado_como_falha(comandos, monkeypatch):
+    _em("Linux", monkeypatch)
+    comandos["resultado"] = (1, "Failed to stop delegation-core.service")
+    r = service.stop()
+    assert r["status"] == "failed"
+    assert "Failed to stop" in r["detail"]
+
+
+def test_stop_que_estoura_o_prazo_nao_vira_sucesso(comandos, monkeypatch):
+    """124 e o codigo que _run devolve num TimeoutExpired."""
+    _em("Linux", monkeypatch)
+    comandos["resultado"] = (124, "systemctl timed out after 600s")
+    assert service.stop()["status"] == "failed"
+
+
+# ── restart ─────────────────────────────────────────────────────────────────
+
+def test_restart_para_e_sobe_nessa_ordem(comandos, monkeypatch):
+    _em("Linux", monkeypatch)
+    r = service.restart()
+    assert r["status"] == "restarted"
+    assert [c["cmd"][2] for c in comandos["chamadas"]] == ["stop", "start"]
+
+
+def test_restart_nao_tenta_subir_se_a_parada_falhou(comandos, monkeypatch):
+    """Subir por cima de um daemon que nao morreu deixa dois processos no
+    mesmo indice, que e pior que nao ter reiniciado."""
+    _em("Linux", monkeypatch)
+    comandos["resultado"] = (1, "Failed to stop")
+    r = service.restart()
+
+    assert r["status"] == "failed"
+    assert r["start"] is None
+    assert len(comandos["chamadas"]) == 1, "chamou start apos um stop que falhou"
+
+
+def test_restart_reporta_as_duas_metades(comandos, monkeypatch):
+    _em("Linux", monkeypatch)
+    r = service.restart()
+    assert r["stop"]["action"] == "stop"
+    assert r["start"]["action"] == "start"
+
+
+# ── is_up: a diferenca entre aceito e pronto ────────────────────────────────
+
+def test_is_up_reflete_a_porta(monkeypatch):
+    monkeypatch.setattr(service, "_port_answers", lambda: True)
+    assert service.is_up() is True
+    monkeypatch.setattr(service, "_port_answers", lambda: False)
+    assert service.is_up() is False
+
+
+def test_is_up_espera_ate_o_daemon_atender(monkeypatch):
+    """Medido no daemon real: start devolve em 4 ms e a porta so responde 1 s
+    depois, porque o processo ainda esta carregando o BGE."""
+    respostas = iter([False, False, True])
+    monkeypatch.setattr(service, "_port_answers", lambda: next(respostas))
+    monkeypatch.setattr(service.time if hasattr(service, "time") else __import__("time"),
+                        "sleep", lambda _: None)
+    assert service.is_up(wait_seconds=10) is True
+
+
+def test_is_up_desiste_no_prazo(monkeypatch):
+    monkeypatch.setattr(service, "_port_answers", lambda: False)
+    assert service.is_up(wait_seconds=0) is False
+
+
+def test_is_up_sem_espera_faz_uma_unica_sondagem(monkeypatch):
+    n = {"v": 0}
+
+    def _sonda():
+        n["v"] += 1
+        return False
+
+    monkeypatch.setattr(service, "_port_answers", _sonda)
+    service.is_up()
+    assert n["v"] == 1
