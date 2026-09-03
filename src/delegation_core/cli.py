@@ -196,6 +196,65 @@ def cmd_update(args):
     return 0 if estado == "ok" else 1
 
 
+def cmd_uninstall(args):
+    """Remove the installation, keeping the vault and the downloaded models."""
+    from rich.console import Console
+
+    from . import installer
+
+    console = Console()
+
+    if not args.dry_run and not args.yes:
+        previa = installer.uninstall(dry_run=True)
+        if previa["status"] not in ("dry_run",):
+            console.print(f"[yellow]{previa['status']}[/yellow]: {previa.get('detail', '')}")
+            return 1
+        plano = previa["plan"]
+        console.print("[bold]This will remove[/bold]")
+        for rotulo, itens in (("service registrations", plano["services"]),
+                              ("directories", plano["dirs"]),
+                              ("files", plano["files"] + plano["globs"])):
+            for item in itens:
+                console.print(f"  - [{rotulo}] {item}")
+        console.print(f"  - [venv] {installer.CONFIG_DIR / 'venv'}  (by the wrapper, after this exits)")
+        console.print("\n[bold]This will NEVER touch[/bold]")
+        for chave, valor in previa["kept"].items():
+            console.print(f"  - {chave}: {valor}")
+        try:
+            resposta = input("\nType 'yes' to proceed: ").strip()
+        except (EOFError, KeyboardInterrupt):
+            resposta = ""
+        if resposta.lower() != "yes":
+            console.print("Aborted. Nothing was removed.")
+            return 0
+        console.print("")
+
+    resultado = installer.uninstall(dry_run=args.dry_run)
+    estado = resultado["status"]
+
+    if estado == "dry_run":
+        console.print_json(data=resultado["plan"])
+        return 0
+
+    for passo in resultado.get("steps", []):
+        marca = "[green]OK[/green]  " if passo["ok"] else "[red]FALHOU[/red]"
+        console.print(f"  {marca} {passo['step']}")
+
+    if estado in ("refused_vault_inside_config_dir", "refused_daemon_still_up"):
+        console.print(f"\n[red]{estado}[/red]: {resultado['detail']}")
+        return 1
+    if estado == "nothing_to_uninstall":
+        console.print(f"\n{resultado['detail']}")
+        return 0
+
+    console.print(f"\n[green]Uninstalled.[/green] {len(resultado.get('removed', []))} item(s) removed.")
+    for chave, valor in resultado["kept"].items():
+        console.print(f"  kept {chave}: {valor}")
+    for falha in resultado.get("failures", []):
+        console.print(f"  [red]failed[/red] {falha['path']}: {falha['error']}")
+    return 0 if estado == "ok" else 1
+
+
 def cmd_service(args):
     """Manage the daemon's per-user service registration."""
     from rich.console import Console
@@ -1263,6 +1322,14 @@ def main():
     p_update.add_argument("--no-restart", action="store_true",
                           help="Leave the daemon stopped after updating")
 
+    p_uninstall = sub.add_parser(
+        "uninstall",
+        help="Remove the installation (keeps your vault and downloaded models)")
+    p_uninstall.add_argument("--yes", action="store_true",
+                             help="Skip the confirmation prompt")
+    p_uninstall.add_argument("--dry-run", action="store_true",
+                             help="Print exactly what would be removed; touch nothing")
+
     p_service = sub.add_parser(
         "service", help="Install/remove the daemon as a per-user background service")
     p_service.add_argument("action", choices=["install", "uninstall", "status"])
@@ -1433,6 +1500,7 @@ def main():
         "run":      cmd_run,
         "service":  cmd_service,
         "update":   cmd_update,
+        "uninstall": cmd_uninstall,
         "mcp-stdio": cmd_mcp_stdio,
         "clients":  cmd_clients,
         "status":   cmd_status,

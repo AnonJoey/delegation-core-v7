@@ -42,6 +42,20 @@ LAUNCHD_PLIST = Path.home() / "Library" / "LaunchAgents" / f"{LAUNCHD_LABEL}.pli
 WIN_STARTUP_DIR = Path.home() / "AppData" / "Roaming" / "Microsoft" / "Windows" / "Start Menu" / "Programs" / "Startup"
 WIN_STARTUP_CMD = WIN_STARTUP_DIR / f"{SERVICE_NAME}.cmd"
 
+#: The SECOND registration this project creates, and the reason these names are
+#: defined in one place now.
+#:
+#: `wizard.py` registers llama.cpp for autostart under its own name, so a full
+#: install leaves two entries per machine: the MCP daemon above, and this one.
+#: The uninstall scripts knew about this one and not about the daemon, because
+#: each of the three files spelled the names out again by hand. What that cost
+#: is recorded in `installer.uninstall`.
+LLAMA_SERVICE_NAME = f"{SERVICE_NAME}-llama"
+LLAMA_LAUNCHD_LABEL = f"{LAUNCHD_LABEL}.llama"
+
+LLAMA_SYSTEMD_UNIT = Path.home() / ".config" / "systemd" / "user" / f"{LLAMA_SERVICE_NAME}.service"
+LLAMA_LAUNCHD_PLIST = Path.home() / "Library" / "LaunchAgents" / f"{LLAMA_LAUNCHD_LABEL}.plist"
+
 
 def _executable() -> str:
     """Absolute path to the installed console script.
@@ -222,6 +236,46 @@ def uninstall() -> dict:
             cmd_existed = True
         return {"platform": system, "status": "removed" if (code == 0 or cmd_existed) else "not_installed",
                 "detail": out}
+
+    return {"platform": system, "status": "unsupported"}
+
+
+def uninstall_llama_autostart() -> dict:
+    """Remove the llama.cpp autostart entry that `wizard.py` registers.
+
+    Separate from `uninstall()` because they are separate registrations that can
+    exist independently: a machine can run the daemon against a remote llama, or
+    keep llama running for something else. An uninstall wants both gone, and now
+    has to ask for both, which is better than one call silently deciding.
+
+    Best-effort by design. Nothing here has a failure a caller can act on: if the
+    entry is already absent, that is the desired end state, and the daemon's own
+    removal is the half that matters.
+    """
+    system = platform.system()
+
+    if system == "Linux":
+        _run(["systemctl", "--user", "disable", "--now", LLAMA_SERVICE_NAME])
+        existia = LLAMA_SYSTEMD_UNIT.exists()
+        LLAMA_SYSTEMD_UNIT.unlink(missing_ok=True)
+        _run(["systemctl", "--user", "daemon-reload"])
+        return {"platform": system, "unit": str(LLAMA_SYSTEMD_UNIT),
+                "status": "removed" if existia else "not_installed"}
+
+    if system == "Darwin":
+        # `-w` here, unlike in `stop()`: this IS a removal, so unmarking the
+        # agent as enabled across logins is exactly what is wanted.
+        _run(["launchctl", "unload", "-w", str(LLAMA_LAUNCHD_PLIST)])
+        existia = LLAMA_LAUNCHD_PLIST.exists()
+        LLAMA_LAUNCHD_PLIST.unlink(missing_ok=True)
+        return {"platform": system, "unit": str(LLAMA_LAUNCHD_PLIST),
+                "status": "removed" if existia else "not_installed"}
+
+    if system == "Windows":
+        _run(["schtasks", "/End", "/TN", LLAMA_SERVICE_NAME])
+        code, out = _run(["schtasks", "/Delete", "/TN", LLAMA_SERVICE_NAME, "/F"])
+        return {"platform": system, "unit": f"Task Scheduler: {LLAMA_SERVICE_NAME}",
+                "status": "removed" if code == 0 else "not_installed", "detail": out}
 
     return {"platform": system, "status": "unsupported"}
 

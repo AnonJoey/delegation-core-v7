@@ -504,13 +504,18 @@ def _startup_systemd(cfg: Config):
         "WantedBy=default.target\n"
     )
 
-    service_file = service_dir / "delegation-core-llama.service"
+    # Name and path both come from service.py, which is where the uninstaller
+    # reads them too. They used to be spelled out independently in five files.
+    from . import service as _svc
+    service_file = _svc.LLAMA_SYSTEMD_UNIT
     service_file.write_text(service)
     subprocess.run(["systemctl", "--user", "daemon-reload"], check=True)
-    subprocess.run(["systemctl", "--user", "enable", "--now", "delegation-core-llama"], check=True)
+    subprocess.run(["systemctl", "--user", "enable", "--now", _svc.LLAMA_SERVICE_NAME], check=True)
 
 
 def _startup_launchd(cfg: Config):
+    from . import service as _svc
+    _LLAMA_LABEL = _svc.LLAMA_LAUNCHD_LABEL
     agents_dir = Path.home() / "Library" / "LaunchAgents"
     agents_dir.mkdir(parents=True, exist_ok=True)
 
@@ -519,7 +524,7 @@ def _startup_launchd(cfg: Config):
         '<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"'
         ' "http://www.apple.com/DTDs/PropertyList-1.0.dtd">\n'
         '<plist version="1.0"><dict>\n'
-        '  <key>Label</key><string>com.delegation-core.llama</string>\n'
+        f'  <key>Label</key><string>{_LLAMA_LABEL}</string>\n'
         '  <key>ProgramArguments</key>\n'
         '  <array>\n'
         f'    <string>{cfg.llama_binary}</string>\n'
@@ -535,12 +540,13 @@ def _startup_launchd(cfg: Config):
         '</dict></plist>\n'
     )
 
-    plist_file = agents_dir / "com.delegation-core.llama.plist"
+    plist_file = _svc.LLAMA_LAUNCHD_PLIST
     plist_file.write_text(plist)
     subprocess.run(["launchctl", "load", str(plist_file)], check=True)
 
 
 def _startup_task_scheduler(cfg: Config):
+    from . import service as _svc
     cmd_str = (
         f'"{cfg.llama_binary}" --model "{cfg.llama_model}"'
         f' --port {cfg.llama_port} --ctx-size {cfg.llama_ctx}'
@@ -548,14 +554,14 @@ def _startup_task_scheduler(cfg: Config):
     )
     subprocess.run(
         ["schtasks", "/create",
-         "/tn", "delegation-core-llama",
+         "/tn", _svc.LLAMA_SERVICE_NAME,
          "/tr", cmd_str,
          "/sc", "ONLOGON",
          "/rl", "HIGHEST",
          "/f"],
         check=True, capture_output=True,
     )
-    subprocess.run(["schtasks", "/run", "/tn", "delegation-core-llama"], capture_output=True)
+    subprocess.run(["schtasks", "/run", "/tn", _svc.LLAMA_SERVICE_NAME], capture_output=True)
 
 
 # ── completion ────────────────────────────────────────────────────────────────

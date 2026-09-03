@@ -45,6 +45,11 @@ _MODULOS_COM_COPIA = (
     "delegation_core.localqueue",
     "delegation_core.tracker",
     "delegation_core.downloader",
+    # installer.uninstall() REMOVE arquivos sob CONFIG_DIR. Um teste que o
+    # chamasse sem este redirecionamento apagaria hooks/, sessions/, graphs/ e
+    # a config da maquina de verdade. E a mesma copia de `from .config import
+    # CONFIG_DIR` dos outros, so que destrutiva.
+    "delegation_core.installer",
 )
 
 
@@ -88,7 +93,24 @@ def _config_real_intacta():
     real = Path.home() / ".delegation_core" / "config.json"
     antes = real.read_bytes() if real.exists() else None
 
+    # Desde que `installer.uninstall()` existe, a suite tem uma funcao que
+    # APAGA diretorios sob ~/.delegation_core. Conferir so o config.json
+    # deixaria passar um teste que removesse hooks/ ou o venv, que e um
+    # estrago maior e mais silencioso do que o que criou este arquivo.
+    raiz_real = Path.home() / ".delegation_core"
+    vigiados = ("hooks", "venv", "models")
+    presentes_antes = {n for n in vigiados if (raiz_real / n).exists()}
+
     yield
+
+    sumiram = presentes_antes - {n for n in vigiados if (raiz_real / n).exists()}
+    if sumiram:
+        pytest.fail(
+            f"o teste apagou {', '.join(sorted(sumiram))} de {raiz_real}. "
+            "Nenhum teste pode remover estado real: use o tmp_path que "
+            "conftest._sem_escrita_no_estado_real ja instalou. Isto nao pode "
+            "ser desfeito automaticamente."
+        )
 
     depois = real.read_bytes() if real.exists() else None
     if antes != depois:

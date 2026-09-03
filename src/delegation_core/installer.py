@@ -355,3 +355,218 @@ def update(check_only: bool = False, restart: bool = True,
     resultado["steps"] = passos
     resultado["stale_dist_copies"] = stale_dist_copies()
     return resultado
+
+
+# ── uninstall ────────────────────────────────────────────────────────────────
+
+#: Directories removed from CONFIG_DIR. `models` is not here, and never will be.
+REMOVE_DIRS = ("sessions", "graphs", "llama", "hooks", "app")
+
+#: Files removed from CONFIG_DIR.
+REMOVE_FILES = (
+    "config.json", "processes.json", "graphs_registry.json",
+    "last_brief.json", "vault_health.json",
+    "AGENT_GUIDE.md", "AGENT_GUIDE.dist.md",
+    "CLAUDE_SYSTEM_PROMPT.md", "CLAUDE_SYSTEM_PROMPT.dist.md",
+)
+
+#: Glob patterns removed from CONFIG_DIR.
+REMOVE_GLOBS = ("*.log", "backups_pre_upgrade_*")
+
+#: Never removed, by anything, for any reason. The vault is the other one, and
+#: it is not listed here only because it does not live under CONFIG_DIR.
+KEEP_ALWAYS = ("models", "venv")
+
+
+def configured_vault_path() -> str:
+    """The vault path recorded in config.json, or "" if unreadable.
+
+    Read directly rather than through `Config.load()`: this runs during an
+    uninstall, where a config that fails to validate must still yield whatever
+    path it holds. The point of reading it is to tell the user where their vault
+    still is, and to refuse the uninstall if it sits somewhere unsafe.
+    """
+    try:
+        dados = json.loads((CONFIG_DIR / "config.json").read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return ""
+    valor = dados.get("vault_path", "")
+    return valor if isinstance(valor, str) else ""
+
+
+def vault_is_inside_config_dir(vault: str) -> bool:
+    """Would removing CONFIG_DIR's contents also remove vault content?
+
+    Someone who answered "~/.delegation_core" (or a subfolder) at setup has a
+    vault whose own files can be named `sessions/`, `graphs/`, `config.json`.
+    Every removal below is by exact name, so on that machine they are not
+    targeted removals at all.
+
+    Resolves symlinks on both sides: a vault symlinked into CONFIG_DIR is the
+    same hazard, and comparing the literal strings would miss it.
+    """
+    if not vault:
+        return False
+    try:
+        v = Path(vault).expanduser().resolve()
+        c = CONFIG_DIR.expanduser().resolve()
+    except OSError:
+        return False
+    return v == c or c in v.parents
+
+
+def _running_from(directory: Path) -> bool:
+    """Is the interpreter executing this code installed under `directory`?"""
+    try:
+        return directory.resolve() in Path(sys.executable).resolve().parents
+    except OSError:
+        return False
+
+
+def uninstall(dry_run: bool = False) -> dict:
+    """Remove delegation-core's installation, leaving the vault and models.
+
+    What this fixes, which is the reason it exists rather than the shell scripts
+    continuing to do the job:
+
+    **Both service registrations are removed, not one.** A full install creates
+    two: the MCP daemon (`service.install`, unit `delegation-core`) and the
+    llama.cpp autostart (`wizard.py`, unit `delegation-core-llama`). Both
+    uninstall scripts removed only the second, because each of the three files
+    spelled the unit names out by hand and the daemon's registration arrived
+    after they were written. Verified on this machine before the fix:
+    `~/.config/systemd/user/delegation-core.service` was present and enabled,
+    with `ExecStart=/home/joey/.delegation_core/venv/bin/delegation-core run`
+    pointing into the venv the uninstaller deletes, and `Restart=on-failure`.
+    So the end state of a "successful" uninstall was a unit that stays enabled,
+    fails at every login with 203/EXEC, retries five times per its
+    StartLimitBurst, and then sits failed in `systemctl --user status` forever,
+    for software the user was told had been removed.
+
+    **The daemon is stopped before anything is deleted.** Neither script stopped
+    it. On Linux it kept running out of a deleted venv, still holding the index
+    and the port after "Uninstall complete." On Windows the deletions could not
+    proceed at all against files a live process holds open, and every one of them
+    ended in `>nul 2>&1` with no errorlevel check, so a half-removed install
+    reported success.
+
+    The venv is deliberately NOT removed here: this code is running out of it.
+    On Windows a running interpreter's own files cannot be deleted, so a version
+    of this that tried would half-succeed there and be honest nowhere. The caller
+    that launched this process removes it afterwards, and the report says so.
+    """
+    passos: list[dict] = []
+
+    def _passo(nome: str, ok: bool, **extra) -> dict:
+        registro = {"step": nome, "ok": ok, **extra}
+        passos.append(registro)
+        return registro
+
+    vault = configured_vault_path()
+    relatorio: dict = {
+        "config_dir": str(CONFIG_DIR),
+        "vault_path": vault,
+        "kept": {
+            "vault": vault or "unknown (config.json missing or unreadable)",
+            "models": str(CONFIG_DIR / "models"),
+        },
+    }
+
+    if not CONFIG_DIR.exists():
+        relatorio.update(status="nothing_to_uninstall", steps=passos,
+                         detail=f"{CONFIG_DIR} does not exist.")
+        return relatorio
+
+    if vault_is_inside_config_dir(vault):
+        relatorio.update(
+            status="refused_vault_inside_config_dir",
+            steps=passos,
+            detail=(
+                f"The configured vault is {vault}, which is {CONFIG_DIR} or "
+                "lives inside it. Everything removed below is removed by exact "
+                "name, and a real vault can hold files by those same names. "
+                "Move the vault out and update vault_path first."
+            ),
+        )
+        return relatorio
+
+    plano = {
+        "dirs": [str(CONFIG_DIR / d) for d in REMOVE_DIRS if (CONFIG_DIR / d).exists()],
+        "files": [str(CONFIG_DIR / f) for f in REMOVE_FILES if (CONFIG_DIR / f).exists()],
+        "globs": sorted(str(p) for padrao in REMOVE_GLOBS for p in CONFIG_DIR.glob(padrao)),
+        "services": [service.SERVICE_NAME, service.LLAMA_SERVICE_NAME],
+    }
+    relatorio["plan"] = plano
+
+    if dry_run:
+        relatorio.update(status="dry_run", steps=passos)
+        return relatorio
+
+    # ── stop first, delete second. In that order for a reason. ───────────────
+    parada = service.stop()
+    _passo("stop_daemon", parada["status"] in ("stopped", "not_installed"), **parada)
+
+    if service.is_up(wait_seconds=15):
+        relatorio.update(
+            status="refused_daemon_still_up",
+            steps=passos,
+            detail=(
+                "The daemon is still answering on its port 15s after a stop was "
+                "requested. Nothing was removed: deleting its files now leaves a "
+                "live process holding an index that no longer has a package "
+                "behind it. Stop it yourself and run this again."
+            ),
+        )
+        return relatorio
+
+    _passo("unregister_daemon", True, **service.uninstall())
+    _passo("unregister_llama_autostart", True, **service.uninstall_llama_autostart())
+
+    # ── removals, each one checked ───────────────────────────────────────────
+    removidos: list[str] = []
+    falhas: list[dict] = []
+
+    def _remover(caminho: Path) -> None:
+        if caminho.name in KEEP_ALWAYS:
+            return
+        try:
+            if caminho.is_dir() and not caminho.is_symlink():
+                shutil.rmtree(caminho)
+            else:
+                caminho.unlink(missing_ok=True)
+            removidos.append(str(caminho.relative_to(CONFIG_DIR)))
+        except OSError as e:
+            falhas.append({"path": str(caminho), "error": str(e)})
+
+    for nome in REMOVE_DIRS:
+        alvo = CONFIG_DIR / nome
+        if alvo.exists():
+            _remover(alvo)
+    for nome in REMOVE_FILES:
+        alvo = CONFIG_DIR / nome
+        if alvo.exists():
+            _remover(alvo)
+    for padrao in REMOVE_GLOBS:
+        for alvo in sorted(CONFIG_DIR.glob(padrao)):
+            _remover(alvo)
+
+    _passo("remove_state", not falhas, removed=len(removidos), failures=falhas)
+
+    relatorio.update(
+        status="ok" if not falhas else "partial",
+        steps=passos,
+        removed=sorted(removidos),
+        failures=falhas,
+    )
+
+    venv = CONFIG_DIR / "venv"
+    if venv.exists():
+        relatorio["venv_pending"] = {
+            "path": str(venv),
+            "running_from_it": _running_from(venv),
+            "detail": (
+                "Not removed here: this process is running from inside it. "
+                "The wrapper that launched this removes it on the way out."
+            ),
+        }
+    return relatorio
