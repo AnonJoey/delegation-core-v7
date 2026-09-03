@@ -196,6 +196,52 @@ def cmd_update(args):
     return 0 if estado == "ok" else 1
 
 
+def cmd_repair_empty_source(args):
+    """Encontra e conserta notas sintetizadas a partir de arquivos sem texto."""
+    from rich.console import Console
+
+    from . import repair
+    from .config import Config
+
+    console = Console()
+    cfg = Config.load()
+    if not cfg.is_configured():
+        console.print("[yellow]Not configured.[/yellow] Run: delegation-core setup")
+        return 1
+
+    if args.apply or args.archive:
+        r = repair.aplicar(cfg, arquivar=args.archive)
+    else:
+        r = repair.encontrar(cfg)
+
+    if not r["found"]:
+        console.print("[green]Nothing to repair.[/green] "
+                      "No processed source turned out to be text-free.")
+        if r["sources_without_note"]:
+            console.print(f"[dim]{len(r['sources_without_note'])} text-free source(s) "
+                          f"with no note of their own.[/dim]")
+        return 0
+
+    console.print(f"[bold]{r['notes_total']} note(s)[/bold] from "
+                  f"{len(r['found'])} text-free source(s):\n")
+    for achado in r["found"]:
+        console.print(f"  [yellow]{achado['source']}[/yellow]")
+        for n in achado["notes"]:
+            console.print(f"    -> {n}")
+
+    if not (args.apply or args.archive):
+        console.print("\n[dim]Nothing was changed. Re-run with --apply to replace each "
+                      "note's body with the source record, or --archive to move them "
+                      "to _dump/_archive/.[/dim]")
+        return 0
+
+    console.print(f"\n[green]{len(r['applied'])} note(s) "
+                  f"{'archived' if args.archive else 'replaced with the source record'}.[/green]")
+    for f in r["failures"]:
+        console.print(f"  [red]failed[/red] {f['note']}: {f['error']}")
+    return 0 if r["status"] == "ok" else 1
+
+
 def cmd_post_install(args):
     """Finish an install: docs, hooks, skills, dashboard, service, clients.
 
@@ -1377,6 +1423,14 @@ def main():
     p_update.add_argument("--no-restart", action="store_true",
                           help="Leave the daemon stopped after updating")
 
+    p_repair = sub.add_parser(
+        "repair-empty-source",
+        help="Find notes synthesised from files that had no extractable text")
+    p_repair.add_argument("--apply", action="store_true",
+                          help="Replace each note's body with the source record")
+    p_repair.add_argument("--archive", action="store_true",
+                          help="Move the notes to _dump/_archive/ instead of replacing")
+
     p_post = sub.add_parser(
         "post-install",
         help="Finish an install: docs, hooks, skills, dashboard, service, clients")
@@ -1563,6 +1617,7 @@ def main():
         "run":      cmd_run,
         "service":  cmd_service,
         "update":   cmd_update,
+        "repair-empty-source": cmd_repair_empty_source,
         "post-install": cmd_post_install,
         "uninstall": cmd_uninstall,
         "mcp-stdio": cmd_mcp_stdio,

@@ -109,9 +109,14 @@ def test_deck_de_imagens_vira_toco(monkeypatch):
 
 
 def test_deck_com_texto_de_verdade_nao_vira_toco(monkeypatch):
+    """Densidade de deck real: os 7 decks legitimos medidos em 03/09 tem entre
+    406 e 755 caracteres por slide. Este fixture usa 420, perto da borda de
+    baixo, para provar que o piso nao morde o documento mais magro que existe
+    de verdade."""
     import sys, types
+    corpo = "Resultados do Q3. " * 23          # ~414 caracteres por slide
     modulo = types.ModuleType("pptx")
-    modulo.Presentation = lambda _p: _PrsFalsa([["Resultados do Q3"], ["Alta de 12%"]])
+    modulo.Presentation = lambda _p: _PrsFalsa([[corpo], [corpo]])
     monkeypatch.setitem(sys.modules, "pptx", modulo)
 
     r = extractor._pptx(Path("q3.pptx"))
@@ -249,3 +254,51 @@ def test_arquivo_com_texto_de_verdade_continua_sintetizando(cenario, monkeypatch
 
     assert chamou["synthesize"] == 1
     assert chamou["classify"] == 1
+
+
+# ── o piso de substancia, medido em documento real ──────────────────────────
+
+from delegation_core.extractor import (  # noqa: E402
+    MIN_CHARS_POR_PAGINA, MIN_CHARS_TOTAL, sem_substancia,
+)
+
+
+def test_os_dois_pisos_ficam_no_vao_medido():
+    """Medido em 03/09 sobre 59 documentos reais: os degenerados param em 56
+    caracteres no total e 14,0 por pagina, e o menor documento de verdade tem
+    4.296 no total e 195,1 por pagina. Um piso fora desse vao esta ajustado a
+    uma das bordas."""
+    assert 56 < MIN_CHARS_TOTAL < 4296
+    assert 14.0 < MIN_CHARS_POR_PAGINA < 195.1
+
+
+@pytest.mark.parametrize("texto,paginas,esperado", [
+    ("", None, True),
+    ("x" * 56, 4, True),                       # G.I.A.pptx, medido
+    ("x" * 199, None, True),
+    ("x" * 200, None, False),
+    ("x" * 4296, 62, False),                   # o menor real medido
+])
+def test_o_piso_total(texto, paginas, esperado):
+    assert sem_substancia(texto, paginas=paginas) is esperado
+
+
+def test_o_piso_por_pagina_pega_o_que_o_total_deixa_passar():
+    """30 slides com numero de slide: 240 caracteres cruzam o piso total e nao
+    sao documento nenhum."""
+    assert sem_substancia("x" * 240, paginas=30) is True
+    assert sem_substancia("x" * 240, paginas=None) is False
+
+
+def test_documento_curto_e_denso_passa():
+    """Uma pagina com 300 caracteres e um memorando, nao residuo."""
+    assert sem_substancia("x" * 300, paginas=1) is False
+
+
+def test_paragrafo_nao_serve_de_unidade():
+    """O menor .docx real medido tem 39,2 caracteres por paragrafo, abaixo do
+    proprio piso. Passar paragrafo como pagina reprovaria documento legitimo."""
+    from delegation_core import extractor
+    import inspect
+    fonte = inspect.getsource(extractor._docx)
+    assert "paginas=" not in fonte, "_docx passou paragrafo como unidade de pagina"

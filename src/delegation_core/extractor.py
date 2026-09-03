@@ -116,7 +116,52 @@ def materialize_if_dataless(path: Path, timeout: float = 10.0) -> bool:
 NO_TEXT_MARKER = "[no extractable text]"
 
 
-def no_text_stub(path: Path, *, formato: str, unidade: str, total: int) -> str:
+#: Piso de substancia: abaixo disto nao ha documento, ha residuo.
+#:
+#: Nao e chute. Medido em 03/09/2026 sobre os documentos reais desta maquina,
+#: 8 `.pptx`, 42 `.pdf` e 9 `.docx`:
+#:
+#:                            degenerados medidos      menor documento real
+#:   total de caracteres      0 e 56                   4.296
+#:   por slide ou pagina      0,0 e 14,0               195,1
+#:
+#: Os dois grupos estao separados por duas ordens de grandeza, entao qualquer
+#: corte no meio do vao serve e nenhum fica ajustado a uma das bordas. 200 no
+#: total e 3,5x o maior degenerado e 21x abaixo do menor documento de verdade;
+#: 40 por unidade e 2,9x o maior degenerado e 4,9x abaixo do menor real.
+#:
+#: O piso por unidade existe para o caso que o total sozinho deixa passar: um
+#: deck exportado como imagem costuma vir com zero texto, mas quando vem com
+#: numero de slide ou rodape, 30 slides de 8 caracteres somam 240 e cruzam o
+#: piso total sem serem documento nenhum.
+#:
+#: Ele so vale onde a unidade e uma pagina, isto e, slide de `.pptx` e pagina de
+#: `.pdf`. Paragrafo de `.docx` nao serve de unidade: o menor arquivo real
+#: medido tem 39,2 caracteres por paragrafo, abaixo do proprio piso, porque
+#: paragrafo e uma unidade pequena demais para a conta significar alguma coisa.
+MIN_CHARS_TOTAL = 200
+MIN_CHARS_POR_PAGINA = 40
+
+
+def sem_substancia(texto: str, *, paginas: int | None = None) -> bool:
+    """O texto extraido e fino demais para justificar uma nota sintetizada?
+
+    A pergunta nao e "esta vazio", e "da para escrever um resumo com topicos,
+    pessoas e decisoes a partir disto". Sao coisas diferentes, e foi a distancia
+    entre as duas que produziu 22 notas de invencao integral: os arquivos nao
+    estavam vazios o bastante para a guarda de vazio pegar, e estavam vazios
+    demais para qualquer sintese ser verdadeira.
+    """
+    n = len((texto or "").strip())
+    if n < MIN_CHARS_TOTAL:
+        return True
+    if paginas and paginas > 0 and n / paginas < MIN_CHARS_POR_PAGINA:
+        return True
+    return False
+
+
+def no_text_stub(path: Path, *, formato: str, unidade: str, total: int,
+                 extraido: int = 0) -> str:
     """O registro de um arquivo do qual nao se extraiu uma linha de texto.
 
     Um arquivo assim nao pode virar nota sintetizada, mas tambem nao deve
@@ -130,8 +175,9 @@ def no_text_stub(path: Path, *, formato: str, unidade: str, total: int) -> str:
         f"File: {path.name}\n"
         f"Format: {formato}\n"
         f"{unidade}: {total}\n"
-        "Nothing in this file carries a text layer, so there is nothing to "
-        "summarise and no note will be synthesised from it.\n"
+        f"Characters extracted: {extraido}\n"
+        "There is not enough text here to summarise, so no note will be "
+        "synthesised from it.\n"
         "To make it searchable, export the text yourself and drop it in as .txt."
     )
 
@@ -241,10 +287,12 @@ def _pdf(path: Path) -> str:
         text = page.extract_text() or ""
         if text.strip():
             pages.append(f"[Page {i + 1}]\n{text.strip()}")
-    if not pages:
+    texto = "\n\n".join(pages)
+    if sem_substancia(texto, paginas=len(reader.pages)):
         return no_text_stub(path, formato="PDF (scanned or image-only)",
-                            unidade="Pages", total=len(reader.pages))
-    return "\n\n".join(pages)
+                            unidade="Pages", total=len(reader.pages),
+                            extraido=len(texto.strip()))
+    return texto
 
 
 def _docx(path: Path) -> str:
@@ -259,10 +307,12 @@ def _docx(path: Path) -> str:
             cells = [cell.text.strip() for cell in row.cells]
             if any(cells):
                 parts.append(" | ".join(cells))
-    if not parts:
-        return no_text_stub(path, formato="Word (no text paragraphs)",
-                            unidade="Paragraphs", total=len(doc.paragraphs))
-    return "\n\n".join(parts)
+    texto = "\n\n".join(parts)
+    if sem_substancia(texto):
+        return no_text_stub(path, formato="Word (almost no text)",
+                            unidade="Paragraphs", total=len(doc.paragraphs),
+                            extraido=len(texto.strip()))
+    return texto
 
 
 def _xlsx(path: Path) -> str:
@@ -286,10 +336,12 @@ def _xlsx(path: Path) -> str:
             parts.append(f"## {sheet_name}\n\n" + "\n".join(rows))
     n_abas = len(wb.sheetnames)
     wb.close()
-    if not parts:
-        return no_text_stub(path, formato="Excel (no filled cells)",
-                            unidade="Sheets", total=n_abas)
-    return "\n\n".join(parts)
+    texto = "\n\n".join(parts)
+    if sem_substancia(texto):
+        return no_text_stub(path, formato="Excel (almost no filled cells)",
+                            unidade="Sheets", total=n_abas,
+                            extraido=len(texto.strip()))
+    return texto
 
 
 def _pptx(path: Path) -> str:
@@ -304,13 +356,15 @@ def _pptx(path: Path) -> str:
         ]
         if texts:
             slides.append(f"[Slide {i}]\n" + "\n".join(texts))
-    if not slides:
-        # Decks exportados como imagem renderizada: cada slide e um grafico e
-        # nao existe uma linha de texto dentro do arquivo. Este era o caso que
-        # nao tinha piso nenhum.
+    texto = "\n\n".join(slides)
+    n_slides = len(prs.slides)
+    if sem_substancia(texto, paginas=n_slides):
+        # Decks exportados como imagem renderizada: cada slide e um grafico. Sem
+        # texto nenhum, ou com so o numero do slide, que da no mesmo.
         return no_text_stub(path, formato="PowerPoint (slides are images)",
-                            unidade="Slides", total=len(prs.slides))
-    return "\n\n".join(slides)
+                            unidade="Slides", total=n_slides,
+                            extraido=len(texto.strip()))
+    return texto
 
 
 # ── Recursive split helpers (v0.3) ────────────────────────────────────────────
