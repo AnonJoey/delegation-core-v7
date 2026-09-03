@@ -50,9 +50,9 @@ def test_texto_de_licenca_no_conteudo():
     "version-final-do-contrato.md",
     "authors-do-artigo.md",
     "notice-de-reuniao.md",
-    "help-para-o-abner.md",
+    "help-para-o-time.md",
     "manifest-de-entrega.md",
-    "license-do-cliente-gazin.md",
+    "license-do-cliente-acme.md",
     "readme-que-escrevi-para-o-time.md",
 ])
 def test_nota_real_com_prefixo_parecido_nao_e_descartada(nome):

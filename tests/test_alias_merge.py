@@ -1,8 +1,8 @@
 """O alias que salva o titulo truncado nao pode ser descartado pelo autor.
 
 `safe_filename` corta o nome do arquivo em 50 caracteres, entao uma nota
-titulada "Descompassos entre o card dos Agentes PMO e o que foi decidido"
-aterrissa no disco como "2026-09-02-Descompassos entre o card dos Agentes PMO e
+titulada "Descompassos entre o cronograma registrado e o que foi decidido"
+aterrissa no disco como "2026-09-02-Descompassos entre o cronograma registrado e
 o que.md". `compose_note` ja gerava um `aliases:` com o titulo inteiro para que
 um link escrito com o titulo real resolvesse.
 
@@ -21,7 +21,7 @@ from __future__ import annotations
 
 from delegation_core.vault import compose_note, safe_filename
 
-TITULO_LONGO = "Descompassos entre o card dos Agentes PMO e o que foi decidido"
+TITULO_LONGO = "Descompassos entre o cronograma registrado e o que foi decidido"
 
 
 def _frontmatter(texto: str) -> str:
@@ -64,14 +64,14 @@ def test_alias_do_autor_em_bloco_nao_engole_o_gerado():
     conteudo = (
         "---\n"
         "aliases:\n"
-        '  - "Card dos Agentes PMO em 02/09"\n'
+        '  - "Card do projeto em 02/09"\n'
         '  - "Sete descompassos do card"\n'
         "---\n\n"
         "## Corpo\n"
     )
     fm = _frontmatter(compose_note(TITULO_LONGO, conteudo, "2026-09-02"))
 
-    assert _e_alias(fm, "Card dos Agentes PMO em 02/09"), "apagou o alias do autor"
+    assert _e_alias(fm, "Card do projeto em 02/09"), "apagou o alias do autor"
     assert _e_alias(fm, "Sete descompassos do card"), "apagou o alias do autor"
     assert _e_alias(fm, TITULO_LONGO), "o alias de truncamento foi descartado"
 
@@ -120,7 +120,7 @@ def test_a_fusao_nao_quebra_o_bloco_do_autor():
     conteudo = (
         "---\n"
         'subtitle: "a versao longa, para humanos"\n'
-        "tags: [soteria, pmo]\n"
+        "tags: [projeto, planejamento]\n"
         "aliases:\n"
         '  - "Um"\n'
         "custom_key:\n"
@@ -131,7 +131,7 @@ def test_a_fusao_nao_quebra_o_bloco_do_autor():
     fm = _frontmatter(compose_note(TITULO_LONGO, conteudo, "2026-09-02"))
 
     assert 'subtitle: "a versao longa, para humanos"' in fm
-    assert "tags: [soteria, pmo]" in fm
+    assert "tags: [projeto, planejamento]" in fm
     assert "custom_key:" in fm
     assert "  nested: valor" in fm
     assert _e_alias(fm, TITULO_LONGO)
@@ -151,14 +151,14 @@ def test_o_alias_gerado_torna_a_nota_resolvivel_pelo_titulo():
     """
     from delegation_core.linker import frontmatter_aliases
 
-    conteudo = '---\naliases:\n  - "Card dos Agentes PMO em 02/09"\n---\n\n## Corpo\n'
+    conteudo = '---\naliases:\n  - "Card do projeto em 02/09"\n---\n\n## Corpo\n'
     nota = compose_note(TITULO_LONGO, conteudo, "2026-09-02")
 
     resolviveis = {a.lower() for a in frontmatter_aliases(nota)}
     assert TITULO_LONGO.lower() in resolviveis, (
         "o link escrito com o titulo completo continua sem resolver"
     )
-    assert "card dos agentes pmo em 02/09" in resolviveis
+    assert "card do projeto em 02/09" in resolviveis
 
 
 DATA = "2026-09-02"
@@ -186,13 +186,13 @@ def test_gera_a_forma_com_data_que_os_links_reais_usam():
 
 
 def test_as_duas_formas_sobrevivem_a_aliases_do_autor():
-    conteudo = '---\naliases:\n  - "Card dos Agentes PMO em 02/09"\n---\n\n## Corpo\n'
+    conteudo = '---\naliases:\n  - "Card do projeto em 02/09"\n---\n\n## Corpo\n'
     nota = compose_note(TITULO_LONGO, conteudo, DATA)
     als = _aliases(nota)
 
     assert f"{DATA}-{TITULO_LONGO}".lower() in als
     assert TITULO_LONGO.lower() in als
-    assert "card dos agentes pmo em 02/09" in als
+    assert "card do projeto em 02/09" in als
 
 
 def test_um_link_com_data_resolve_de_ponta_a_ponta(tmp_path):

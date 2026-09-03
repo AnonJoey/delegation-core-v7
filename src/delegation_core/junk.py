@@ -22,7 +22,7 @@ from pathlib import Path
 # nomes que um usuario deste vault escreveria e que eram DESCARTADOS:
 #   todo-lista-do-projeto.md        install-do-cliente.md
 #   changes-que-precisamos-fazer.md notice-de-reuniao.md
-#   version-final-do-contrato.md    help-para-o-abner.md
+#   version-final-do-contrato.md    help-para-o-time.md
 #   authors-do-artigo.md            manifest-de-entrega.md
 # Todos sumiam do inbox para `_processed/` sem virar nota.
 #

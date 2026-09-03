@@ -73,14 +73,11 @@ e hooks. As outras ~51.000 são vendorizadas e mudá-las custa o re-vendor, o qu
 - `graphbridge.py` (704) — a ponte entre o pipeline vendorizado e o vault.
 - `graph/` — vendorizado. `extract.py` sozinho tem 5.372 linhas.
 
-**Pacote `pmo/`** — os sete Agentes PMO, construídos na noite de 01-02/09.
-Desde 03/09 a leitura da daily passa pelo `engine`, não por cliente próprio.
-
 ## Acoplamento medido
 
 **Mais importados** (mexer aqui mexe em tudo):
 `config` (12 importadores), `vault` (11), `linker` (7), `periodo` (7),
-`embeddings` (6), `extractor` (4), `clickup` (4).
+`embeddings` (6), `extractor` (4).
 
 **Que mais sabem** (candidatos a quebra futura):
 `server` (10 dependências), `dashboard_api` (9), `organizer` (9).

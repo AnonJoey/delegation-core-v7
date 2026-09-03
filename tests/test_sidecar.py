@@ -53,7 +53,7 @@ def test_a_pasta_devolvida_tem_a_caixa_do_vault():
 
 
 def test_subcaminho_e_preservado_com_a_raiz_canonizada():
-    assert sidecar.resolve_folder_hint("reference/Gazin/2026", PASTAS) == "Reference/Gazin/2026"
+    assert sidecar.resolve_folder_hint("reference/Acme/2026", PASTAS) == "Reference/Acme/2026"
     assert sidecar.resolve_folder_hint("sessions/2026", PASTAS) == "Sessions/2026"
 
 
@@ -140,7 +140,7 @@ def test_le_as_chaves_declaradas(tmp_path):
     principal.write_text("x", encoding="utf-8")
     (tmp_path / "a.meta.yaml").write_text(
         "folder_hint: sessions\nno_merge: true\ntype: meeting\n"
-        "client: Gazin\ntopics:\n  - um\n  - dois\n", encoding="utf-8")
+        "client: Acme\ntopics:\n  - um\n  - dois\n", encoding="utf-8")
 
     sc = sidecar.load(principal)
     assert sc["folder_hint"] == "sessions"

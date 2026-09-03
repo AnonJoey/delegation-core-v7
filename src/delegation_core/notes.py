@@ -353,11 +353,10 @@ def compose_note(title: str, content: str, date_str: str) -> str:
     # to a title the filename could not hold. Deferring to the caller's list
     # dropped it entirely, and the note became unlinkable by its own title.
     #
-    # Found in this vault: "Descompassos entre o card dos Agentes PMO e o que
-    # foi decidido" and "Apresentacao Agentes PMO ao Max - digestao da reuniao
-    # de 31-08" both supplied two descriptive aliases of their own, so neither
-    # got the truncation alias, and both are linked-to by their full titles from
-    # other notes. Those links resolve to nothing.
+    # Measured on a real vault: two notes whose titles run past the 50-character
+    # filename limit each supplied two descriptive aliases of their own, so
+    # neither got the truncation alias, and both are linked-to by their full
+    # titles from other notes. Those links resolve to nothing.
     if "aliases" in have:
         for chave, valor in generated:
             if chave == "aliases":
