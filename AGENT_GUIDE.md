@@ -275,9 +275,6 @@ existiu na assinatura). `days` limita a notas tocadas nos ultimos N dias, e
 `tests/test_docs_not_stale.py` falha se esta assinatura voltar a divergir
 do que `server.py` expoe.
 
-```json
-```
-
 **Use `relink_folder_bg` on any folder of real size.** The synchronous tool embeds
 every note in the folder against every other; on a 31-note folder that ran past the
 MCP client's 300-second idle timeout, which aborts the call and drops the connection
