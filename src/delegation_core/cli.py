@@ -132,6 +132,63 @@ def cmd_run(args):
     run_server(cfg)
 
 
+def cmd_update(args):
+    """Bring the installed package up to date with its source."""
+    from rich.console import Console
+
+    from . import installer
+
+    console = Console()
+    resultado = installer.update(check_only=args.check, restart=not args.no_restart)
+    estado = resultado.get("status")
+
+    if estado == "cannot_locate_source":
+        console.print(f"[red]Cannot update:[/red] {resultado['detail']}")
+        return 1
+    if estado == "refused_dirty_checkout":
+        console.print(f"[yellow]Refused:[/yellow] {resultado['detail']}")
+        return 1
+
+    if args.check:
+        raiz = resultado.get("root")
+        passo = resultado["steps"][0]
+        console.print(f"[bold]version[/bold]: {resultado.get('version')}")
+        console.print(f"[bold]source[/bold]:  {raiz}"
+                      + ("  (editable)" if passo.get("editable") else ""))
+        if passo.get("git"):
+            atras = passo.get("behind")
+            console.print(f"[bold]branch[/bold]:  {passo.get('branch')} @ {passo.get('commit')}")
+            if passo.get("upstream") is None:
+                console.print("[yellow]no upstream branch: nothing to compare against[/yellow]")
+            elif atras:
+                console.print(f"[yellow]{atras} commit(s) behind {passo['upstream']}[/yellow]")
+            else:
+                console.print("[green]up to date[/green]")
+        else:
+            console.print("[yellow]not a git checkout: cannot tell whether it is current[/yellow]")
+        return 0
+
+    for passo in resultado.get("steps", []):
+        marca = "[green]OK[/green]  " if passo["ok"] else "[red]FALHOU[/red]"
+        console.print(f"  {marca} {passo['step']}")
+
+    if estado == "ok":
+        console.print(f"\n[green]Updated.[/green] {resultado.get('version_before')} "
+                      f"-> run `delegation-core status` to confirm the new version.")
+    else:
+        console.print(f"\n[red]{estado}[/red]: {resultado.get('detail', '')}")
+
+    sobras = resultado.get("stale_dist_copies") or []
+    if sobras:
+        console.print(
+            f"\n[dim]Note: {', '.join(sobras)} are byte-identical to the files they "
+            f"sit beside. Older installers wrote those whenever the destination "
+            f"merely existed, so they signal a customisation that was never made. "
+            f"Safe to delete.[/dim]")
+
+    return 0 if estado == "ok" else 1
+
+
 def cmd_service(args):
     """Manage the daemon's per-user service registration."""
     from rich.console import Console
@@ -1188,6 +1245,13 @@ def main():
         "--recalibrate", action="store_true",
         help="Reset and rerun tok/sec auto-calibration before starting (use after swapping models)",
     )
+    p_update = sub.add_parser(
+        "update", help="Update the installed package from its source, stopping the daemon first")
+    p_update.add_argument("--check", action="store_true",
+                          help="Report what would change; touch nothing")
+    p_update.add_argument("--no-restart", action="store_true",
+                          help="Leave the daemon stopped after updating")
+
     p_service = sub.add_parser(
         "service", help="Install/remove the daemon as a per-user background service")
     p_service.add_argument("action", choices=["install", "uninstall", "status"])
@@ -1357,6 +1421,7 @@ def main():
         "setup":    cmd_setup,
         "run":      cmd_run,
         "service":  cmd_service,
+        "update":   cmd_update,
         "clients":  cmd_clients,
         "status":   cmd_status,
         "doctor":   cmd_doctor,
