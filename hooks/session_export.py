@@ -27,6 +27,7 @@ Hook registration (add to ~/.claude/settings.json):
 
 import json
 import platform
+import re
 import subprocess
 import sys
 import os
@@ -194,6 +195,50 @@ def _session_date(messages: list[dict]) -> str:
     return datetime.now().strftime("%Y-%m-%d")
 
 
+# Credential shapes that must never reach the vault. The transcript is written
+# to disk in plain text and then indexed for semantic search, so a token pasted
+# into a conversation would otherwise sit there readable, searchable and
+# retrievable by every future session, forever.
+#
+# Not hypothetical: a ClickUp personal token was pasted into a session on
+# 02/09/2026 and this very hook would have persisted it. The redaction was
+# written into the installed copy that same day and never made it back into the
+# repository, so every fresh install kept shipping the version without it.
+#
+# Deliberately dumb pattern matching. It is a floor, not a guarantee: it cannot
+# recognise a secret that has no distinctive shape, so a credential that reaches
+# a transcript should still be rotated. Redacting the formatted text (rather
+# than each message) means anything the formatter copies into frontmatter or a
+# title is covered too.
+_SEGREDOS = [
+    (re.compile(r"\bpk_\d+_[A-Z0-9]{20,}\b"), "[TOKEN CLICKUP REMOVIDO]"),
+    (re.compile(r"\bsk-ant-[A-Za-z0-9_\-]{20,}\b"), "[CHAVE ANTHROPIC REMOVIDA]"),
+    (re.compile(r"\bsk-[A-Za-z0-9]{32,}\b"), "[CHAVE OPENAI REMOVIDA]"),
+    (re.compile(r"\bgh[pousr]_[A-Za-z0-9]{30,}\b"), "[TOKEN GITHUB REMOVIDO]"),
+    (re.compile(r"\bxox[baprs]-[A-Za-z0-9\-]{10,}\b"), "[TOKEN SLACK REMOVIDO]"),
+    (re.compile(r"\bAKIA[0-9A-Z]{16}\b"), "[CHAVE AWS REMOVIDA]"),
+    (re.compile(r"\beyJ[A-Za-z0-9_\-]{10,}\.[A-Za-z0-9_\-]{10,}\.[A-Za-z0-9_\-]{10,}\b"),
+     "[JWT REMOVIDO]"),
+    (re.compile(r"-----BEGIN [A-Z ]*PRIVATE KEY-----.*?-----END [A-Z ]*PRIVATE KEY-----",
+                re.S), "[CHAVE PRIVADA REMOVIDA]"),
+]
+
+
+def _redigir(texto):
+    """Strip credential-shaped strings. Returns the text and how many it removed.
+
+    The count is returned rather than discarded because silent redaction teaches
+    nobody anything: a transcript that had a token in it is a transcript whose
+    token needs rotating, and the person can only act on that if the note says
+    so.
+    """
+    total = 0
+    for rx, marca in _SEGREDOS:
+        texto, n = rx.subn(marca, texto)
+        total += n
+    return texto, total
+
+
 def _format_markdown(messages: list[dict], session_id: str, cwd: str) -> str:
     date_str = _session_date(messages)
     time_str = datetime.now().strftime("%H:%M")
@@ -293,9 +338,28 @@ def main():
     # since the later export is the more complete one. The write below is atomic
     # (.tmp + os.replace), so a crash mid-write cannot truncate the existing
     # note either.
-    content = _format_markdown(messages, session_id, cwd)
+    # Redact each message before building the markdown so that truncating the
+    # title at 60 chars never slices a secret across its pattern boundary.
+    total_removidos = 0
+    redacted_messages = []
+    for msg in messages:
+        txt, n = _redigir(msg.get("text", ""))
+        total_removidos += n
+        m_copy = dict(msg)
+        m_copy["text"] = txt
+        redacted_messages.append(m_copy)
+
+    content = _format_markdown(redacted_messages, session_id, cwd)
     try:
         tmp = dest.with_suffix(".tmp")
+        # Redact BEFORE the first write: the .tmp file is on the same disk and
+        # would hold the secret in cleartext for the moment it existed.
+        content, extra = _redigir(content)
+        removidos = total_removidos + extra
+        if removidos:
+            content = content.replace(
+                "type: session-transcript",
+                f"type: session-transcript\nsegredos_removidos: {removidos}", 1)
         tmp.write_text(content, encoding="utf-8")
         os.replace(tmp, dest)
         sys.stderr.write(
