@@ -38,13 +38,48 @@ def cfg(monkeypatch, tmp_path):
     return c
 
 
-# ── vault folders ────────────────────────────────────────────────────────────
+def _caixa_e_significativa(base) -> bool:
+    """Sonda o sistema de arquivos em vez de deduzir pelo nome do sistema.
 
-def test_case_variant_folder_is_an_error_with_the_invisible_note_count(cfg):
-    """The exact live bug: a lowercase sessions/ beside the configured Sessions/,
-    holding notes that no indexed path ever reaches."""
+    Um mac pode ter volume case-sensitive e um Linux pode montar um que nao
+    seja, entao `platform.system()` responde a pergunta errada. Criar e
+    consultar e a unica resposta que vale para o diretorio onde o teste vai
+    de fato escrever.
+    """
+    sonda = base / "_SondaDeCaixa"
+    sonda.mkdir()
+    try:
+        return not (base / "_sondadecaixa").exists()
+    finally:
+        sonda.rmdir()
+
+
+@pytest.fixture
+def pasta_sombra(cfg):
+    """A pasta `sessions/` ao lado da `Sessions/` configurada.
+
+    Este cenario nao pode existir onde a caixa nao e significativa: o `mkdir`
+    levanta `FileExistsError` sobre a propria pasta configurada. Em APFS, que e
+    case-insensitive por padrao, os dois testes que dependem dele falhavam com
+    `[Errno 17] File exists`, duas falhas que nao diziam nada sobre o `doctor`.
+
+    Pulado onde nao cabe, e identico ao que era onde cabe.
+    """
+    if not _caixa_e_significativa(cfg.vault):
+        pytest.skip("sistema de arquivos case-insensitive: a pasta-sombra nao "
+                    "pode existir aqui, e o defeito que estes testes cobrem "
+                    "tambem nao")
     stray = cfg.vault / "sessions"
     stray.mkdir()
+    return stray
+
+
+# ── vault folders ────────────────────────────────────────────────────────────
+
+def test_case_variant_folder_is_an_error_with_the_invisible_note_count(cfg, pasta_sombra):
+    """The exact live bug: a lowercase sessions/ beside the configured Sessions/,
+    holding notes that no indexed path ever reaches."""
+    stray = pasta_sombra
     for i in range(3):
         (stray / f"t{i}.md").write_text("x", encoding="utf-8")
 
@@ -369,13 +404,59 @@ def test_fts_integrity_detected_and_rebuilt(cfg, tmp_path):
 
 # ── aggregate ────────────────────────────────────────────────────────────────
 
-def test_run_all_surfaces_the_worst_status(cfg):
-    stray = cfg.vault / "sessions"
-    stray.mkdir()
-    (stray / "a.md").write_text("x", encoding="utf-8")
+def test_run_all_surfaces_the_worst_status(cfg, pasta_sombra):
+    (pasta_sombra / "a.md").write_text("x", encoding="utf-8")
 
     result = doctor.run_all(cfg)
 
     assert result["status"] == "error"
     assert result["counts"]["error"] >= 1
     assert {c["check"] for c in result["checks"]} >= {"engine_mode", "vault_folders", "hook_drift", "orphan_segments", "fts_integrity"}
+
+
+# ── sentinela e fallback, que se contradizem em silencio ────────────────────
+
+def _sentinela(cfg, ligada: bool):
+    alvo = doctor.CONFIG_DIR / "no_auto_reindex"
+    alvo.parent.mkdir(parents=True, exist_ok=True)
+    if ligada:
+        alvo.touch()
+    else:
+        alvo.unlink(missing_ok=True)
+    return alvo
+
+
+def test_sem_sentinela_esta_tudo_bem(cfg):
+    _sentinela(cfg, False)
+    assert doctor.check_local_fallback(cfg)["status"] == "ok"
+
+
+def test_sentinela_com_fallback_ligado_e_aviso(cfg):
+    """As duas configuracoes sao legitimas isoladas. Juntas, quem pediu para o
+    daemon ser o unico escritor recebe um segundo escritor pelo outro caminho."""
+    _sentinela(cfg, True)
+    cfg.allow_local_index_fallback = True
+    r = doctor.check_local_fallback(cfg)
+
+    assert r["status"] == "warn"
+    assert "allow_local_index_fallback" in r["detail"]
+    assert "fix" in r
+
+
+def test_sentinela_com_fallback_desligado_e_coerente(cfg):
+    _sentinela(cfg, True)
+    cfg.allow_local_index_fallback = False
+    assert doctor.check_local_fallback(cfg)["status"] == "ok"
+
+
+def test_o_check_entra_no_run_all(cfg):
+    nomes = {c["check"] for c in doctor.run_all(cfg)["checks"]}
+    assert "local_fallback" in nomes
+
+
+def test_o_aviso_nao_derruba_o_status_geral_para_erro(cfg):
+    """E aviso, nao erro: a maquina funciona, so nao faz o que a pessoa achou
+    que tinha pedido."""
+    _sentinela(cfg, True)
+    cfg.allow_local_index_fallback = True
+    assert doctor.check_local_fallback(cfg)["status"] != "error"
