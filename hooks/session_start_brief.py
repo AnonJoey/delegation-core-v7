@@ -144,6 +144,63 @@ def _trigger_reindex() -> bool:
         return False
 
 
+
+#: Acima de quantas notas numa mesma CORRIDA o brief para de listar e resume.
+#: Escolhido por medicao: no vault desta maquina os minutos com ate 20 notas
+#: somam 285 de 8.596 e sao escrita plausivel de uma pessoa ou de um agente,
+#: enquanto quinze minutos com 201+ notas cada somam 7.557, ou 88% do vault.
+LOTE_MINIMO = 20
+
+#: Quanto silencio separa duas corridas. Um passe de relink escreve nota atras
+#: de nota; uma pessoa nao. Medido sobre as 256 notas tocadas neste vault depois
+#: das 14:00 de 03/09, variando o intervalo:
+#:     <= 2s : 1 lote,  229 soltas   (o passe se fragmenta todo)
+#:     <=10s : 3 lotes, 102 soltas
+#:     <=20s : 4 lotes,  25 soltas
+#:     <=30s : 5 lotes,   2 soltas   <-- e as duas sao as escritas de verdade
+#:     <=60s : 3 lotes,   2 soltas   (mas engole uma nota escrita 50s depois)
+LOTE_INTERVALO_SEG = 30
+
+
+def _separar_lotes(new_notes):
+    """Divide as notas entre CORRIDAS contiguas e escrita avulsa.
+
+    Devolve ([(inicio, fim, quantas), ...], [(mtime, arquivo), ...]).
+
+    Agrupa por continuidade e nao por minuto de calendario, e a diferenca foi
+    medida e nao argumentada. Das 256 notas tocadas neste vault depois das 14:00
+    de 03/09:
+
+        por minuto de calendario  -> 132 notas sobravam "soltas"
+        por corrida de 60s        -> 3 corridas (54, 145 e 55 notas) e
+                                     DUAS soltas
+
+    E as duas soltas sao exatamente as duas notas escritas de verdade naquele
+    dia. Um relink que atravessa 15:03 a 15:28 e UM evento, nao vinte e cinco.
+    """
+    ordenadas = sorted(new_notes)
+    corridas, atual = [], []
+    for item in ordenadas:
+        if atual and item[0] - atual[-1][0] > LOTE_INTERVALO_SEG:
+            corridas.append(atual)
+            atual = []
+        atual.append(item)
+    if atual:
+        corridas.append(atual)
+
+    lotes, soltas = [], []
+    for corrida in corridas:
+        if len(corrida) > LOTE_MINIMO:
+            inicio = datetime.fromtimestamp(corrida[0][0]).strftime("%Y-%m-%d %H:%M")
+            fim = datetime.fromtimestamp(corrida[-1][0]).strftime("%H:%M")
+            lotes.append((inicio, fim, len(corrida)))
+        else:
+            soltas.extend(corrida)
+    lotes.sort(reverse=True)
+    soltas.sort(reverse=True)
+    return lotes, soltas
+
+
 def main():
     config = _load_json(CONFIG_PATH)
     vault_path = config.get("vault_path", "")
@@ -226,17 +283,27 @@ def main():
     lines = ["## Vault activity since your last Claude Code session"]
 
     if new_notes:
+        lotes, soltas = _separar_lotes(new_notes)
         lines.append("")
+        # NAO diz mais "may be from Claude Desktop/Cowork or other sessions via
+        # export_session/write_note". O criterio aqui e `mtime > last_check` e
+        # mais nada: quem mexeu no arquivo, este hook nao sabe. Dizia que sabia,
+        # e o que ele estava atribuindo a outras sessoes era, na maioria, o
+        # relink do proprio delegation-core reescrevendo `## Related`.
         lines.append(
-            "New or updated notes (may be from Claude Desktop/Cowork or other sessions "
-            "via export_session/write_note):"
+            "Files whose mtime changed since then. This includes notes rewritten "
+            "by delegation-core's own relink/maintenance passes, which is most of "
+            "any large batch below:"
         )
-        for mtime, f in new_notes[:MAX_NOTES]:
+        for mtime, f in soltas[:MAX_NOTES]:
             rel = f.relative_to(vault)
             when = datetime.fromtimestamp(mtime).strftime("%Y-%m-%d %H:%M")
             lines.append(f"- `{rel}` ({when})")
-        if len(new_notes) > MAX_NOTES:
-            lines.append(f"- ...and {len(new_notes) - MAX_NOTES} more")
+        if len(soltas) > MAX_NOTES:
+            lines.append(f"- ...and {len(soltas) - MAX_NOTES} more")
+        for inicio, fim, quantas in lotes:
+            lines.append(f"- **lote de {quantas} notas** entre {inicio} e {fim} "
+                         f"— assinatura de um passe da propria ferramenta")
         if reindex_triggered:
             lines.append("")
             lines.append("*(search index updating in background)*")
