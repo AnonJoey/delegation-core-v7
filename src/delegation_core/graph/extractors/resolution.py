@@ -25,6 +25,39 @@ _JS_RESOLVE_EXTS = (".ts", ".tsx", ".mts", ".cts", ".svelte", ".js", ".jsx", ".m
 
 _JS_INDEX_FILES = ("index.ts", "index.tsx", "index.svelte", "index.js", "index.jsx", "index.mjs")
 
+def _dentro_do_root(caminho: Path, root: "Path | None") -> bool:
+    """O alvo resolvido cai dentro de `root`? Sem root, nada a conferir.
+
+    Guarda unica para os resolvedores de import. Antes existia UMA contencao
+    neste arquivo, `_contained_in_package`, so para o `exports` de package.json,
+    enquanto os resolvedores de include em C, de require em Lua e de import em
+    JS/TS nao tinham nenhuma. Os dois primeiros ja foram fechados; este helper e
+    o mecanismo comum para o terceiro.
+
+    A travessia por `..` num import relativo sai do repositorio varrido, medido:
+
+        import "../../fora"  ->  <acima do repo>/fora.ts     resolve e vira no
+        import "../../x.txt" ->  <acima do repo>/x.txt       idem
+
+    O `source_file` do no passa a apontar para fora do que o usuario mandou
+    varrer. Conter exige saber onde o repositorio comeca, e `..` e legitimo
+    dentro dele, entao cortar por contagem de niveis seria chute.
+
+    DIVIDA CONHECIDA, a mesma do include em C: os doze chamadores de hoje nao
+    tem o root a mao, porque os extractors sao invocados por um protocolo de
+    handler de assinatura fixa e nao existe raiz de scan em nivel de modulo.
+    O parametro esta pronto e testado nos tres resolvedores; falta o fio. Foi
+    deixado assim de proposito em vez de fiar metade dos doze, que daria
+    contencao aparente.
+    """
+    if root is None:
+        return True
+    try:
+        return caminho.resolve().is_relative_to(Path(root).resolve())
+    except (OSError, ValueError):
+        return False
+
+
 def _resolve_js_import_path(candidate: Path) -> Path:
     """Resolve a JS/TS/Svelte import target to a local file when it exists."""
     candidate = Path(os.path.normpath(candidate))
@@ -565,7 +598,8 @@ def _nao_diretorio(resolvido: Path) -> "Path | None":
     return None if resolvido.is_dir() else resolvido
 
 
-def _resolve_js_module_path(raw: str | Path, start_dir: Path | None = None) -> Path | None:
+def _resolve_js_module_path(raw: str | Path, start_dir: Path | None = None,
+                            root: "Path | None" = None) -> Path | None:
     """Resolve a JS/TS module path or specifier to a local source file.
 
     With a Path argument this preserves the path-based helper API used by
@@ -573,12 +607,17 @@ def _resolve_js_module_path(raw: str | Path, start_dir: Path | None = None) -> P
     module specifiers including relative paths, tsconfig aliases, and workspace
     packages.
     """
+    def _ok(resolvido: "Path | None") -> "Path | None":
+        if resolvido is None or not _dentro_do_root(resolvido, root):
+            return None
+        return resolvido
+
     if isinstance(raw, Path):
-        return _nao_diretorio(_resolve_js_import_path(raw))
+        return _ok(_nao_diretorio(_resolve_js_import_path(raw)))
     if start_dir is None:
-        return _nao_diretorio(_resolve_js_import_path(Path(raw)))
+        return _ok(_nao_diretorio(_resolve_js_import_path(Path(raw))))
     if raw.startswith("."):
-        return _nao_diretorio(_resolve_js_import_path(start_dir / raw))
+        return _ok(_nao_diretorio(_resolve_js_import_path(start_dir / raw)))
 
     aliases = _load_tsconfig_aliases(start_dir)
     hit = _resolve_tsconfig_alias(raw, aliases)
@@ -587,7 +626,8 @@ def _resolve_js_module_path(raw: str | Path, start_dir: Path | None = None) -> P
 
     return _resolve_workspace_import(raw, start_dir)
 
-def _resolve_js_import_target(raw: str, str_path: str) -> "tuple[str, Path | None] | None":
+def _resolve_js_import_target(raw: str, str_path: str,
+                              root: "Path | None" = None) -> "tuple[str, Path | None] | None":
     """Resolve a JS/TS import path string to (target_nid, resolved_path).
 
     Handles relative paths, tsconfig path aliases, workspace packages, and
@@ -596,7 +636,7 @@ def _resolve_js_import_target(raw: str, str_path: str) -> "tuple[str, Path | Non
     """
     if not raw:
         return None
-    resolved_path = _resolve_js_module_path(raw, Path(str_path).parent)
+    resolved_path = _resolve_js_module_path(raw, Path(str_path).parent, root)
     if resolved_path is not None:
         return _make_id(str(resolved_path)), resolved_path
     module_name = raw.split("/")[-1]
@@ -648,12 +688,8 @@ def _resolve_c_include_path(raw: str, str_path: str, root: "Path | None" = None)
     # extract.py e o de objc.py) NAO tem o root a mao e passam None, entao a
     # travessia por `..` segue aberta ate alguem fiar o root ate eles. Esta
     # escrito aqui em vez de ficar por corrigir em silencio.
-    if root is not None:
-        try:
-            if not candidate.is_relative_to(Path(root).resolve()):
-                return None
-        except (OSError, ValueError):
-            return None
+    if not _dentro_do_root(candidate, root):
+        return None
 
     return candidate
 
