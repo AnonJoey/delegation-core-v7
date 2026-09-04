@@ -39,6 +39,7 @@ v0.7.0 additions:
 
 import json
 import logging
+import os
 import secrets
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
@@ -429,15 +430,43 @@ class Config:
         return cls()
 
     def save(self):
+        """Persist the config, atomically, never leaving a half-written one.
+
+        `write_text` truncates the destination before writing, so a process that
+        dies mid-write leaves a config that `load()` cannot parse — and `load()`
+        answers an unparseable file with `cls()`, meaning DEFAULTS, meaning no
+        vault_path, meaning "not configured". That is the exact state that took
+        this machine out of service on 2026-09-02 (by a different cause: a test
+        that called calibrate() and wrote a real config with a tmp vault_path).
+        The conftest guard in the test suite exists because of that day.
+
+        Six other state files in this package already write tmp+fsync+replace,
+        each with a comment explaining this failure mode — localqueue, jobs,
+        tracker, windows, ingest, clients. This one, the file the daemon cannot
+        start without, was the one left out.
+
+        The 0600 goes on the temporary file BEFORE the replace, not on the
+        destination after it. server_token lives in here, and writing first and
+        chmod-ing second leaves a window where the secret sits at the umask
+        default. chmod is a no-op for this purpose on Windows, where the user
+        profile directory is what actually restricts access.
+        """
         CONFIG_DIR.mkdir(parents=True, exist_ok=True)
-        CONFIG_FILE.write_text(json.dumps(asdict(self), indent=2), encoding="utf-8")
-        # server_token lives in here, so the file is a secret now. Best-effort:
-        # chmod is a no-op for this purpose on Windows, where the user profile
-        # directory is what actually restricts access.
+        dados = json.dumps(asdict(self), indent=2)
+        tmp = CONFIG_FILE.with_suffix(".json.tmp")
         try:
-            CONFIG_FILE.chmod(0o600)
-        except OSError:
-            pass
+            with tmp.open("w", encoding="utf-8") as fh:
+                try:
+                    os.chmod(fh.fileno(), 0o600)
+                except (OSError, AttributeError):
+                    pass
+                fh.write(dados)
+                fh.flush()
+                os.fsync(fh.fileno())
+            os.replace(tmp, CONFIG_FILE)
+        except Exception:
+            tmp.unlink(missing_ok=True)
+            raise
 
     def ensure_server_token(self) -> str:
         """Return the bearer token, generating and persisting one on first call.

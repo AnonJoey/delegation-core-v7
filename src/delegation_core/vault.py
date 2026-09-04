@@ -30,6 +30,7 @@ v0.12 improvements:
 
 import json
 import logging
+import os
 import re
 import threading
 from datetime import datetime
@@ -748,16 +749,38 @@ class VaultManager:
         if p.exists():
             try:
                 return json.loads(p.read_text(encoding="utf-8"))
-            except Exception:
-                pass
+            except Exception as e:
+                # Was `except Exception: pass`, completely silent. Answering {}
+                # is the right call -- every note looks unstamped and the next
+                # run re-embeds it, which is correct, just slow -- but the
+                # SYMPTOM is an "incremental" reindex that runs for minutes with
+                # nothing anywhere saying why. This file holds 8.594 stamps and
+                # 634 KB on this vault; the run-time history has a 642.3s entry.
+                logger.warning(
+                    "index state at %s is unreadable (%s) - every note will be "
+                    "treated as unstamped and re-embedded on the next reindex", p, e)
         return {}
 
     def _save_index_state(self, state: dict[str, float]):
+        """Atomic: a torn write here costs a full re-embed of the whole vault.
+
+        `write_text` truncates first, and this file is 634 KB on this machine,
+        so the window is not theoretical. `_load_index_state` reads a damaged
+        file as "nothing is stamped".
+        """
+        destino = self._index_state_path()
+        tmp = destino.with_suffix(".json.tmp")
         try:
-            self._index_state_path().write_text(
-                json.dumps(state, indent=2), encoding="utf-8"
-            )
+            with tmp.open("w", encoding="utf-8") as fh:
+                json.dump(state, fh, indent=2)
+                fh.flush()
+                os.fsync(fh.fileno())
+            os.replace(tmp, destino)
         except Exception as e:
+            try:
+                tmp.unlink(missing_ok=True)
+            except OSError:
+                pass
             logger.warning("Could not save index state: %s", e)
 
     def stamp_indexed(self, rel_paths: list[str]) -> int:
