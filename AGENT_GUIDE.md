@@ -197,9 +197,18 @@ For large inboxes use `run_maintenance_bg()` instead.
 → { "classified": ["notes.md → Reference/"], "merged": [], "errors": [], "junk": [] }
 ```
 
-`junk` lists boilerplate files (licenses, READMEs, `requirements*.txt`, etc.) that were
-moved to `_processed/` without being filed as notes — report these to the user as "skipped,
-not notes" rather than as errors.
+The result carries **two** different "not filed as a note" lists, with different
+destinations, and only one of them empties the inbox:
+
+- `junk` — a file in a SUPPORTED format whose name or content is boilerplate
+  (`README.md`, `requirements.txt`, `CHANGELOG`). Moved to `_processed/`.
+- `skipped` — a file whose EXTENSION is not supported at all (`LICENSE` with no
+  extension, `.png`, `.zip`). **Left where it is**, on purpose: `vault_inbox_status()`
+  reports the same files under `unsupported`, and the right response is to tell the
+  user what to convert them to, not to move their file away.
+
+Report both to the user as "skipped, not notes" rather than as errors. Do not expect a
+`LICENSE` file under `junk`: with no extension it is `skipped`.
 
 ---
 

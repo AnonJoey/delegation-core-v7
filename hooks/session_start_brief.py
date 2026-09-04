@@ -162,6 +162,25 @@ LOTE_MINIMO = 20
 LOTE_INTERVALO_SEG = 30
 
 
+
+def _marca_do_inbox(inbox) -> str:
+    """Uma impressao do inbox: nome e mtime de cada arquivo, ordenados.
+
+    Serve para responder "mudou?" sem saber nada sobre formatos. Inclui o mtime
+    porque substituir um arquivo pelo mesmo nome e material novo.
+    """
+    if not inbox.exists():
+        return ""
+    try:
+        itens = sorted(
+            f"{f.name}:{int(f.stat().st_mtime)}"
+            for f in inbox.iterdir() if f.is_file()
+        )
+    except OSError:
+        return ""
+    return "|".join(itens)
+
+
 def _separar_lotes(new_notes):
     """Divide as notas entre CORRIDAS contiguas e escrita avulsa.
 
@@ -223,11 +242,25 @@ def main():
     # _inbox status (cheap, stdlib only)
     inbox = vault / "_inbox"
     inbox_count = sum(1 for f in inbox.iterdir() if f.is_file()) if inbox.exists() else 0
+    inbox_marca = _marca_do_inbox(inbox)
 
     # Auto-trigger maintenance for a non-empty inbox, rate-limited so a burst
     # of session starts doesn't spawn a pile of overlapping jobs.
     maintenance_triggered = False
-    if inbox_count and (now - last_maintenance) > MAINTENANCE_COOLDOWN:
+    # `inbox_marca != state.get(...)` e a condicao nova, e ela existe por um
+    # laco medido: um arquivo cuja EXTENSAO nao e suportada fica no _inbox para
+    # sempre -- o organizer o lista em `skipped` e nao o move, ao contrario do
+    # `junk`, que vai para _processed/. Deixa-lo no lugar e o desenho e esta no
+    # AGENT_GUIDE ("tell the user which files cannot be processed"). O que nao
+    # pode e o gatilho aqui reagir a "o inbox tem QUALQUER arquivo": um .png
+    # esquecido fazia `delegation-core maintain` rodar a cada 30 minutos, para
+    # sempre, sem nunca poder mudar nada.
+    #
+    # A pergunta certa e "o inbox MUDOU?", e ela nao exige saber quais formatos
+    # existem. Este hook e stdlib-only e nao pode importar SUPPORTED; copiar a
+    # lista para ca seria criar a copia que deriva.
+    if (inbox_count and inbox_marca != state.get("inbox_marca")
+            and (now - last_maintenance) > MAINTENANCE_COOLDOWN):
         maintenance_triggered = _trigger_maintenance()
         if maintenance_triggered:
             state["last_maintenance_trigger"] = now
@@ -256,6 +289,7 @@ def main():
         if reindex_triggered:
             state["last_reindex_trigger"] = now
 
+    state["inbox_marca"] = inbox_marca
     state["last_check"] = now
     try:
         STATE_PATH.write_text(json.dumps(state), encoding="utf-8")
