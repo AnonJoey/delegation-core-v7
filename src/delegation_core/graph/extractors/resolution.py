@@ -459,6 +459,32 @@ def _resolve_workspace_import(raw: str, start_dir: Path) -> Path | None:
                 return resolved
     return None
 
+def _nao_diretorio(resolvido: Path) -> "Path | None":
+    """None quando a resolucao caiu num DIRETORIO existente.
+
+    `_resolve_js_import_path` devolve o candidato intacto quando nada casa, o que
+    e o comportamento fantasma que o projeto usa de proposito para import
+    externo ou local pendurado. Para um caminho inexistente isso e honesto: ele
+    nao e arquivo e ninguem o confunde com um. Para um DIRETORIO nao e, porque o
+    caminho existe, e quem conferir com `exists()` em vez de `is_file()` aceita
+    uma pasta como modulo. Medido, antes desta guarda:
+
+        import "./comp"       -> src/comp/index.ts   ARQUIVO
+        import "./vazio"      -> src/vazio           DIRETORIO
+        import "./naoexiste"  -> src/naoexiste       inexistente (fantasma)
+
+    Os tres voltavam pela mesma porta e o chamador nao tinha como separar o do
+    meio dos outros dois sem ir ao disco. Um import de diretorio sem arquivo de
+    indice nao resolve nem para o Node nem para o tsc, entao classifica-lo como
+    NAO resolvido e o que corresponde ao que acontece de verdade: ele segue para
+    o ramo de externo/pendurado, que existe exatamente para isso.
+
+    Os outros dois chamadores de `_resolve_js_import_path` ja conferiam
+    `is_file()`; era so este caminho que ficava sem guarda.
+    """
+    return None if resolvido.is_dir() else resolvido
+
+
 def _resolve_js_module_path(raw: str | Path, start_dir: Path | None = None) -> Path | None:
     """Resolve a JS/TS module path or specifier to a local source file.
 
@@ -468,11 +494,11 @@ def _resolve_js_module_path(raw: str | Path, start_dir: Path | None = None) -> P
     packages.
     """
     if isinstance(raw, Path):
-        return _resolve_js_import_path(raw)
+        return _nao_diretorio(_resolve_js_import_path(raw))
     if start_dir is None:
-        return _resolve_js_import_path(Path(raw))
+        return _nao_diretorio(_resolve_js_import_path(Path(raw)))
     if raw.startswith("."):
-        return _resolve_js_import_path(start_dir / raw)
+        return _nao_diretorio(_resolve_js_import_path(start_dir / raw))
 
     aliases = _load_tsconfig_aliases(start_dir)
     hit = _resolve_tsconfig_alias(raw, aliases)
