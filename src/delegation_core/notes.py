@@ -206,10 +206,22 @@ def resolve_in_vault(vault_root: Path, rel_path: str) -> Path | None:
     in relink_folder and in the dashboard's note route — so the check lives in
     one place now rather than being re-typed at each new call site.
     """
-    target = (vault_root / rel_path).resolve()
+    # O `resolve()` fica DENTRO do try. Ele levanta por conta propria para
+    # entradas que nao chegam a ser um caminho -- um `\x00` no meio da string da
+    # ValueError("embedded null character"), e um componente absurdamente longo
+    # da OSError -- e o contrato desta funcao promete None, nao excecao.
+    #
+    # MEDIDO ponta a ponta contra o dashboard, que passa `dir` da query string
+    # direto para list_notes_in:
+    #     dir=../../etc      -> HTTP 400  "Path outside the vault"
+    #     dir=Proc%00edures  -> HTTP 500  "lstat: embedded null character in path"
+    # A mesma pergunta com duas respostas, e a segunda vaza detalhe de
+    # implementacao. Um caminho com byte nulo nao e mais utilizavel que um
+    # `../../etc` e merece a mesma resposta limpa.
     try:
+        target = (vault_root / rel_path).resolve()
         target.relative_to(vault_root.resolve())
-    except ValueError:
+    except (ValueError, OSError):
         return None
     return target
 
