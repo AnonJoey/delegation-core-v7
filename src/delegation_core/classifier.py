@@ -78,6 +78,11 @@ async def classify(engine, folders: list[str], filename: str, content: str, fmt:
             max_tokens=engine.budget("classify", 8),
             temperature=0.1,
             task="classify",
+            # Este chamador ja era seguro -- valida a resposta contra a lista de
+            # pastas e cai no fallback quando nao casa -- mas declarar a carga
+            # troca "seguro por acidente" por "seguro por construcao", e tira o
+            # aviso de chamador esquecido do log.
+            fallback_payload=fallback,
         )
         candidate = re.sub(r"[^a-z0-9_/-]", "", result.strip().lower().split()[0])
         # The candidate is lowercased above, so it can only ever match a folder

@@ -264,6 +264,7 @@ class DelegationEngine:
         max_retries: int = 3,
         retry_delay: int = 20,
         force_local: bool = False,
+        fallback_payload: str = "",
     ) -> str:
         """Async call to llama.cpp /v1/chat/completions. task selects budget cap.
 
@@ -271,6 +272,14 @@ class DelegationEngine:
         the local task line: a task an agent explicitly queued for the local
         model, where returning an extractive summary instead of running it would
         answer a different question than the one asked.
+
+        fallback_payload is what to return INSTEAD of running the model when the
+        short-circuit fires. Pass it. The heuristic underneath guesses where the
+        instruction ends by splitting on the first blank line, and that guess was
+        wrong for four of its five callers: measured on 2026-09-04, three notes
+        in this user's vault held prompt text where their content should be, two
+        of them flagged `prompt_leak` by a detector that saw the symptom and
+        never named the cause. See `_extractive_fallback`.
         """
         # v5.1 agent mode: no local model. Interactive tools branch to hand raw
         # context to the calling Claude before reaching invoke(); the callers
@@ -279,7 +288,9 @@ class DelegationEngine:
         # deterministic extractive reduction so maintenance never hangs on a
         # model that isn't there.
         if self.cfg.is_agent_mode and not force_local:
-            return self._extractive_fallback(prompt, self.budget(task, max_tokens))
+            return self._extractive_fallback(
+                prompt, self.budget(task, max_tokens),
+                payload=fallback_payload, task=task)
 
         # Everything past here talks to the one local model, so it queues. The
         # gate is taken before ensure_running() deliberately: starting llama.cpp
@@ -331,7 +342,12 @@ class DelegationEngine:
         retry_delay: int = 20,
         force_local: bool = False,
     ) -> str:
-        """invoke()'s body, run with the local-model gate already held."""
+        """invoke()'s body, run with the local-model gate already held.
+
+        Sem `fallback_payload`: quem chega aqui vai falar com o modelo de
+        verdade, e o parametro so existe para o curto-circuito de modo agente,
+        que acontece antes.
+        """
         if not await self.ensure_running(force=force_local):
             raise RuntimeError(
                 "llama.cpp could not be reached or started. "
@@ -446,22 +462,53 @@ class DelegationEngine:
 
 
     @staticmethod
-    def _extractive_fallback(prompt: str, max_tokens: int) -> str:
-        """Deterministic, zero-compute reduction used in agent mode for
-        background callers that can't delegate to the agent.
+    def _extractive_fallback(prompt: str, max_tokens: int, payload: str = "",
+                             task: str = "") -> str:
+        """Deterministic, zero-compute stand-in used in agent mode for background
+        callers that can't delegate to the agent.
 
-        Callers format prompts as "<instruction>\\n\\n<raw payload>", so we drop
-        the leading instruction line and return the payload truncated to roughly
-        max_tokens*4 characters (the usual token→char rule of thumb). This is
-        not a summary — it's a safe pass-through so maintenance keeps moving; the
-        real summarization happens interactively when the agent is in the loop.
+        `payload` is the caller saying what its actual content is. That is the
+        supported path, and the only one that cannot leak instructions.
+
+        WHAT THIS USED TO DO, and why it is now the last resort. The rule was
+        "callers format prompts as `<instruction>\\n\\n<raw payload>`, so drop the
+        leading instruction line". Checked against every caller in this package:
+
+            synthesizer   has blank lines, but the source text is at the END of
+                          the template; cutting at the FIRST one cuts between two
+                          instructions and returns the second one
+            organizer._write_summary   no blank line at all: the whole prompt
+                          comes back
+            organizer._upgrade_one     no blank line, and the order is inverted
+                          (content first, instruction second)
+            classifier    matches the rule, and is also the one caller that
+                          validates the answer, so it was never harmed
+            localworker   passes force_local=True and never arrives here
+
+        Measured on the user's vault on 2026-09-04: 8.596 notes scanned, THREE
+        holding prompt text as their body. Two begin with "OUTPUT: Markdown only.
+        No preamble..." — byte for byte the second paragraph of the synthesis
+        template, i.e. exactly what survives the cut. Two of the three carry
+        `quality_issues: ["prompt_leak"]`, so a detector downstream had been
+        seeing the symptom without anyone tracing it here.
+
+        A caller that passes nothing still gets the old behaviour, and now a
+        warning naming its `task`: forgetting should be loud, not a prompt
+        quietly filed as a note.
         """
-        payload = prompt.strip()
-        if "\n\n" in payload:
-            tail = payload.split("\n\n", 1)[1].strip()
-            payload = tail or payload
         char_cap = max(200, int(max_tokens) * 4)
-        return payload[:char_cap]
+        if payload:
+            return payload.strip()[:char_cap]
+
+        logger.warning(
+            "agent-mode fallback for task %r has no fallback_payload; guessing "
+            "where the instruction ends. This is how prompt text reaches the "
+            "vault as content.", task or "default")
+        guess = prompt.strip()
+        if "\n\n" in guess:
+            tail = guess.split("\n\n", 1)[1].strip()
+            guess = tail or guess
+        return guess[:char_cap]
 
     def _is_healthy(self) -> bool:
         """Sync health check used during subprocess startup polling."""

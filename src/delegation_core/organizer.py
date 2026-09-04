@@ -31,6 +31,7 @@ from .linker import (  # noqa: F401 — some re-exported
     clean_display, ensure_aliases, inject_backlinks, relink_folder, wikilinks,
 )
 from .merger import try_merge
+from .config import resolve_folder
 from .sidecar import is_sidecar, load as load_sidecar, resolve_folder_hint, sidecar_for
 from .splitter import inject_sibling_links, should_split
 from .synthesizer import synthesize
@@ -111,25 +112,7 @@ async def _upgrade_section_titles(
     async def _upgrade_one(title: str, content: str) -> str:
         if not _is_placeholder(title):
             return title
-        prompt = (
-            f"Content summary: {content[:200]}\n"
-            "Write a 3-5 word title for this section. Title only, no punctuation:"
-            + (f"\n{_frase_de_idioma(engine.cfg)}" if _frase_de_idioma(engine.cfg) else "")
-        )
-        try:
-            result = await engine.invoke(
-                prompt,
-                task="section_title",
-                max_tokens=0,
-                temperature=0.0,
-            )
-            new_title = result.strip()
-            if not new_title or len(new_title) > 120:
-                return title
-            return new_title
-        except Exception as exc:
-            logger.warning("Title upgrade failed for '%s': %s — keeping original", title, exc)
-            return title
+        return await _titulo_de_secao(engine, title, content)
 
     upgraded = await asyncio.gather(
         *(_upgrade_one(t, c) for t, c in sections)
@@ -569,32 +552,105 @@ def _archive_sidecars(sidecar_files: list[Path], processed: Path, results: dict)
                 logger.warning("Could not archive orphan sidecar %s: %s", sc.name, e)
 
 
-async def _write_summary(engine, cfg, results: dict):
-    """Append a dated maintenance section to the weekly summary note."""
-    week     = datetime.now().strftime("%Y-W%W")
-    out_dir  = (cfg.vault / "sessions") if (cfg.vault / "sessions").exists() else cfg.vault
-    summary_path = out_dir / f"{week}-maintenance.md"
+async def _titulo_de_secao(engine, title: str, content: str) -> str:
+    """Um titulo de 3 a 5 palavras para uma secao cujo titulo e so um marcador.
 
+    A ordem do prompt e invertida de proposito em relacao aos outros: o conteudo
+    vem primeiro porque e ele que o modelo precisa ler. Isso tornava a heuristica
+    do fallback de modo agente ainda pior aqui -- ela devolveria a INSTRUCAO --
+    entao a carga vai declarada, e o que sai quando nao ha modelo e o titulo que
+    ja estava la.
+
+    Manter o marcador e a resposta honesta: inventar um titulo sem ter lido o
+    conteudo, ou por o proprio prompt como CABECALHO da nota, sao os dois piores
+    desfechos possiveis para uma funcao que escreve no vault do usuario.
+    """
+    prompt = (
+        f"Content summary: {content[:200]}\n\n"
+        "Write a 3-5 word title for this section. Title only, no punctuation:"
+        + (f"\n{_frase_de_idioma(engine.cfg)}" if _frase_de_idioma(engine.cfg) else "")
+    )
+    try:
+        result = await engine.invoke(
+            prompt,
+            task="section_title",
+            max_tokens=0,
+            temperature=0.0,
+            fallback_payload=title,
+        )
+        new_title = result.strip()
+        if not new_title or len(new_title) > 120:
+            return title
+        return new_title
+    except Exception as exc:
+        logger.warning("Title upgrade failed for '%s': %s - keeping original", title, exc)
+        return title
+
+
+def _resumo_deterministico(results: dict) -> str:
+    """O resumo que os proprios numeros ja dao, sem modelo nenhum.
+
+    Serve de `fallback_payload` no modo agente e de rede quando a chamada falha.
+    Antes, o modo agente devolvia o PROMPT, e ele foi para o vault: o
+    `2026-W35-maintenance.md` desta maquina comeca com "Write a 3-sentence vault
+    maintenance summary." seguido dos dados crus.
+    """
+    n = lambda k: len(results.get(k, []))
+    partes = [f"{n('classified')} nota(s) classificada(s)",
+              f"{n('merged')} fundida(s)"]
+    if n("junk"):
+        partes.append(f"{n('junk')} descartada(s) como boilerplate")
+    if n("errors"):
+        partes.append(f"{n('errors')} com erro")
+    return "Passe de manutencao: " + ", ".join(partes) + "."
+
+
+async def _resumo_de_manutencao(engine, results: dict) -> str:
+    """O corpo do resumo semanal. Separado de `_write_summary` para ser testavel
+    sem tocar disco."""
     classified = "\n".join(results.get("classified", [])) or "none"
     merged     = "\n".join(results.get("merged", []))     or "none"
     errors     = "\n".join(results.get("errors", []))     or "none"
     junk       = "\n".join(results.get("junk", []))       or "none"
+    deterministico = _resumo_deterministico(results)
 
     try:
-        body = await engine.invoke(
-            f"Write a 3-sentence vault maintenance summary.\n"
-            f"Classified: {classified}\nMerged: {merged}\nErrors: {errors}\nSkipped as junk: {junk}",
+        return await engine.invoke(
+            f"Write a 3-sentence vault maintenance summary.\n\n"
+            f"Classified: {classified}\nMerged: {merged}\nErrors: {errors}\n"
+            f"Skipped as junk: {junk}",
             system=_com_idioma("Vault Reporter", engine.cfg),
             max_tokens=engine.budget("summary", 200),
             temperature=0.3,
             task="summary",
+            fallback_payload=deterministico,
         )
     except Exception as e:
-        logger.warning("Maintenance summary failed: %s — using fallback", e)
-        body = (
-            f"Processed {len(results.get('classified', []))} notes, "
-            f"merged {len(results.get('merged', []))}."
-        )
+        logger.warning("Maintenance summary failed: %s - using the counted one", e)
+        return deterministico
+
+
+async def _write_summary(engine, cfg, results: dict):
+    """Append a dated maintenance section to the weekly summary note."""
+    week     = datetime.now().strftime("%Y-W%W")
+    # resolve_folder, e nao o literal minusculo: a pasta deste vault chama-se
+    # "Sessions", e num sistema de arquivos sensivel a caixa `cfg.vault /
+    # "sessions"` NAO EXISTE. O resumo semanal caia na RAIZ do vault, que esta
+    # fora de toda pasta configurada, entao ele nunca era indexado (conferido:
+    # nenhuma chave sem barra em .chroma_index.json), nunca era graduado pela
+    # saude, e nao aparecia em search_vault. A prova estava no disco:
+    # `<vault>/2026-W35-maintenance.md`.
+    #
+    # E o mesmo defeito que `merger._never_merge` documenta sobre si mesmo e que
+    # o docstring de `config.resolve_folder` enumera: "Code that hardcoded a
+    # lowercase name and tested `"sessions" in folders` silently did the wrong
+    # thing on such a vault".
+    pasta_sessoes = resolve_folder("sessions", cfg.vault_folders)
+    out_dir = (cfg.vault / pasta_sessoes) if pasta_sessoes else cfg.vault
+    out_dir.mkdir(parents=True, exist_ok=True)
+    summary_path = out_dir / f"{week}-maintenance.md"
+
+    body = await _resumo_de_manutencao(engine, results)
 
     date_str = datetime.now().strftime("%Y-%m-%d %H:%M")
     section  = f"\n\n## Run {date_str}\n\n{body}\n"

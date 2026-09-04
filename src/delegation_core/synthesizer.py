@@ -386,6 +386,11 @@ async def synthesize(engine, sidecar: dict, content: str, filename: str, fmt: st
         raw = await engine.invoke(
             prompt,
             system=prompts["system"],
+            # A carga e o TEXTO-FONTE, e nao um pedaco do gabarito. Sem isto, o
+            # modo agente cortava o prompt no primeiro \n\n e devolvia o
+            # paragrafo "OUTPUT: Markdown only. No preamble..." como se fosse a
+            # nota: duas notas deste vault comecam exatamente assim.
+            fallback_payload=text_input,
             max_tokens=engine.budget("synthesize", 2500),
             temperature=0.2,
             task="synthesize",
