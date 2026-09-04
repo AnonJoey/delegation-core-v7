@@ -77,6 +77,27 @@ def run(cfg: Config | None = None) -> int:
         )
         return 1
 
+    # A segunda metade da mesma pergunta. Conferir que o daemon esta de pe e
+    # nao que ha credencial deixa a ponte subir para falhar TODA chamada com
+    # 401, que e palavra por palavra o desfecho descrito acima: "connects and
+    # then fails every call, which reads to the user as 'the tools are broken'".
+    #
+    # Medido contra o daemon desta maquina:
+    #     Authorization: "Bearer "        -> HTTP 401
+    #     Authorization: "Bearer errado"  -> HTTP 401
+    # `Config.server_token` tem default "" e so e preenchido pelo caminho de
+    # startup do servidor, entao uma config restaurada de backup, copiada entre
+    # maquinas ou editada a mao chega aqui vazia.
+    if not (cfg.server_token or "").strip():
+        sys.stderr.write(
+            "delegation-core: the daemon is running but this config has no "
+            "server_token.\n"
+            "  Every forwarded call would be rejected with HTTP 401.\n"
+            "  Fix it with:    delegation-core clients --show\n"
+            "  Or re-register: delegation-core service install\n"
+        )
+        return 1
+
     logger.info("stdio bridge forwarding to %s", cfg.server_url)
     # show_banner=False: on a stdio server every byte of stdout is protocol.
     # Verified that FastMCP writes its banner to stderr, so the handshake is not
