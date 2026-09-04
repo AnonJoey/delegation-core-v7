@@ -604,13 +604,28 @@ def deduplicate_entities(
 
 
 def _pick_winner(nodes: list[dict]) -> dict:
-    """Pick the canonical survivor: prefer no chunk suffix, then shorter ID."""
+    """Pick the canonical survivor: no chunk suffix, then shorter ID, then the ID.
+
+    The final key is what makes this a TOTAL order, and it is the whole point.
+    Without it the score ties on every pair of equal-length IDs and ``min``
+    falls back to list position, so the survivor is decided by the order nodes
+    happened to arrive in — which for graph builds is chunk order. Sibling
+    versioned modules tie by construction: ``src_api_v1_billing_retry_policy``
+    and ``src_api_v2_billing_retry_policy`` are the same length, and the loser's
+    edges are rewired onto the winner, so v2's relationships were reported as
+    v1's or the reverse depending on which chunk was read first.
+
+    This is the same contract ``_collision_rank`` states for the exact-ID pass
+    ("fully deterministic regardless of order", #1851) and settles with the same
+    device: keep breaking ties until the key is unique. IDs are unique within
+    every group passed here, so the order is total and the result reproducible.
+    """
     if not nodes:
         raise ValueError("Cannot pick winner from empty list")
 
-    def _score(n: dict) -> tuple[int, int]:
+    def _score(n: dict) -> tuple[int, int, str]:
         has_suffix = bool(_CHUNK_SUFFIX.search(n["id"]))
-        return (1 if has_suffix else 0, len(n["id"]))
+        return (1 if has_suffix else 0, len(n["id"]), n["id"])
 
     return min(nodes, key=_score)
 
