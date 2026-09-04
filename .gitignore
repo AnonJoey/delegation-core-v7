@@ -6,3 +6,10 @@ venv/
 *.log
 .DS_Store
 .claude/
+
+# Banco da ferramenta de cobertura. Gerado, binario, 446 KB, e muda a cada
+# rodada: entrou nesta branch por tres `git add -A` meus antes de estar aqui.
+.coverage
+.coverage.*
+coverage.json
+htmlcov/
