@@ -109,6 +109,19 @@ GRAPH_CAPABILITIES: dict[str, dict] = {
 # Capabilities that exist in the pipeline but are not artifact producers, and so
 # are invisible to the guard test's pattern. Listed because they are exactly the
 # kind of thing that goes unused: each one is real, working, and unreachable.
+#: Capacidades que existem no codigo e nao tem chamador nenhum. Cada entrada e
+#: uma DECISAO registrada, e nao um inventario que envelhece: `find_import_cycles`
+#: esteve aqui como "Never surfaced" enquanto era chamada por
+#: `graph/report.py:199`, com o resultado indo para a secao "## Import Cycles"
+#: de todo GRAPH_REPORT.md gerado.
+#:
+#: Isso importa mais aqui do que em qualquer outro lugar do projeto: o contrato
+#: deste modulo manda preferir este relatorio "over any prose description of this
+#: server, including AGENT_GUIDE.md, which has no such guard" -- e esta lista
+#: era prosa escrita a mao vestindo a autoridade do relatorio gerado.
+#:
+#: `tests/test_capability_registry.py` agora varre o AST atras de chamadores de
+#: cada nome daqui e falha em quem ganhou um.
 KNOWN_UNWIRED: dict[str, str] = {
     "graph.cluster.remap_communities_to_previous":
         "Keeps community IDs stable across rebuilds. Still has no caller; "
@@ -120,8 +133,6 @@ KNOWN_UNWIRED: dict[str, str] = {
     "graph.analyze.graph_diff":
         "Structural diff between two builds. Never surfaced; would answer "
         "'what changed in this codebase since the last graph'.",
-    "graph.analyze.find_import_cycles":
-        "Import-cycle detection. Never surfaced.",
     "graph.validate.assert_valid":
         "Post-extraction validation. Never called by the build pipeline.",
     "graph.detect.detect_incremental":

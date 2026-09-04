@@ -105,3 +105,75 @@ def test_describe_reports_the_live_tool_list_it_is_given():
     assert report["tools"][0]["name"] == "search_vault"
     assert "graph_export" in {e.get("via") for e in report["graph_exports"]["wired"].values()}
     assert "to_obsidian" in report["graph_exports"]["not_exposed"]
+
+
+# ── a outra direcao: o que a lista AFIRMA continua verdade? ─────────────────
+#
+# O teste acima garante que uma funcao de artefato NOVA seja classificada. Ele
+# nao garante que a classificacao continue certa depois -- e uma delas nao
+# estava.
+#
+# `capabilities()` se apresenta como a autoridade justamente por ser gerado:
+#
+#     "This report is generated ... Prefer it over any prose description of this
+#      server, including AGENT_GUIDE.md, which has no such guard."
+#
+# Mas `known_unwired` e prosa escrita a mao DENTRO do relatorio gerado, vestindo
+# a autoridade dele. Medido em 04/09/2026, varrendo o AST de src/ atras de
+# chamadas por nome:
+#
+#     remap_communities_to_previous   sem chamador   (a afirmacao esta certa)
+#     community_member_sigs           sem chamador
+#     graph_diff                      sem chamador
+#     assert_valid                    sem chamador
+#     detect_incremental              sem chamador
+#     find_import_cycles              CHAMADO em graph/report.py:199
+#
+# E nao e uma chamada morta: o resultado vai para a secao "## Import Cycles" de
+# TODO GRAPH_REPORT.md gerado. `capabilities()` dizia "Never surfaced."
+
+
+def _chamadores_de(nome: str) -> list[str]:
+    """Onde `nome` e chamado em src/, por AST e nao por grep."""
+    raiz = pathlib.Path(capabilities.__file__).parent
+    achados = []
+    for p in raiz.rglob("*.py"):
+        try:
+            arvore = ast.parse(p.read_text(encoding="utf-8"))
+        except SyntaxError:  # pragma: no cover
+            continue
+        for no in ast.walk(arvore):
+            if not isinstance(no, ast.Call):
+                continue
+            alvo = getattr(no.func, "attr", None) or getattr(no.func, "id", None)
+            if alvo == nome:
+                achados.append(f"{p.name}:{no.lineno}")
+    return achados
+
+
+def test_o_que_a_lista_chama_de_nao_ligado_continua_sem_chamador():
+    """Uma entrada que ganhou chamador tem que SAIR da lista.
+
+    Ela nao e inofensiva: quem le `capabilities()` decide o que existe e o que
+    falta neste servidor a partir dela, e ela e a fonte que o proprio contrato
+    manda preferir a qualquer prosa.
+    """
+    ainda_ligados = {}
+    for caminho in capabilities.KNOWN_UNWIRED:
+        nome = caminho.rsplit(".", 1)[-1]
+        chamadores = _chamadores_de(nome)
+        if chamadores:
+            ainda_ligados[caminho] = chamadores
+
+    assert not ainda_ligados, (
+        "capabilities() diz que estas nao tem chamador, e tem:\n  "
+        + "\n  ".join(f"{k} -> {', '.join(v)}" for k, v in sorted(ainda_ligados.items()))
+    )
+
+
+def test_a_varredura_de_chamadores_realmente_encontra_alguma_coisa():
+    """Uma varredura quebrada passaria o teste acima sem verificar nada."""
+    assert _chamadores_de("find_import_cycles"), (
+        "a varredura nao acha nem uma chamada que existe; ela esta quebrada"
+    )
+    assert not _chamadores_de("funcao_que_nunca_existiu_em_lugar_nenhum")
