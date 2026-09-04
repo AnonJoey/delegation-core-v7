@@ -53,7 +53,8 @@ def post_write_links(vault, note_path: Path, rel_path: str, folder: str, stem: s
     except Exception as e:
         logger.warning("post_write_links failed for %s: %s", rel_path, e)
     try:
-        (Path.home() / ".delegation_core" / "vault_health.json").unlink(missing_ok=True)
+        from .config import vault_health_cache
+        vault_health_cache().unlink(missing_ok=True)
     except Exception:
         pass
 
@@ -118,7 +119,8 @@ def save_note(vault, rel_path: str, content: str) -> dict:
     folder = rel.split("/")[0]
     vault.index_note(content, {"title": dest.stem, "path": rel, "folder": folder})
     try:
-        (Path.home() / ".delegation_core" / "vault_health.json").unlink(missing_ok=True)
+        from .config import vault_health_cache
+        vault_health_cache().unlink(missing_ok=True)
     except Exception:
         pass
     # Deliberately no post_write_links here: appending a "## Related" block to
@@ -241,7 +243,8 @@ def rename_note(vault, rel_path: str, new_title: str, retitle: bool = True) -> d
         vault.index_note(after, {"title": path.stem, "path": rel,
                                  "folder": rel.split("/")[0]})
     try:
-        (Path.home() / ".delegation_core" / "vault_health.json").unlink(missing_ok=True)
+        from .config import vault_health_cache
+        vault_health_cache().unlink(missing_ok=True)
     except Exception:
         pass
 

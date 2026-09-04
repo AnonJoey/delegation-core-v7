@@ -976,7 +976,8 @@ def post_install(root: Path) -> dict:
     # The cached health file predates the recursive broken-link metric. Dropping
     # it makes the next start recompute rather than serve a stale count.
     try:
-        (CONFIG_DIR / "vault_health.json").unlink(missing_ok=True)
+        from .config import vault_health_cache
+        vault_health_cache().unlink(missing_ok=True)
         relatorio["health_cache"] = "invalidated"
     except OSError as e:
         relatorio["health_cache"] = f"could not remove: {e}"

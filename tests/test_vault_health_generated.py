@@ -17,7 +17,7 @@ import json
 
 import pytest
 
-from delegation_core.config import Config
+from delegation_core.config import Config, vault_health_cache
 from delegation_core.vault import VaultManager
 
 
@@ -77,7 +77,7 @@ def test_wikilinks_embedded_in_generated_content_are_not_counted_as_broken(vault
     (vault.cfg.vault / "Reference" / "graphs" / "demo" / "report-sample.md").write_text(
         _note("excerpt: `arr[[Foo alloc]]`", title="demo: sample", source="graph_build"),
         encoding="utf-8")
-    (tmp_path / "home" / ".delegation_core" / "vault_health.json").unlink(missing_ok=True)
+    vault_health_cache().unlink(missing_ok=True)
 
     health = vault.get_health_summary()
 
@@ -89,7 +89,7 @@ def test_hand_written_notes_still_count_as_orphans_without_the_marker(vault, tmp
     """Guard against the exclusion widening: only `source: graph_build` opts out."""
     (vault.cfg.vault / "Reference" / "manual.md").write_text(
         _note("no marker here", title="Manual"), encoding="utf-8")
-    (tmp_path / "home" / ".delegation_core" / "vault_health.json").unlink(missing_ok=True)
+    vault_health_cache().unlink(missing_ok=True)
 
     health = vault.get_health_summary()
 
@@ -107,7 +107,7 @@ def test_raw_session_transcripts_are_treated_as_generated(vault, tmp_path):
         _note("we rename [[source_stem]] to [[new-note-stem]]",
               title="Raw transcript", **{"type": "session-transcript"}),
         encoding="utf-8")
-    (tmp_path / "home" / ".delegation_core" / "vault_health.json").unlink(missing_ok=True)
+    vault_health_cache().unlink(missing_ok=True)
 
     health = vault.get_health_summary()
 
@@ -122,7 +122,7 @@ def test_links_resolve_against_notes_outside_the_configured_folders(vault, tmp_p
     (vault.cfg.vault / "MEMORY.md").write_text("# root note", encoding="utf-8")
     (vault.cfg.vault / "Reference" / "cites-root.md").write_text(
         _note("see [[MEMORY]]", title="Cites Root"), encoding="utf-8")
-    (tmp_path / "home" / ".delegation_core" / "vault_health.json").unlink(missing_ok=True)
+    vault_health_cache().unlink(missing_ok=True)
 
     assert vault.get_health_summary()["broken_links"] == 0
 
@@ -135,14 +135,25 @@ def test_dot_directories_are_excluded_from_link_resolution(vault, tmp_path):
     (hidden / "ghost.md").write_text("# not a note", encoding="utf-8")
     (vault.cfg.vault / "Reference" / "cites-hidden.md").write_text(
         _note("see [[ghost]]", title="Cites Hidden"), encoding="utf-8")
-    (tmp_path / "home" / ".delegation_core" / "vault_health.json").unlink(missing_ok=True)
+    vault_health_cache().unlink(missing_ok=True)
 
     assert vault.get_health_summary()["broken_links"] == 1
 
 
 def test_health_summary_is_cached_between_calls(vault, tmp_path):
+    """A intencao e o CACHE, e nao onde ele mora.
+
+    Este arquivo se isolava falsificando `Path.home()`, e o codigo de producao
+    montava o caminho a partir de `Path.home()` dentro da funcao. As duas coisas
+    casavam, e por isso o defeito sobreviveu: um teste que finge ser HOME nao
+    percebe que o caminho ignora o CONFIG_DIR do projeto -- e um teste que NAO
+    finge (test_frontmatter_valido.py, escrito em 04/09) escreveu no
+    vault_health.json real do usuario.
+    O caminho agora vem de `config.vault_health_cache()`, e a asercao segue a
+    fonte em vez de repetir o caminho a mao.
+    """
     first = vault.get_health_summary()
-    cache = tmp_path / "home" / ".delegation_core" / "vault_health.json"
+    cache = vault_health_cache()
 
     assert cache.exists()
     assert json.loads(cache.read_text(encoding="utf-8"))["orphans"] == first["orphans"]

@@ -119,6 +119,8 @@ def _frontmatter_parses(content: str) -> bool:
     return True
 
 
+
+
 class VaultManager:
     def __init__(self, cfg: Config):
         self.cfg = cfg
@@ -1350,7 +1352,8 @@ class VaultManager:
 
     def get_health_summary(self, force: bool = False) -> dict:
         """Scan vault frontmatter for quality issues. Cached 5 min in ~/.delegation_core/vault_health.json."""
-        cache_path = Path.home() / ".delegation_core" / "vault_health.json"
+        from .config import vault_health_cache
+        cache_path = vault_health_cache()
         now = datetime.now().timestamp()
 
         if not force and cache_path.exists():
@@ -1609,7 +1612,8 @@ class VaultManager:
 
     def _force_health_recompute(self) -> None:
         """Run the health pass ignoring the summary cache, to populate detail."""
-        cache = Path.home() / ".delegation_core" / "vault_health.json"
+        from .config import vault_health_cache
+        cache = vault_health_cache()
         backup = None
         try:
             if cache.exists():

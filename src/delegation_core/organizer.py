@@ -263,7 +263,8 @@ async def heal(engine, vault_manager) -> dict:
             failed += 1
 
     if healed > 0:
-        cache_path = Path.home() / ".delegation_core" / "vault_health.json"
+        from .config import vault_health_cache
+        cache_path = vault_health_cache()
         try:
             cache_path.unlink(missing_ok=True)
         except Exception:

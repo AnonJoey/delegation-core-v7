@@ -49,6 +49,33 @@ logger = logging.getLogger("config")
 CONFIG_DIR = Path.home() / ".delegation_core"
 CONFIG_FILE = CONFIG_DIR / "config.json"
 
+def vault_health_cache() -> Path:
+    """O caminho do cache de saude do vault. UMA definicao, lida em tempo de chamada.
+
+    Era montado com `Path.home() / ".delegation_core" / "vault_health.json"` em
+    SEIS lugares, dentro das funcoes, e com CONFIG_DIR num setimo (installer).
+    Um caminho montado a partir de Path.home() nao tem nome para ninguem
+    reatribuir: o fixture do conftest, que promete "reaponta todo caminho de
+    estado do usuario", alcanca constante de modulo e nao alcanca aquilo.
+
+    O que custava, medido em 04/09/2026: rodar
+    `pytest tests/test_frontmatter_valido.py` sobre um vault temporario de DUAS
+    notas reescreveu o vault_health.json REAL do usuario, com
+    vault_path=/tmp/pytest-of-joey/... e total_notes=2. E tres dos seis lugares
+    fazem unlink(), entao um teste que escrevesse nota APAGAVA o cache real.
+
+    Funcao e nao constante de proposito: uma constante seria copiada por
+    `from .config import ...` no import de cada modulo, que e exatamente a
+    armadilha que o conftest ja documenta para CONFIG_DIR. Lida daqui, um
+    redirecionamento de CONFIG_DIR chega a todos os chamadores.
+
+    Servir numero de outro vault ja era impedido: o cache carrega `vault_path` e
+    `get_health_summary` recusa um cache alheio. Essa guarda nasceu de "two
+    tests over different temp vaults returned identical health" -- trataram o
+    sintoma desta mesma causa e deixaram o caminho fixo.
+    """
+    return CONFIG_DIR / "vault_health.json"
+
 
 def resolve_folder(name: str, folders: list) -> str | None:
     """Return the canonically-cased entry of `folders` matching `name`, else None.
