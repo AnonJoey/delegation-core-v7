@@ -368,6 +368,15 @@ def cached_word_count(path: Path, root: Path, compute, cache_root: "Path | None"
 
     wc = compute(Path(path))
 
+    # `compute` devolve None quando a contagem FALHOU (biblioteca ausente,
+    # arquivo corrompido, IO transitorio) — diferente de um arquivo com zero
+    # palavras. Gravar a falha seria persistir o erro: a chave e (size,
+    # mtime_ns), que so muda se alguem editar o arquivo, entao um PDF contado
+    # durante uma janela sem pypdf ficaria em zero para sempre. Devolve 0 ao
+    # chamador, que so soma para dimensionar o corpus, mas nao cacheia.
+    if wc is None:
+        return 0
+
     if st is not None:
         entry = _stat_index.get(abs_key)
         if (entry

@@ -755,7 +755,7 @@ def convert_office_file(path: Path, out_dir: Path, root: "Path | None" = None) -
     return out_path
 
 
-def count_words(path: Path) -> int:
+def count_words(path: Path) -> int | None:
     try:
         ext = path.suffix.lower()
         if ext == ".pdf":
@@ -767,7 +767,15 @@ def count_words(path: Path) -> int:
         with open(_os_path(path), encoding="utf-8", errors="ignore") as f:
             return len(f.read().split())
     except Exception:
-        return 0
+        # None, e nao 0, porque quem chama CACHEIA o resultado contra
+        # (size, mtime_ns). Devolver 0 aqui era indistinguivel de um arquivo
+        # vazio de verdade, e cached_word_count gravava esse 0 numa assinatura
+        # que so muda se alguem editar o arquivo. Medido: sem a pypdf instalada
+        # todo PDF conta 0, e depois de instalar a pypdf eles seguem contando 0
+        # para sempre, porque o arquivo nao foi tocado. As causas sao comuns e
+        # transitorias: ImportError da pypdf/python-docx/openpyxl, PDF corrompido,
+        # arquivo em uso.
+        return None
 
 
 # Directory names to always skip - venvs, caches, build artifacts, deps
