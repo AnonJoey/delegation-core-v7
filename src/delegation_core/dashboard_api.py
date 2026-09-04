@@ -285,6 +285,53 @@ def _status(cfg, vault) -> dict:
     }
 
 
+
+#: Nome de campo cujo VALOR nao pode sair por uma rota sem autenticacao.
+#: Por forma do nome, e nao por lista fixa: um campo novo chamado
+#: `webhook_secret` fica coberto no dia em que for escrito, sem ninguem lembrar.
+_PARECE_SEGREDO = ("token", "secret", "password", "api_key", "apikey")
+
+#: As excecoes sao por campo e com motivo, para um campo novo nao entrar de
+#: carona: `max_tokens` e um orcamento e `embed_max_seq_length` um limite.
+_NAO_E_SEGREDO = {"max_tokens", "embed_max_seq_length"}
+
+
+def _config_publico(cfg) -> dict:
+    """A config como uma rota SEM AUTENTICACAO pode devolve-la.
+
+    `_handle_config_get` fazia `asdict(cfg)` e mandava a dataclass inteira, com
+    o `server_token` dentro. Medido nesta maquina em 04/09/2026:
+
+        GET http://127.0.0.1:8788/api/config   -> 200, sem credencial
+        ["config"]["server_token"]             -> 43 caracteres, o token inteiro
+
+    E o token que autentica toda chamada ao daemon na 8787: com ele, qualquer um
+    chama qualquer ferramenta MCP contra o vault do usuario.
+
+    O CORS ja impedia uma pagina de outro site de LER a resposta -- conferido, e
+    `test_dashboard_api_cors.py` fixa isso. Mas o socket esta em 127.0.0.1, que
+    QUALQUER usuario local alcanca, enquanto `Config.save()` faz chmod 0600 no
+    arquivo com o motivo escrito: "server_token lives in here, so the file is a
+    secret now". Um segundo usuario da maquina nao le o arquivo e lia o token
+    pelo HTTP: a fronteira que o 0600 desenha nao existia aqui.
+
+    No mesmo par de rotas, o lado que ESCREVE ja tinha lista de permissao campo
+    a campo. So o lado que LE despejava tudo.
+
+    Redige em vez de omitir: "nao ha token" e "ha um e nao te mostro" sao
+    estados diferentes, e o dashboard precisa distinguir o primeiro.
+    """
+    from dataclasses import asdict
+
+    saida = asdict(cfg)
+    for chave, valor in list(saida.items()):
+        if chave in _NAO_E_SEGREDO:
+            continue
+        if any(p in chave.lower() for p in _PARECE_SEGREDO):
+            saida[chave] = "<set>" if valor else ""
+    return saida
+
+
 class _Handler(BaseHTTPRequestHandler):
     # Quiets the default per-request stderr access log; dashboard_api is meant
     # to run silently as a sidecar. Uncomment for debugging.
@@ -556,8 +603,7 @@ class _Handler(BaseHTTPRequestHandler):
         self._send_json(res, status=status_code)
 
     def _handle_config_get(self) -> None:
-        from dataclasses import asdict
-        config_dict = asdict(_cfg)
+        config_dict = _config_publico(_cfg)
         models_dir = _cfg.models_dir
         available_models = []
         if models_dir.exists():
