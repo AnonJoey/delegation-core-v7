@@ -527,9 +527,19 @@ def cmd_status(_args):
 def _delegate(cfg, args, tool: str, arguments: dict, say) -> dict | None:
     """Hand index work to the running daemon; None means "do it yourself".
 
-    Every command that writes to ChromaDB goes through here — reindex, maintain,
-    ingest, and since 2026-09-04 `note write` and `note update`, which wrote the
-    index from this process while claiming otherwise on this very line. When the daemon is
+    Every command that touches the index goes through here. That is a claim
+    about eleven functions, and listing them HERE is what made this line wrong
+    twice: first for `note write`/`note update`, then — in the correction that
+    named those two — for `relink` and `graph build`, which write just as much
+    and were not counted. A hand-written list inside a docstring is a copy, and
+    copies drift.
+
+    `tests/test_cli_delega_escrita.py` enforces the property instead: it walks
+    every `cmd_*` in this file, finds the ones that construct a VaultManager,
+    and fails on any that neither delegates nor carries a written, measured
+    exemption. Read that file for who is exempt and why.
+
+    When the daemon is
     up it owns the index and the resident BGE model, so a second process opening
     the same directory is both a concurrent writer and a second ~2.4 GiB copy of
     the model on the GPU: see daemon.py for what that cost in practice, and for
@@ -719,6 +729,20 @@ def cmd_relink(args):
     max_links = getattr(args, "max_links", 8)
 
     console.print(f"Relinking [bold]{args.folder}[/bold] ...")
+
+    # relink ESCREVE: linker.py grava `## Related` na nota com write_text e
+    # chama index_note logo em seguida (229-230 e 351-352). Era o terceiro
+    # caminho de escrita fora do _delegate, depois de note write e note update.
+    job = _delegate(cfg, args, "relink_folder_bg",
+                    {"folder": args.folder, "days": days,
+                     "min_similarity": min_sim, "max_links_per_note": max_links},
+                    lambda msg: console.print(f"[dim]{msg}[/dim]"))
+    if job is not None:
+        r = job.get("result") or {}
+        console.print(f"[green]✓[/green]  {r.get('linked_notes', 0)} notes updated, "
+                      f"{r.get('links_added', 0)} links added (by the daemon).")
+        return
+
     vault  = VaultManager(cfg)
     result = relink_folder(vault, args.folder, days=days,
                            min_similarity=min_sim, max_links_per_note=max_links)
@@ -740,8 +764,20 @@ def cmd_search(args):
         console.print("[yellow]Not configured.[/yellow] Run: delegation-core setup")
         sys.exit(1)
 
-    vault = VaultManager(cfg)
-    hits = vault.search(args.query, limit=args.limit)
+    # Leitura, entao nao ha corrida de escrita -- mas ha a SEGUNDA COPIA do
+    # modelo. Medido em 04/09/2026 com o daemon no ar: aos 20s um segundo
+    # processo aparece na GPU com 2314 MiB ao lado dos 2314 do daemon, numa
+    # placa de 16 GB onde gpu.py existe como arbitro entre BGE e llama. E o
+    # arbitro nao ve: o `_holder` dele e global de MODULO e nao alcanca outro
+    # processo. Pelo daemon a mesma busca sai da memoria residente.
+    resposta = _delegate(cfg, args, "search_vault",
+                         {"query": args.query, "limit": args.limit},
+                         lambda msg: console.print(f"[dim]{msg}[/dim]"))
+    if resposta is not None:
+        hits = resposta.get("sources") or []
+    else:
+        vault = VaultManager(cfg)
+        hits = vault.search(args.query, limit=args.limit)
     if hits and "error" in hits[0]:
         console.print(f"[red]Error:[/red] {hits[0]['error']}")
         sys.exit(1)
@@ -958,8 +994,17 @@ def cmd_note_find_similar(args):
     if not cfg.is_configured():
         console.print("[yellow]Not configured.[/yellow] Run: delegation-core setup")
         sys.exit(1)
-    vault = VaultManager(cfg)
-    results = vault.find_similar(args.name, threshold=args.threshold, limit=args.limit)
+    # Mesma segunda copia do BGE que a busca: find_similar embute a nota antes
+    # de comparar.
+    resposta = _delegate(cfg, args, "vault_find_similar",
+                         {"note_name": args.name, "threshold": args.threshold,
+                          "limit": args.limit},
+                         lambda msg: console.print(f"[dim]{msg}[/dim]"))
+    if resposta is not None:
+        results = resposta.get("similar") or []
+    else:
+        vault = VaultManager(cfg)
+        results = vault.find_similar(args.name, threshold=args.threshold, limit=args.limit)
     if results and "error" in results[0]:
         console.print(f"[red]Error:[/red] {results[0]['error']}")
         sys.exit(1)
@@ -991,6 +1036,23 @@ def cmd_graph_build(args):
     if cfg is None:
         console.print("[yellow]Not configured.[/yellow] Run: delegation-core setup")
         sys.exit(1)
+
+    # graph build ESCREVE no vault e no indice: file o relatorio e um artigo
+    # por comunidade, cada um por index_note. Era o quarto caminho de escrita
+    # fora do _delegate. E o mais pesado de todos: uma build real leva minutos e
+    # embute milhares de artigos, entao rodar no processo do CLI e a segunda
+    # copia do BGE segurando a placa pelo tempo inteiro da build.
+    job = _delegate(cfg, args, "graph_build_bg",
+                    {"path": args.path, "name": args.name or "", "force": args.force},
+                    lambda msg: console.print(f"[dim]{msg}[/dim]"))
+    if job is not None:
+        result = job.get("result") or {}
+        if "error" in result:
+            console.print(f"[red]Error:[/red] {result['error']}")
+            sys.exit(1)
+        console.print(f"[green]✓[/green]  '{result.get('name', args.name)}': "
+                      f"{result.get('node_count', 0)} nodes (by the daemon).")
+        return
 
     try:
         vault = VaultManager(cfg)
@@ -1548,6 +1610,7 @@ def main():
     _add_local_flag(p_ingest)
 
     p_relink = sub.add_parser("relink", help="Add wikilinks to notes in a vault subfolder")
+    _add_local_flag(p_relink)
     p_relink.add_argument("folder",                   help="Vault-relative folder path (e.g. meetings)")
     p_relink.add_argument("--days",          type=int, default=None,
                           help="Restrict to notes modified within last N days")
@@ -1557,6 +1620,7 @@ def main():
                           help="Maximum wikilinks per note (default 8)")
 
     p_search = sub.add_parser("search", help="Query the vault (BGE similarity search, no LLM required)")
+    _add_local_flag(p_search)
     p_search.add_argument("query")
     p_search.add_argument("--limit", type=int, default=5)
 
@@ -1587,6 +1651,7 @@ def main():
     p_note_list.add_argument("--limit", type=int, default=20)
 
     p_note_sim = note_sub.add_parser("find-similar", help="Find notes semantically similar to a given note")
+    _add_local_flag(p_note_sim)
     p_note_sim.add_argument("name")
     p_note_sim.add_argument("--threshold", type=float, default=0.80)
     p_note_sim.add_argument("--limit", type=int, default=5)
@@ -1596,6 +1661,7 @@ def main():
     graph_sub = p_graph.add_subparsers(dest="graph_command", metavar="graph-command")
 
     p_graph_build = graph_sub.add_parser("build", help="Build a code graph for a local directory")
+    _add_local_flag(p_graph_build)
     p_graph_build.add_argument("path")
     p_graph_build.add_argument("--name", default="", help="Graph name (default: directory basename)")
     p_graph_build.add_argument("--force", action="store_true", help="Rebuild even if already built")
