@@ -278,7 +278,8 @@ def yaml_unquote_scalar(value: str) -> str:
 _LEADING_FRONTMATTER_RE = re.compile(r"^---\n(.*?)\n---\n", re.DOTALL)
 
 
-def compose_note(title: str, content: str, date_str: str) -> str:
+def compose_note(title: str, content: str, date_str: str,
+                 ai_generated: bool = True) -> str:
     """Build note text carrying exactly one YAML frontmatter block.
 
     Callers routinely include a full frontmatter block at the top of `content` —
@@ -295,10 +296,20 @@ def compose_note(title: str, content: str, date_str: str) -> str:
     what lets a note carry a short display title independent of its filename.
     """
     body = content.lstrip("\n")
+    # `ai_generated` is a parameter rather than the constant "true" it was,
+    # because the CLI's `note write` takes its content from a person — stdin or
+    # --file — and stamped "false" by hand-rolling its own frontmatter instead
+    # of coming through here. That divergence was what stopped `note write` from
+    # being routed through the daemon like every other index write, and routing
+    # it is the whole point: the CLI was opening ChromaDB as a second writer.
+    #
+    # This grants no new power. A caller supplying its own `ai_generated:` in
+    # `content` already wins over the generated key by the merge rule below, so
+    # the value was reachable; the parameter only makes it legible.
     generated = [
         ("title", yaml_quote_scalar(title)),
         ("date", date_str),
-        ("ai_generated", "true"),
+        ("ai_generated", "true" if ai_generated else "false"),
     ]
 
     # An alias carrying the untruncated title, when the filename could not.

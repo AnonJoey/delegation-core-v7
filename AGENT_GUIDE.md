@@ -88,9 +88,15 @@ Returns raw markdown. Use when you need the full content of one known note.
 
 ---
 
-### `write_note(folder, title, content)`
+### `write_note(folder, title, content, ai_generated=True)`
 Write a markdown note to the vault and index it immediately with BGE embeddings.
 The note is searchable in the same session as soon as it is written.
+
+`ai_generated` stamps the frontmatter and defaults to true, which is right for
+you: you are an agent, and you wrote it. Leave it alone. It exists because the
+CLI's `delegation-core note write` carries a person's text from stdin, and that
+command now routes through this tool instead of opening ChromaDB as a second
+writer beside the daemon.
 
 Valid folders are the `heartbeat()` → `vault.folder_counts` keys, and are matched
 **case-insensitively** — passing `write_note(folder="decisions")` or `write_note(folder="Decisions")`

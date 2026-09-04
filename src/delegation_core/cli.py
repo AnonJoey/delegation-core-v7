@@ -527,7 +527,9 @@ def cmd_status(_args):
 def _delegate(cfg, args, tool: str, arguments: dict, say) -> dict | None:
     """Hand index work to the running daemon; None means "do it yourself".
 
-    Every command that writes to ChromaDB goes through here. When the daemon is
+    Every command that writes to ChromaDB goes through here — reindex, maintain,
+    ingest, and since 2026-09-04 `note write` and `note update`, which wrote the
+    index from this process while claiming otherwise on this very line. When the daemon is
     up it owns the index and the resident BGE model, so a second process opening
     the same directory is both a concurrent writer and a second ~2.4 GiB copy of
     the model on the GPU: see daemon.py for what that cost in practice, and for
@@ -807,10 +809,28 @@ def _inject_related_links(vault, note_path, rel_path: str, folder: str, stem: st
 
 
 def cmd_note_write(args):
-    from datetime import datetime
+    """Write a note, through the daemon when one is running.
+
+    Two defects lived in the hand-rolled version this replaces.
+
+    It opened ChromaDB in this process while the daemon held it — the second
+    writer that `_delegate` exists to prevent, and that corrupted this vault's
+    FTS index on 2026-08-23. Measured on 2026-09-03 with lsof sampled every
+    second: at t+7s the store was open under both the daemon's pid and the
+    CLI's, and the daemon logged "Index changed on disk by another process —
+    reopening". `allow_local_index_fallback: false` did not stop it, because
+    that guard sat on the reindex path and this command never touched it.
+
+    And it built `{date}-{safe title}.md` without `unique_note_path`, so a
+    second note with the same title on the same day overwrote the first — the
+    exact loss that function's docstring describes, listing the three callers it
+    protects. This was a fourth. Reproduced in a scratch vault: two writes, one
+    file left, and `✓` printed both times with the same path. Going through
+    `create_note` inherits the guard rather than repeating it here.
+    """
     from rich.console import Console
     from .config import Config
-    from .vault import VaultManager, resolve_vault_folder, safe_filename, yaml_quote_scalar
+    from .vault import VaultManager, resolve_vault_folder
 
     console = Console()
     cfg = Config.load()
@@ -824,19 +844,28 @@ def cmd_note_write(args):
     args.folder = resolved_folder
 
     content = _read_content(args.file, "note content")
+
+    # ai_generated=False: this content came from a person, through stdin or
+    # --file. It is the one thing this path says differently from the agent's
+    # write_note, and the reason the parameter exists rather than the constant.
+    result = _delegate(cfg, args, "write_note",
+                       {"folder": args.folder, "title": args.title,
+                        "content": content, "ai_generated": False},
+                       lambda msg: console.print(f"[dim]{msg}[/dim]"))
+    if result is not None:
+        if "error" in result:
+            console.print(f"[red]Error:[/red] {result['error']}")
+            sys.exit(1)
+        console.print(f"[green]✓[/green]  {result.get('path')} (by the daemon)")
+        return
+
+    from .notewriter import create_note
     vault = VaultManager(cfg)
-    safe = safe_filename(args.title)
-    dest = cfg.vault / args.folder / f"{datetime.now().strftime('%Y-%m-%d')}-{safe}.md"
-    dest.parent.mkdir(parents=True, exist_ok=True)
-    full = (
-        f"---\ntitle: {yaml_quote_scalar(args.title)}\ndate: {datetime.now().strftime('%Y-%m-%d')}\n"
-        f"ai_generated: false\n---\n\n{content}"
-    )
-    dest.write_text(full, encoding="utf-8")
-    rel = str(dest.relative_to(cfg.vault))
-    vault.index_note(full, {"title": args.title, "path": rel, "folder": args.folder})
-    _inject_related_links(vault, dest, rel, args.folder, dest.stem)
-    console.print(f"[green]✓[/green]  {rel}")
+    local = create_note(vault, args.folder, args.title, content, ai_generated=False)
+    if "error" in local:
+        console.print(f"[red]Error:[/red] {local['error']}")
+        sys.exit(1)
+    console.print(f"[green]✓[/green]  {local['path']}")
 
 
 def cmd_note_read(args):
@@ -869,16 +898,30 @@ def cmd_note_update(args):
         sys.exit(1)
 
     content = _read_content(args.file, "content to append")
+
+    # Same second-writer problem as `note write`, by a quieter door: update_note
+    # reindexes the whole note, and the related-links pass embeds on top of that.
+    result = _delegate(cfg, args, "vault_update_note",
+                       {"note_name": args.name, "append_content": content},
+                       lambda msg: console.print(f"[dim]{msg}[/dim]"))
+    if result is not None:
+        if "error" in result:
+            console.print(f"[red]Error:[/red] {result['error']}")
+            sys.exit(1)
+        console.print(f"[green]✓[/green]  appended {result.get('appended_chars')} chars "
+                      f"to {result.get('path')} (by the daemon)")
+        return
+
     vault = VaultManager(cfg)
-    result = vault.update_note(args.name, content)
-    if "error" in result:
-        console.print(f"[red]Error:[/red] {result['error']}")
+    local = vault.update_note(args.name, content)
+    if "error" in local:
+        console.print(f"[red]Error:[/red] {local['error']}")
         sys.exit(1)
     matches = vault.find_notes_by_stem(args.name)
     if matches:
         f = matches[0]
-        _inject_related_links(vault, f, result["path"], f.parent.name, f.stem)
-    console.print(f"[green]✓[/green]  appended {result['appended_chars']} chars to {result['path']}")
+        _inject_related_links(vault, f, local["path"], f.parent.name, f.stem)
+    console.print(f"[green]✓[/green]  appended {local['appended_chars']} chars to {local['path']}")
 
 
 def cmd_note_list(args):
@@ -1529,6 +1572,7 @@ def main():
     p_note_write.add_argument("folder", help="Vault folder (see: delegation-core status)")
     p_note_write.add_argument("title")
     p_note_write.add_argument("--file", default=None, help="Read content from this file instead of stdin")
+    _add_local_flag(p_note_write)
 
     p_note_read = note_sub.add_parser("read", help="Print a note's full content")
     p_note_read.add_argument("name", help="Filename stem, partial match")
@@ -1536,6 +1580,7 @@ def main():
     p_note_update = note_sub.add_parser("update", help="Append content to an existing note")
     p_note_update.add_argument("name", help="Filename stem, partial match")
     p_note_update.add_argument("--file", default=None, help="Read content from this file instead of stdin")
+    _add_local_flag(p_note_update)
 
     p_note_list = note_sub.add_parser("list", help="List notes in a folder, newest first")
     p_note_list.add_argument("folder")

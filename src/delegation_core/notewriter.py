@@ -58,7 +58,8 @@ def post_write_links(vault, note_path: Path, rel_path: str, folder: str, stem: s
         pass
 
 
-def create_note(vault, folder: str, title: str, content: str) -> dict:
+def create_note(vault, folder: str, title: str, content: str,
+                ai_generated: bool = True) -> dict:
     """Write a new dated note into `folder` and index it.
 
     Filename is `{date}-{safe title}.md`, disambiguated by unique_note_path so a
@@ -80,7 +81,7 @@ def create_note(vault, folder: str, title: str, content: str) -> dict:
     # compose_note rather than concatenation: callers routinely include their own
     # frontmatter block, which stacked a second one under the generated block and
     # silently turned every key they wrote into body text.
-    full = compose_note(title, content, today)
+    full = compose_note(title, content, today, ai_generated=ai_generated)
     try:
         dest.write_text(full, encoding="utf-8")
     except OSError as e:

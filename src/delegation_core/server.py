@@ -384,15 +384,23 @@ async def read_note(note_name: str) -> str:
 
 
 @mcp.tool()
-async def write_note(folder: str, title: str, content: str) -> str:
+async def write_note(folder: str, title: str, content: str,
+                     ai_generated: bool = True) -> str:
     """
     Persist information to the vault and index it immediately with BGE embeddings.
     CALL THIS automatically after: any decision, meeting summary, research finding,
     fix, or reusable tool/prompt. Write proactively — don't wait to be asked.
     Use vault_update_note when adding to an existing topic.
     folder must be one of the configured vault_folders.
+
+    ai_generated stamps the note's frontmatter and defaults to true, which is
+    right for you: you are an agent, and you wrote it. It exists because the CLI
+    `note write` carries a person's text from stdin and has to say so, and
+    because that command now routes here instead of opening ChromaDB as a
+    second writer alongside this daemon.
     """
-    result = _notewriter.create_note(_vault, folder, title, content)
+    result = _notewriter.create_note(_vault, folder, title, content,
+                                     ai_generated=ai_generated)
     if "error" in result:
         return json.dumps(result)
     # Historic response shape: bare filename, not the vault-relative path.
