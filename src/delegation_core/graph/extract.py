@@ -24,6 +24,7 @@ from .ruby_resolution import resolve_ruby_member_calls
 from .pascal_resolution import resolve_pascal_inherited_calls
 
 # --- migrated to graphify/extractors/ (see graphify/extractors/MIGRATION.md) ---
+from delegation_core.graph.extractors.resolution import escopo_de_root  # noqa: F401
 from delegation_core.graph.extractors.base import (  # noqa: F401
     DEPENDENCIA_AUSENTE,
     _LANGUAGE_BUILTIN_GLOBALS,
@@ -4515,14 +4516,24 @@ def extract(
         uncached_work.append((i, path))
 
     # Phase 2: extract uncached files (parallel or sequential)
+    #
+    # `escopo_de_root` marca a raiz do scan para os resolvedores de import, que
+    # sao invocados por um protocolo de handler de assinatura fixa e nao tem por
+    # onde receber o root. Sem isso um import relativo com travessia resolve para
+    # fora do repositorio varrido e o no nasce com source_file apontando para la
+    # (medido: `import "../../fora"` -> <acima do repo>/fora.ts).
+    #
+    # Fica aqui e nao dentro dos resolvedores porque este e o unico ponto do
+    # caminho que CONHECE o root: `extract()` ja o recebe no argumento.
     if uncached_work:
         ran_parallel = False
-        if parallel and len(uncached_work) >= _PARALLEL_THRESHOLD:
-            ran_parallel = _extract_parallel(
-                uncached_work, per_file, root, max_workers, total, cache_location
-            )
-        if not ran_parallel:
-            _extract_sequential(uncached_work, per_file, root, total, cache_location)
+        with escopo_de_root(root):
+            if parallel and len(uncached_work) >= _PARALLEL_THRESHOLD:
+                ran_parallel = _extract_parallel(
+                    uncached_work, per_file, root, max_workers, total, cache_location
+                )
+            if not ran_parallel:
+                _extract_sequential(uncached_work, per_file, root, total, cache_location)
 
     # Fill any remaining None slots (shouldn't happen, but defensive)
     for i in range(total):

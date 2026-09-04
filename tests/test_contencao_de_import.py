@@ -107,3 +107,38 @@ def test_c_continua_contido_pelo_helper(arvore):
     assert _resolve_c_include_path("h.h", arq, root=repo) is not None
     assert _resolve_c_include_path("../../fora.h", arq, root=repo) is None
     assert _resolve_c_include_path("/etc/passwd", arq) is None
+
+
+# ── escopo_de_root dinâmico durante extracao ──────────────────────────────────
+
+def test_escopo_de_root_ativa_contencao_sem_passagem_explicita(arvore):
+    acima, repo = arvore
+    from delegation_core.graph.extractors.resolution import escopo_de_root
+    arq = str(repo / "src" / "app.ts")
+
+    # Fora do escopo: sem contencao
+    _, caminho_fora = _resolve_js_import_target("../../fora", arq)
+    assert caminho_fora is not None
+
+    # Dentro do escopo: contencao ativa
+    with escopo_de_root(repo):
+        _, caminho_dentro = _resolve_js_import_target("../../fora", arq)
+        assert caminho_dentro is None
+
+        # Alvo legitimo dentro do repo continua resolvendo
+        _, caminho_legitimo = _resolve_js_import_target("./local", arq)
+        assert caminho_legitimo is not None
+
+
+def test_escopo_de_root_concorrente_com_raizes_diferentes_desliga_com_seguranca(arvore):
+    acima, repo = arvore
+    from delegation_core.graph.extractors.resolution import escopo_de_root, _root_corrente
+
+    with escopo_de_root(repo):
+        assert _root_corrente() == repo.resolve()
+        # Escopo aninhado com raiz conflitante desliga para evitar contencao cruzada
+        with escopo_de_root(acima):
+            assert _root_corrente() is None
+        # Ao sair do aninhamento, raiz original volta
+        assert _root_corrente() == repo.resolve()
+

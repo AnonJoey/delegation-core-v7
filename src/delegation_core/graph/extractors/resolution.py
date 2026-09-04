@@ -10,7 +10,9 @@ from delegation_core.graph.extractors.base import (  # noqa: F401
     _make_id,
     _read_text,
 )
+import contextlib
 import hashlib
+import threading
 import json
 import os
 import re
@@ -24,6 +26,59 @@ _WORKSPACE_MANIFEST_NAMES = ("pnpm-workspace.yaml", "package.json")
 _JS_RESOLVE_EXTS = (".ts", ".tsx", ".mts", ".cts", ".svelte", ".js", ".jsx", ".mjs", ".cjs")
 
 _JS_INDEX_FILES = ("index.ts", "index.tsx", "index.svelte", "index.js", "index.jsx", "index.mjs")
+
+# Raiz do scan corrente, para os resolvedores que sao invocados por um protocolo
+# de handler de assinatura fixa e nao tem por onde receber o root.
+#
+# E um global de modulo de proposito, e nao um contextvar: os extractors rodam
+# num ThreadPoolExecutor, e ContextVar NAO propaga para as threads do pool,
+# entao um contextvar aqui daria contencao que so vale na thread principal, que
+# e pior que nenhuma. Global de modulo as threads enxergam.
+#
+# Extracoes CONCORRENTES com raizes diferentes desligam a contencao em vez de
+# aplicar a raiz errada: conter pelo root do outro scan produziria fuga em um e
+# perda de aresta legitima no outro, e os dois seriam calados. Desligar mantem o
+# comportamento historico, que ja era permissivo.
+_ROOT_DO_SCAN: "Path | None" = None
+_ROOT_CONFLITO = False
+_ROOT_PROFUNDIDADE = 0
+_ROOT_TRAVA = threading.Lock()
+
+
+@contextlib.contextmanager
+def escopo_de_root(root: "Path | None"):
+    """Marca a raiz do scan enquanto o bloco roda."""
+    global _ROOT_DO_SCAN, _ROOT_CONFLITO, _ROOT_PROFUNDIDADE
+    resolvido = None
+    if root is not None:
+        try:
+            resolvido = Path(root).resolve()
+        except (OSError, ValueError):
+            resolvido = None
+    with _ROOT_TRAVA:
+        anterior, conflito_anterior = _ROOT_DO_SCAN, _ROOT_CONFLITO
+        if _ROOT_PROFUNDIDADE and anterior != resolvido:
+            _ROOT_CONFLITO = True
+        else:
+            _ROOT_DO_SCAN = resolvido
+        _ROOT_PROFUNDIDADE += 1
+    try:
+        yield
+    finally:
+        with _ROOT_TRAVA:
+            _ROOT_PROFUNDIDADE -= 1
+            if _ROOT_PROFUNDIDADE <= 0:
+                _ROOT_PROFUNDIDADE = 0
+                _ROOT_DO_SCAN, _ROOT_CONFLITO = None, False
+            else:
+                _ROOT_DO_SCAN, _ROOT_CONFLITO = anterior, conflito_anterior
+
+
+def _root_corrente() -> "Path | None":
+    if _ROOT_CONFLITO:
+        return None
+    return _ROOT_DO_SCAN
+
 
 def _dentro_do_root(caminho: Path, root: "Path | None") -> bool:
     """O alvo resolvido cai dentro de `root`? Sem root, nada a conferir.
@@ -50,6 +105,8 @@ def _dentro_do_root(caminho: Path, root: "Path | None") -> bool:
     deixado assim de proposito em vez de fiar metade dos doze, que daria
     contencao aparente.
     """
+    if root is None:
+        root = _root_corrente()
     if root is None:
         return True
     try:
@@ -622,9 +679,9 @@ def _resolve_js_module_path(raw: str | Path, start_dir: Path | None = None,
     aliases = _load_tsconfig_aliases(start_dir)
     hit = _resolve_tsconfig_alias(raw, aliases)
     if hit is not None:
-        return _resolve_js_import_path(hit)
+        return _ok(_nao_diretorio(_resolve_js_import_path(hit)))
 
-    return _resolve_workspace_import(raw, start_dir)
+    return _ok(_resolve_workspace_import(raw, start_dir))
 
 def _resolve_js_import_target(raw: str, str_path: str,
                               root: "Path | None" = None) -> "tuple[str, Path | None] | None":
