@@ -246,8 +246,26 @@ def _resolve_tsconfig_alias(raw: str, aliases: dict[str, list[str]]) -> "Path | 
     first = None
     for target in targets:
         if is_wildcard:
-            # TypeScript substitutes only when the matched star is non-empty.
-            substituted = target.replace("*", captured, 1) if captured else target
+            # Substitui SEMPRE que o padrao tem curinga, inclusive quando o
+            # trecho casado e vazio. A forma anterior condicionava a
+            # substituicao a `captured` ser verdadeiro, e um casamento vazio e
+            # falsy, entao o alvo voltava com o ASTERISCO LITERAL dentro:
+            #
+            #     padrao "@lib/*.css"  import "@lib/.css"  ->  "estilos/*.css"
+            #     padrao "*.js"        import ".js"        ->  "js/*.js"
+            #
+            # Um caminho com asterisco nao resolve para nada nem pode, entao a
+            # aresta nascia apontando para um arquivo impossivel, com o
+            # asterisco dentro do id do no. Substituir por vazio da
+            # "estilos/.css", que e um caminho de verdade e resolve se existir.
+            #
+            # O comentario que estava aqui atribuia o comportamento antigo ao
+            # TypeScript. Nao consigo conferir o tsc nesta maquina, entao nao
+            # repito a afirmacao: o argumento que sustenta a correcao e o de
+            # cima, e vale independente do que o tsc faca. O que o `is_wildcard`
+            # garante e que o padrao tem exatamente um `*`, entao a substituicao
+            # e sempre bem definida.
+            substituted = target.replace("*", captured, 1)
             cand = Path(os.path.normpath(substituted))
         else:
             cand = Path(target)
