@@ -365,14 +365,30 @@ Poll any background job by its ID. Returns current status, elapsed time while ru
 and the full result once done.
 
 While a job is running it also reports **how long this kind of job usually takes** and
-**when to check again**, both derived from the median of the last 10 successful runs of
-that task on this machine:
+**when to check again**, derived from the last 10 successful runs of that task on this
+machine.
+
+When those runs do not agree with each other, it says so instead of hiding it behind a
+median. A task whose history spans an order of magnitude also reports
+`fastest_seconds`, `slowest_seconds` and an `estimate_note`: that is the shape of a task
+that is really two jobs under one name, and the middle of the two predicts neither.
+`vault_reindex` is bucketed by mode for exactly that reason, so a full rebuild and an
+incremental pass no longer share a history.
 
 ```json
-// While running:
+// While running, history in agreement:
 → { "job_id": "a3f2b1c4", "task": "graph_build", "status": "running",
     "elapsed_seconds": 42, "typical_seconds": 463.0,
     "check_again_in_seconds": 426 }
+
+// While running, history that spans orders of magnitude:
+→ { "job_id": "b1c2d3e4", "task": "ingest_folder", "status": "running",
+    "elapsed_seconds": 90, "typical_seconds": 19.0,
+    "fastest_seconds": 1.1, "slowest_seconds": 2241.0,
+    "check_again_in_seconds": 600,
+    "estimate_note": "This task's 10 recorded runs span 1.1s to 2241.0s, so the
+                      median predicts little. Wait check_again_in_seconds rather
+                      than polling." }
 
 // When complete:
 → { "job_id": "a3f2b1c4", "task": "run_maintenance", "status": "done",
