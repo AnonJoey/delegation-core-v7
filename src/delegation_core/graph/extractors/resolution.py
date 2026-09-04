@@ -80,7 +80,22 @@ def _strip_jsonc(text: str) -> str:
 
     stripped = pattern.sub(_replace, text)
     # Remove trailing commas before } or ] (allowing whitespace between).
-    stripped = re.sub(r",(\s*[}\]])", r"\1", stripped)
+    #
+    # A alternancia com a string PRIMEIRO tambem aqui. A forma anterior era um
+    # re.sub cru sobre o texto todo, sem nenhuma nocao de string, tres linhas
+    # abaixo da passagem que preserva string com cuidado e do docstring que
+    # promete "preserves string contents". Medido, ela reescrevia o valor:
+    #
+    #     {"note": "lista: a, } fim"}  ->  {"note": "lista: a } fim"}
+    #
+    # Calada: o JSON continua valido e o valor mudou. Fica em duas passagens, e
+    # nao numa so, porque a virgula muitas vezes so encosta no fecho DEPOIS que
+    # o comentario sai ({"a": 1, // nota\n}), entao a ordem importa.
+    cauda = re.compile(
+        r'"(?:\\.|[^"\\])*"'   # string com escapes, casada primeiro
+        r"|,(?=\s*[}\]])",       # virgula final, so FORA de string
+    )
+    stripped = cauda.sub(_replace, stripped)
     return stripped
 
 def _read_tsconfig_aliases(tsconfig: Path, base_dir: Path, seen: set) -> dict[str, list[str]]:
