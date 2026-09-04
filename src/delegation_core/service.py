@@ -386,6 +386,40 @@ def is_up(wait_seconds: float = 0.0) -> bool:
         _time.sleep(0.5)
 
 
+def wait_until_down(timeout_seconds: float = 15.0, interval: float = 0.5) -> bool:
+    """Did the daemon stop answering within `timeout_seconds`?
+
+    The counterpart to `is_up`, and not a rephrasing of it. `is_up` waits for
+    the port to START answering and returns True the moment it does, which is
+    right for `start()`. Asking it whether a daemon has gone DOWN inverts both
+    halves, and `installer.uninstall` was doing exactly that. Timed on
+    2026-09-03 with the port probe under control::
+
+        daemon still up (the bad case)      is_up -> True  in  0.00s
+        daemon already stopped (good case)  is_up -> False in 15.00s
+        daemon stops after 3s (realistic)   is_up -> True  in  0.00s
+
+    So every successful uninstall paid a full 15 seconds for nothing, and a
+    graceful shutdown of any duration was declared "still up" at t=0 — while
+    the refusal message told the user the daemon was "still answering on its
+    port 15s after a stop was requested". Zero seconds had passed.
+
+    That last case is the one that matters: this project's own unit file sets
+    `TimeoutStopSec=600` and explains why — a relink pass runs for minutes and
+    SIGKILL mid-write is how the index got its ghost rows. A daemon that takes
+    a while to stop is the expected daemon, not the stuck one.
+    """
+    import time as _time
+
+    prazo = _time.monotonic() + max(timeout_seconds, 0.0)
+    while True:
+        if not _port_answers():
+            return True
+        if _time.monotonic() >= prazo:
+            return False
+        _time.sleep(interval)
+
+
 def status() -> dict:
     """Report what the platform's service manager says, plus whether the port answers.
 

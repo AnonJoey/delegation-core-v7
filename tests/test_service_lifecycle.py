@@ -219,3 +219,74 @@ def test_is_up_sem_espera_faz_uma_unica_sondagem(monkeypatch):
     monkeypatch.setattr(service, "_port_answers", _sonda)
     service.is_up()
     assert n["v"] == 1
+
+
+# ── esperar a queda nao e esperar a subida ──────────────────────────────────
+
+
+def test_esperar_a_queda_devolve_assim_que_a_porta_silencia(monkeypatch):
+    """`is_up(wait_seconds=15)` respondia a pergunta oposta.
+
+    Ele existe para o `start()`: espera ate N segundos pelo daemon SUBIR e
+    devolve True assim que a porta responde. `installer.uninstall` o usava para
+    perguntar se o daemon DESCEU depois de um stop, e o resultado, cronometrado
+    em 03/09/2026 com a sonda de porta controlada:
+
+        daemon ainda de pe (caso ruim)   -> True  em  0,00s
+        daemon ja parou (caso bom)       -> False em 15,00s
+        daemon para em 3s (o realista)   -> True  em  0,00s
+
+    As duas metades erradas. Todo uninstall bem-sucedido pagava 15 segundos por
+    nada, e uma parada graciosa de qualquer duracao era declarada "ainda de pe"
+    no instante zero, com a mensagem dizendo "still answering 15s after a stop
+    was requested" sem ter esperado nada. A unit deste projeto registra
+    TimeoutStopSec=600 justamente porque uma passada de relink leva minutos.
+    """
+    from delegation_core import service
+
+    chamadas = []
+
+    def porta():
+        chamadas.append(1)
+        return len(chamadas) < 3      # responde duas vezes, depois silencia
+
+    monkeypatch.setattr(service, "_port_answers", porta)
+
+    assert service.wait_until_down(timeout_seconds=15, interval=0.01) is True
+    assert len(chamadas) == 3, "tem que parar de sondar assim que a porta silencia"
+
+
+def test_esperar_a_queda_desiste_e_diz_que_nao_caiu(monkeypatch):
+    from delegation_core import service
+
+    monkeypatch.setattr(service, "_port_answers", lambda: True)
+
+    assert service.wait_until_down(timeout_seconds=0.05, interval=0.01) is False
+
+
+def test_porta_ja_silenciosa_nao_espera_nada(monkeypatch):
+    """O caso bom, que era o que pagava os 15 segundos."""
+    import time
+
+    from delegation_core import service
+
+    monkeypatch.setattr(service, "_port_answers", lambda: False)
+
+    t0 = time.monotonic()
+    assert service.wait_until_down(timeout_seconds=15, interval=0.5) is True
+    assert time.monotonic() - t0 < 1.0, "nao pode esperar quando ja esta parado"
+
+
+def test_is_up_continua_esperando_a_SUBIDA(monkeypatch):
+    """A funcao original nao muda: ela esta certa para o que ela e."""
+    from delegation_core import service
+
+    chamadas = []
+
+    def porta():
+        chamadas.append(1)
+        return len(chamadas) >= 2
+
+    monkeypatch.setattr(service, "_port_answers", porta)
+
+    assert service.is_up(wait_seconds=5) is True

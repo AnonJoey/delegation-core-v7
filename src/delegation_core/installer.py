@@ -424,6 +424,14 @@ def vault_is_inside_config_dir(vault: str) -> bool:
 
     Resolves symlinks on both sides: a vault symlinked into CONFIG_DIR is the
     same hazard, and comparing the literal strings would miss it.
+
+    A path that cannot be resolved answers True, not False. This used to say
+    "no hazard" about a path it had failed to examine, and it is the gate that
+    decides whether `uninstall()` proceeds to remove by exact name. The cost of
+    a wrong True is that someone has to move their vault and retry; the cost of
+    a wrong False is `rm -rf` on `sessions/` in a directory that turned out to
+    hold their notes. `wizard._conflicts_with_config_dir` is the same check on
+    the way in and had the same defect.
     """
     if not vault:
         return False
@@ -431,8 +439,31 @@ def vault_is_inside_config_dir(vault: str) -> bool:
         v = Path(vault).expanduser().resolve()
         c = CONFIG_DIR.expanduser().resolve()
     except OSError:
-        return False
+        return True
     return v == c or c in v.parents
+
+
+def config_is_unreadable() -> bool:
+    """True when config.json is there and cannot be parsed.
+
+    `configured_vault_path()` flattens four different situations into `""`:
+    no config file, an unreadable one, invalid JSON, and a config with no
+    vault_path. Three of those mean "there is no configured vault"; one means
+    "there is one and I cannot see where". Only the last is dangerous, and
+    `vault_is_inside_config_dir("")` answered False to all four alike.
+
+    Kept separate from `configured_vault_path` rather than folded into it,
+    because that function's contract — "or '' if unreadable" — is what the
+    uninstall report relies on to tell the user where their vault still is.
+    """
+    p = CONFIG_DIR / "config.json"
+    if not p.exists():
+        return False
+    try:
+        json.loads(p.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return True
+    return False
 
 
 def _running_from(directory: Path) -> bool:
@@ -497,6 +528,25 @@ def uninstall(dry_run: bool = False) -> dict:
                          detail=f"{CONFIG_DIR} does not exist.")
         return relatorio
 
+    # Refused before the vault check, because it is the case where the vault
+    # check has nothing to work with. The report below already prints "unknown
+    # (config.json missing or unreadable)" for this state and then removed by
+    # exact name anyway — naming the uncertainty in the output and acting on
+    # certainty. REMOVE_DIRS starts at "sessions", and the folders the wizard
+    # itself suggests are lowercase ["decisions", "research", ..., "sessions"].
+    if config_is_unreadable():
+        relatorio.update(
+            status="refused_config_unreadable",
+            steps=passos,
+            detail=(
+                f"{CONFIG_DIR / 'config.json'} exists but could not be read, so "
+                "the configured vault_path is unknown. Everything removed below "
+                "is removed by exact name and a vault can hold files by those "
+                "same names. Fix or delete config.json, then run this again."
+            ),
+        )
+        return relatorio
+
     if vault_is_inside_config_dir(vault):
         relatorio.update(
             status="refused_vault_inside_config_dir",
@@ -526,7 +576,11 @@ def uninstall(dry_run: bool = False) -> dict:
     parada = service.stop()
     _passo("stop_daemon", parada["status"] in ("stopped", "not_installed"), **parada)
 
-    if service.is_up(wait_seconds=15):
+    # wait_until_down, not is_up(wait_seconds=15): the latter waits for the port
+    # to START answering, so it refused at t=0 on any daemon that was still
+    # shutting down and spent the full 15s on every uninstall that had already
+    # succeeded. See service.wait_until_down for the timings.
+    if not service.wait_until_down(timeout_seconds=15):
         relatorio.update(
             status="refused_daemon_still_up",
             steps=passos,
@@ -581,12 +635,20 @@ def uninstall(dry_run: bool = False) -> dict:
 
     venv = CONFIG_DIR / "venv"
     if venv.exists():
+        # `detail` was a constant asserting "this process is running from inside
+        # it" while `running_from_it` sat right beside it saying otherwise. The
+        # handoff to the wrapper is owed either way — that is what the sentinel
+        # below is for — but the two fields must not contradict each other.
+        de_dentro = _running_from(venv)
         relatorio["venv_pending"] = {
             "path": str(venv),
-            "running_from_it": _running_from(venv),
+            "running_from_it": de_dentro,
             "detail": (
-                "Not removed here: this process is running from inside it. "
-                "The wrapper that launched this removes it on the way out."
+                ("Not removed here: this process is running from inside it. "
+                 if de_dentro else
+                 "Not removed here: removing a venv is left to the wrapper "
+                 "either way, so the step is the same. ")
+                + "The wrapper that launched this removes it on the way out."
             ),
         }
         # A sentinel, not a printed line, because the consumer is a shell script

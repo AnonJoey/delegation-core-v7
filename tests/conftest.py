@@ -82,6 +82,85 @@ def _sem_escrita_no_estado_real(tmp_path, monkeypatch):
     yield raiz
 
 
+
+@pytest.fixture(autouse=True)
+def _sem_gerenciador_de_servico_real(tmp_path, monkeypatch):
+    """Nenhum teste executa systemctl/launchctl/schtasks de verdade.
+
+    ESCRITO DEPOIS DO ESTRAGO, em 03/09/2026. Um teste novo chamou
+    `installer.uninstall(dry_run=False)`. O redirecionamento de CONFIG_DIR
+    acima protegeu os ARQUIVOS: nada foi apagado de ~/.delegation_core. Mas
+    `uninstall` tambem desregistra os servicos, e essa metade nao passa por
+    CONFIG_DIR nenhum: passa por `service._run(["systemctl", "--user",
+    "disable", "--now", "delegation-core"])` com o nome REAL da unit.
+
+    Resultado medido: o daemon da maquina ficou `inactive`, a unit
+    `~/.config/systemd/user/delegation-core.service` foi removida, e
+    `systemctl --user is-enabled` passou a responder `not-found`. O teste
+    ainda levou 16,6s no lugar de 0,2s, porque estava esperando o systemd de
+    verdade. Foi preciso `delegation-core service install` para reverter.
+
+    A licao e a que este arquivo ja abre dizendo sobre o `calibrate()`: o
+    perigo nao e o teste que se sabe destrutivo, e a funcao que faz mais do que
+    o nome do fixture cobre. Por isso isto e `autouse` e nao um opt-in.
+
+    Devolve (127, ...), que e a forma de "comando indisponivel" que os
+    chamadores ja tratam: uma maquina sem systemd responde a mesma coisa.
+    """
+    from delegation_core import service as service_mod
+
+    def _bloqueado(cmd, timeout=30):
+        return (127, "blocked by the test suite: no test runs a real service manager")
+
+    monkeypatch.setattr(service_mod, "_run", _bloqueado, raising=False)
+
+    # A sonda de porta tambem sai, e por um motivo diferente do bloqueio acima:
+    # sem ela o resultado do teste depende de o daemon do usuario estar de pe
+    # neste instante. `installer.uninstall` recusa com "refused_daemon_still_up"
+    # quando algo responde na porta, entao o mesmo teste passava na maquina de
+    # quem tinha o servico parado e falhava na de quem nao tinha. Falso na
+    # suite significa "nao ha daemon aqui", que e o mundo em que um teste roda.
+    monkeypatch.setattr(service_mod, "_port_answers", lambda: False, raising=False)
+
+    # E os CAMINHOS das units, que e por onde o estrago passou de verdade.
+    # Bloquear `_run` tira os `systemctl disable`, mas `service.uninstall` apaga
+    # o arquivo com `SYSTEMD_UNIT.unlink(missing_ok=True)`, direto, sem passar
+    # por comando nenhum. Foi assim que a unit real caiu uma SEGUNDA vez, ja com
+    # o bloqueio de `_run` no lugar: a rede de seguranca abaixo pegou e nomeou o
+    # teste culpado, que e exatamente para isso que ela existe.
+    unidades = tmp_path / "systemd-de-mentira"
+    unidades.mkdir(parents=True, exist_ok=True)
+    for atributo, destino in (
+        ("SYSTEMD_UNIT", unidades / "delegation-core.service"),
+        ("LLAMA_SYSTEMD_UNIT", unidades / "delegation-core-llama.service"),
+        ("LAUNCHD_PLIST", unidades / "com.delegation-core.plist"),
+        ("LLAMA_LAUNCHD_PLIST", unidades / "com.delegation-core.llama.plist"),
+    ):
+        monkeypatch.setattr(service_mod, atributo, destino, raising=False)
+
+
+@pytest.fixture(autouse=True)
+def _units_do_systemd_intactas():
+    """Rede de seguranca para o mesmo estrago, caso alguem contorne o bloqueio.
+
+    Falha o teste culpado em vez de deixar a maquina sem daemon para quem for
+    rodar a suite depois. Mesma forma da rede de hooks/venv/models acima, que
+    nao cobria isto porque as units vivem fora de ~/.delegation_core.
+    """
+    unidades = Path.home() / ".config" / "systemd" / "user"
+    antes = {p.name for p in unidades.glob("delegation-core*.service")} if unidades.exists() else set()
+
+    yield
+
+    depois = {p.name for p in unidades.glob("delegation-core*.service")} if unidades.exists() else set()
+    sumiram = antes - depois
+    if sumiram:
+        pytest.fail(
+            f"o teste removeu {', '.join(sorted(sumiram))} de {unidades}. "
+            "Nenhum teste desregistra servico real: use um dublê de service._run. "
+            "Para reverter a mao: delegation-core service install"
+        )
+
 @pytest.fixture(autouse=True)
 def _config_real_intacta():
     """Rede de seguranca: falha o teste que ainda assim tocar a config real.

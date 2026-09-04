@@ -72,17 +72,24 @@ def instalacao(cfg_dir):
 @pytest.fixture
 def servico(monkeypatch):
     """Substitui o gerenciador de servico e registra a ordem das chamadas."""
-    # `no_ar` e a fila de respostas de `is_up` DEPOIS do stop. O caminho feliz
-    # e uma unica resposta False: o daemon parou.
+    # `no_ar` e a fila de respostas sobre o estado do daemon DEPOIS do stop. O
+    # caminho feliz e uma unica resposta False: o daemon parou.
+    #
+    # O dublê passou a ser de `wait_until_down` e nao mais de `is_up`, porque a
+    # pergunta que o uninstall faz e "ele DESCEU?" e nao "ele SUBIU?". Trocar a
+    # funcao sem trocar isto deixaria estes tres testes verdes contra uma
+    # funcao que o codigo nao chama mais. `wait_until_down` devolve True quando
+    # a porta silenciou, entao a resposta e o INVERSO de "no ar".
     registro = {"ordem": [], "no_ar": [False]}
 
     def _stop(*a, **k):
         registro["ordem"].append("stop")
         return {"action": "stop", "status": "stopped", "detail": ""}
 
-    def _is_up(wait_seconds=0.0):
-        registro["ordem"].append("is_up")
-        return registro["no_ar"].pop(0) if registro["no_ar"] else False
+    def _wait_until_down(timeout_seconds=0.0, interval=0.5):
+        registro["ordem"].append("wait_until_down")
+        ainda_no_ar = registro["no_ar"].pop(0) if registro["no_ar"] else False
+        return not ainda_no_ar
 
     def _uninstall():
         registro["ordem"].append("unregister:daemon")
@@ -93,7 +100,7 @@ def servico(monkeypatch):
         return {"platform": "Linux", "status": "removed"}
 
     monkeypatch.setattr(service, "stop", _stop)
-    monkeypatch.setattr(service, "is_up", _is_up)
+    monkeypatch.setattr(service, "wait_until_down", _wait_until_down)
     monkeypatch.setattr(service, "uninstall", _uninstall)
     monkeypatch.setattr(service, "uninstall_llama_autostart", _uninstall_llama)
     return registro
@@ -369,3 +376,107 @@ def test_o_sentinel_nao_e_removido_pelo_proprio_uninstall(instalacao, servico):
     assert installer.VENV_PENDING_NAME not in installer.REMOVE_FILES
     installer.uninstall()
     assert installer.venv_pending_path().exists()
+
+
+# ── a guarda do vault respondia "pode remover" quando nao conseguia conferir ──
+#
+# Achado em 03-04/09 por varredura sistematica: um script listou todo `except`
+# do src/ cujo corpo e so um `return` de valor de aparencia segura, 78 no total,
+# e cruzou cada um com o docstring da funcao que o contem. Este saltou:
+#
+#   installer.py:433  vault_is_inside_config_dir -> False
+#                     "Would removing CONFIG_DIR's contents also remove vault content?"
+#
+# E a MESMA guarda que `wizard._conflicts_with_config_dir` faz na entrada, e o
+# mesmo defeito nas duas: responder "sem conflito" quando a resposta real e "nao
+# consegui conferir". A do wizard so impede uma ESCOLHA ruim; esta e a que
+# decide se o desinstalador puxa o gatilho.
+#
+# O relatorio do uninstall ja escreve a incerteza em voz alta:
+#   "vault": vault or "unknown (config.json missing or unreadable)"
+# e seguia removendo assim mesmo. Nomear a duvida na saida e agir como se
+# houvesse certeza e a familia inteira que este job passou a noite corrigindo.
+#
+# O custo do erro nao e teorico: REMOVE_DIRS comeca em "sessions", e as pastas
+# que o proprio wizard sugere sao ["decisions", "research", "tools", "fixes",
+# "reference", "sessions"], em minusculas. O casamento e exato, em qualquer
+# sistema de arquivos.
+
+
+def test_um_vault_dentro_do_config_dir_recusa_o_uninstall(cfg_dir, monkeypatch):
+    """O caso que ja funcionava: pinado para nao regredir junto com a correcao."""
+    (cfg_dir / "config.json").write_text(
+        json.dumps({"vault_path": str(cfg_dir / "meu-vault")}), encoding="utf-8")
+
+    r = installer.uninstall(dry_run=True)
+
+    assert r["status"] == "refused_vault_inside_config_dir"
+
+
+def test_config_ilegivel_recusa_em_vez_de_assumir_que_nao_ha_vault(cfg_dir, monkeypatch):
+    """config.json existe e nao abre: o vault pode estar em qualquer lugar.
+
+    `configured_vault_path()` devolve "" nesse caso, e `vault_is_inside_config_dir("")`
+    devolve False, entao a remocao por nome exato seguia adiante sem que ninguem
+    soubesse onde o vault esta.
+    """
+    (cfg_dir / "config.json").write_text("{ isto nao e json", encoding="utf-8")
+    (cfg_dir / "sessions").mkdir(exist_ok=True)
+
+    r = installer.uninstall(dry_run=True)
+
+    assert r["status"] == "refused_config_unreadable", (
+        "um uninstall que nao sabe onde o vault esta nao pode remover por nome"
+    )
+    assert "plan" not in r, "nem o plano de remocao deve ser montado"
+
+
+def test_config_ausente_nao_recusa(cfg_dir, monkeypatch):
+    """Sem config.json nunca houve vault configurado, e o que esta em CONFIG_DIR
+    e nosso. Recusar aqui deixaria o software impossivel de remover."""
+    r = installer.uninstall(dry_run=True)
+    assert r["status"] == "dry_run"
+
+
+def test_a_guarda_recusa_quando_o_caminho_nao_pode_ser_resolvido(monkeypatch):
+    """`except OSError: return False` dizia "pode remover" para um caminho que
+    nao pode nem ser resolvido."""
+    def _explode(self, strict=False):
+        raise OSError("loop de link simbolico")
+
+    monkeypatch.setattr(installer.Path, "resolve", _explode)
+
+    assert installer.vault_is_inside_config_dir("/algum/vault") is True
+
+
+def test_um_vault_de_verdade_fora_do_config_dir_continua_removivel(cfg_dir, tmp_path):
+    """A correcao nao pode transformar todo uninstall numa recusa."""
+    vault = tmp_path / "vault-de-verdade"
+    vault.mkdir()
+    (cfg_dir / "config.json").write_text(
+        json.dumps({"vault_path": str(vault)}), encoding="utf-8")
+
+    r = installer.uninstall(dry_run=True)
+
+    assert r["status"] == "dry_run"
+    assert r["vault_path"] == str(vault)
+
+
+def test_o_detalhe_do_venv_nao_contradiz_o_booleano_ao_lado(cfg_dir, tmp_path, monkeypatch):
+    """`detail` afirmava "this process is running from inside it" mesmo quando
+    `running_from_it` dizia False, no mesmo dicionario, uma chave acima."""
+    vault = tmp_path / "vault"
+    vault.mkdir()
+    (cfg_dir / "config.json").write_text(
+        json.dumps({"vault_path": str(vault)}), encoding="utf-8")
+    (cfg_dir / "venv").mkdir(exist_ok=True)
+    monkeypatch.setattr(installer, "_running_from", lambda d: False)
+
+    r = installer.uninstall(dry_run=False)
+
+    assert "venv_pending" in r, f"uninstall parou antes do venv: {r.get('status')} / {r.get('detail')}"
+    pend = r["venv_pending"]
+    assert pend["running_from_it"] is False
+    assert "running from inside it" not in pend["detail"], (
+        f"o texto afirma o contrario do campo ao lado: {pend}"
+    )
