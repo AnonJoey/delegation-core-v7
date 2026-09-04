@@ -271,12 +271,37 @@ def _csv_to_md(path: Path) -> str:
 
 
 def _html(path: Path) -> str:
+    """Texto de uma pagina, com o piso de substancia que os binarios ja tinham.
+
+    O HTML parece um formato de texto e nao se comporta como um: a extracao
+    DESCARTA a maior parte do arquivo, e por isso ela pode esvaziar um arquivo
+    grande, que e a propriedade que `.pdf`, `.docx`, `.xlsx` e `.pptx` tem e que
+    `.txt`, `.json` e `.csv` nao tem.
+
+    MEDIDO em 04/09/2026 com dois casos comuns, antes deste piso existir aqui:
+        casca de JavaScript (<div id="root"> + noscript)  ->  17 caracteres
+        export so de imagens (<img> x3)                   ->   0 caracteres
+    Nos dois, `sem_substancia` respondia True e `is_no_text_stub` respondia
+    False, entao `organizer` os tratava como documento e mandava sintetizar. Um
+    arquivo do qual se extraiu ZERO caractere virando nota e a forma mais pura do
+    defeito que as 22 notas de invencao integral produziram.
+
+    E `.html` nao e hipotetico nesta instalacao: os dois artefatos que entraram
+    no inbox em 03/09 eram `.html`.
+    """
     from bs4 import BeautifulSoup
     raw = path.read_text(encoding="utf-8", errors="replace")
     soup = BeautifulSoup(raw, "html.parser")
     for tag in soup(["script", "style", "head", "nav", "footer", "aside"]):
         tag.decompose()
-    return soup.get_text(separator="\n", strip=True)
+    texto = soup.get_text(separator="\n", strip=True)
+    # Sem `paginas=`: uma pagina nao tem unidade natural para dividir, e inventar
+    # uma (paragrafos, por exemplo) e o erro que o comentario de
+    # MIN_CHARS_POR_PAGINA ja registra sobre o `.docx`.
+    if sem_substancia(texto):
+        return no_text_stub(path, formato="HTML", unidade="Elements",
+                            total=len(soup.find_all(True)), extraido=len(texto.strip()))
+    return texto
 
 
 def _pdf(path: Path) -> str:
