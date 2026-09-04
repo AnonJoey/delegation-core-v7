@@ -141,12 +141,28 @@ KNOWN_UNWIRED: dict[str, str] = {
 }
 
 
-def describe(mcp_tools: list[dict]) -> dict:
+def describe(mcp_tools: list[dict], default_scope: dict | None = None) -> dict:
     """Assemble the capability report handed to a connecting client.
 
     ``mcp_tools`` comes from the live server registry rather than a hand-kept
     list, so the tool surface reported here cannot drift from the tool surface
     actually served.
+
+    ``default_scope`` e o escopo que a busca sem argumento REALMENTE usaria nesta
+    maquina, mais de onde ele veio. Antes disso o relatorio dizia
+    `"all": "everything (default)"`, uma palavra escrita a mao, enquanto
+    `server._default_scope()` decide por vault: 'notes' quando artigo gerado
+    passa de metade, 'all' quando nao passa, e uma chave em config.json vence os
+    dois.
+
+    Medido neste vault: 8.246 gerados de 8.593, entao o padrao resolve para
+    'notes' e toda busca sem escopo respondeu `"scope": "notes"`. Um agente que
+    lesse o relatorio acreditaria estar cobrindo tudo enquanto cobria 347 notas
+    e ignorava 8.246 artigos, em silencio.
+
+    E o mesmo defeito do `known_unwired`: o relatorio GERADO carregando
+    afirmacao escrita a mao, sob um contrato que manda preferi-lo a qualquer
+    prosa. A correcao e a mesma: parar de afirmar e passar a calcular.
     """
     wired = {k: v for k, v in GRAPH_CAPABILITIES.items() if v["status"] == "wired"}
     unexposed = {k: v for k, v in GRAPH_CAPABILITIES.items() if v["status"] != "wired"}
@@ -162,7 +178,13 @@ def describe(mcp_tools: list[dict]) -> dict:
             "notes": "hand-written vault notes",
             "generated": "graph_build wiki articles (filter by graph= to pin one codebase)",
             "external": "ingest_folder'd files, never moved from their source",
-            "all": "everything (default)",
+            "all": "everything",
+        },
+        "default_scope": default_scope or {
+            "resolved": "notes",
+            "source": "fallback",
+            "detail": "the report was built without asking the server; "
+                      "'notes' is the documented fallback",
         },
         "contract": (
             "This report is generated: 'tools' is asked of the running server and "

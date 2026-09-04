@@ -266,7 +266,7 @@ async def search_vault(query: str, limit: int = 5, use_local: bool = False,
     force the local model to write the summary (hybrid mode).
     Cite 'sources' titles when referencing notes. Flat token cost regardless of vault size.
 
-    scope narrows what is searched — 'notes' (hand-written only, THE DEFAULT),
+    scope narrows what is searched — 'notes' (hand-written only),
     'generated' (graph_build wiki articles), 'external' (ingest_folder'd files),
     'all' (everything). graph='<name>' restricts to one built code graph.
     Each hit carries its 'kind'.
@@ -1166,7 +1166,22 @@ async def capabilities() -> str:
     listed = [{"name": t.name,
                "summary": (t.description or "").strip().split("\n")[0]}
               for t in sorted(tools, key=lambda t: t.name)]
-    return json.dumps(_capabilities.describe(listed))
+    # O escopo padrao vai CALCULADO e nao escrito: veja capabilities.describe.
+    try:
+        health = _vault.get_health_summary()
+        total = health.get("total_notes") or 0
+        gerados = health.get("generated_notes") or 0
+        configurado = (getattr(_vault.cfg, "default_search_scope", "") or "").strip()
+        escopo = {
+            "resolved": _default_scope(),
+            "source": "config" if configurado else "vault-composition",
+            "detail": (f"default_search_scope={configurado!r} in config.json"
+                       if configurado else
+                       f"{gerados} generated of {total} notes"),
+        }
+    except Exception as e:
+        escopo = {"resolved": "notes", "source": "fallback", "detail": str(e)}
+    return json.dumps(_capabilities.describe(listed, escopo))
 
 
 @mcp.tool()
