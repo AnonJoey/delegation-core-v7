@@ -43,7 +43,7 @@ def _lock_is_stale(lock_path: Path) -> bool:
     if platform.system() == "Windows":
         return False
     try:
-        conteudo = lock_path.read_text().strip()
+        conteudo = lock_path.read_text(encoding="utf-8").strip()
     except OSError:
         return True
 

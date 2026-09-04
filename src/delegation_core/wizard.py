@@ -548,7 +548,11 @@ def _startup_systemd(cfg: Config):
     # reads them too. They used to be spelled out independently in five files.
     from . import service as _svc
     service_file = _svc.LLAMA_SYSTEMD_UNIT
-    service_file.write_text(service)
+    # encoding explicito, como service.py ja faz para a unit DELE. Sem ele
+    # o Python usa locale.getpreferredencoding(): medido sob LC_ALL=C, um
+    # caminho com acento levanta UnicodeEncodeError e o usuario recebe
+    # "Could not configure auto-start" em vez do motor no login.
+    service_file.write_text(service, encoding="utf-8")
     subprocess.run(["systemctl", "--user", "daemon-reload"], check=True)
     subprocess.run(["systemctl", "--user", "enable", "--now", _svc.LLAMA_SERVICE_NAME], check=True)
 
@@ -590,7 +594,7 @@ def _startup_launchd(cfg: Config):
     )
 
     plist_file = _svc.LLAMA_LAUNCHD_PLIST
-    plist_file.write_text(plist)
+    plist_file.write_text(plist, encoding="utf-8")
     subprocess.run(["launchctl", "load", str(plist_file)], check=True)
 
 

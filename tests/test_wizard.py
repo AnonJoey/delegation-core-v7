@@ -270,3 +270,50 @@ def test_menu_devolve_indice_base_zero(monkeypatch):
 def test_menu_recusa_fora_da_faixa(monkeypatch):
     _responde(monkeypatch, "4", "1")
     assert wizard._menu("Titulo", ["a", "b", "c"]) == 0
+
+
+# ── encoding: o par que estava separado ─────────────────────────────────────
+
+
+def test_o_unit_e_escrito_em_utf8_explicito(cfg_hostil, tmp_path, monkeypatch):
+    """`service.py` escreve a unit dele com encoding="utf-8"; o wizard escrevia
+    a dele sem.
+
+    Sem `encoding=`, o Python usa locale.getpreferredencoding(). MEDIDO sob
+    LC_ALL=C, que e o que um servidor enxuto tem::
+
+        preferred encoding: ANSI_X3.4-1968
+        write_text(unit)                  -> UnicodeEncodeError em 'ã'
+        write_text(unit, encoding="utf-8") -> ok
+
+    Um usuario chamado Joao, ou com acento em qualquer parte do caminho do
+    modelo, cai no `except Exception` de `_setup_startup` e recebe "Could not
+    configure auto-start". Este defeito e ALTO, diferente do `%` e do `&` da
+    mesma funcao, que sao silenciosos.
+    """
+    import inspect
+
+    fonte = inspect.getsource(wizard._startup_systemd)
+    assert 'encoding="utf-8"' in fonte, (
+        "service.py ja escreve a unit dele com encoding explicito; o wizard tem "
+        "que escrever a dele igual"
+    )
+
+
+def test_o_plist_e_escrito_em_utf8_explicito():
+    import inspect
+
+    fonte = inspect.getsource(wizard._startup_launchd)
+    assert 'encoding="utf-8"' in fonte
+
+
+def test_um_caminho_com_acento_nao_derruba_a_escrita_da_unit(tmp_path, monkeypatch):
+    """O teste que realmente exercita, e nao so le a fonte."""
+    cfg = Config(vault_path=str(tmp_path), engine_mode="local")
+    cfg.llama_binary = "/home/joao/modelos/acentuação/llama-server"
+    cfg.llama_model = "/home/joao/modelos/modèle.gguf"
+
+    unit = _unit_escrito(monkeypatch, tmp_path, cfg)
+
+    assert "acentuação" in unit
+    assert "modèle.gguf" in unit

@@ -1606,7 +1606,8 @@ def _is_spock_file(path: Path, ts_result: dict) -> bool:
     import re as _re
     _SPOCK_FEATURE_RE = _re.compile(r"""^\s*def\s+[\"']""", _re.MULTILINE)
     try:
-        return bool(_SPOCK_FEATURE_RE.search(path.read_text(errors="replace")))
+        return bool(_SPOCK_FEATURE_RE.search(
+            path.read_text(encoding="utf-8", errors="replace")))
     except OSError:
         return False
 
@@ -1617,7 +1618,11 @@ def _extract_spock_fallback(path: Path, ts_result: dict) -> dict:
     (which survive reliably) with class and feature-method nodes extracted via regex.
     """
     import re as _re
-    source = path.read_text(errors="replace")
+    # encoding explicito: sem ele o decode usa o locale, e `errors="replace"`
+    # ENGOLE a falha em silencio. Medido sob LC_ALL=C lendo um .groovy UTF-8:
+    # `ValidacaoSpec` (com cedilha e til) sai como quatro U+FFFD, e o no do
+    # grafo nasce com o nome corrompido sem erro nenhum.
+    source = path.read_text(encoding="utf-8", errors="replace")
     str_path = str(path)
     stem = _file_stem(path)
 

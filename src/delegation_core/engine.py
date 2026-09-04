@@ -514,7 +514,11 @@ class DelegationEngine:
                 rotated = log_path.with_suffix(log_path.suffix + ".1")
                 rotated.unlink(missing_ok=True)
                 log_path.rename(rotated)
-            self._log_fh = open(log_path, "a")
+            # Endurecimento e nao defeito: o objeto vai para Popen(stdout=...),
+            # que usa o fd cru, entao o llama.cpp escreve os proprios bytes.
+            # Explicito para que uma escrita futura em Python por aqui nao herde
+            # o encoding do locale.
+            self._log_fh = open(log_path, "a", encoding="utf-8")
             self._proc = subprocess.Popen(
                 cmd,
                 stdout=self._log_fh,
