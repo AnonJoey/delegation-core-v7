@@ -17,7 +17,7 @@ Introduced in the MAURICIO deployment.
 import logging
 import re
 from datetime import datetime
-from pathlib import Path
+from pathlib import Path, PurePosixPath, PureWindowsPath
 
 logger = logging.getLogger("linker")
 
@@ -62,15 +62,51 @@ def format_link(path_or_stem: str, title: str | None = None) -> str:
     return f"[[{stem}]]" if disp == stem else f"[[{stem}|{disp}]]"
 
 
-def wikilinks(hits: list, threshold: float) -> str:
-    """Return a `- [[stem|Display]]` block for hits above the similarity threshold."""
+def wikilinks(hits: list, threshold: float, vault_root) -> str:
+    """Return a `- [[stem|Display]]` block for hits that are notes that exist.
+
+    `vault_root` is required, not optional. Without it this function had no way
+    to tell a live note from a row left behind by a deleted one, and it is the
+    shared helper six call sites use to write links into the user's notes —
+    among them the organizer's heal pass and the `_inject_related_links` behind
+    `delegation-core note write`.
+
+    Measured on 2026-09-03: deleting a note left its ChromaDB row in place
+    (`indexed_notes` 12.955 -> 12.956, and it did not come back down), and
+    `search()` returns `meta["path"]` without checking the filesystem. Every
+    other consumer of a hit path already guarded — `merger.try_merge` with
+    `exists()`, `inject_backlinks` with `exists()`, `relink_folder` against its
+    resolvable set — and this one did not, so it wrote `[[link]]` to notes that
+    are gone. An optional parameter would have let the next call site forget;
+    a required one cannot be forgotten.
+
+    Three shapes are rejected, and each is a real way to get a link that never
+    resolves:
+
+    * a path with no file behind it — the stale row this was written for;
+    * a hit with no path at all, which used to be linked by its *title*. That
+      row is precisely the one that cannot be checked against the disk, so
+      linking it is asserting a resolution nobody verified. Same rule as
+      `_unindexed_notes`: degrade to "cannot tell", never to "all fine".
+    * an absolute path, which is how ingest.py keys externally indexed files.
+      `Path(vault) / "/abs/path"` discards the vault root and yields the
+      absolute path itself, so a naive `exists()` would approve every ingested
+      file. `relink_folder` carries the same guard, with the note that 23
+      `[[SKILL]]`-style links were written on a real pass before it existed.
+    """
+    root = Path(vault_root)
     lines = []
     for h in hits:
-        if h.get("similarity", 0) >= threshold:
-            if h.get("path"):
-                lines.append(f"- {format_link(h['path'], h.get('title'))}")
-            elif h.get("title"):
-                lines.append(f"- {format_link(h['title'], h.get('title'))}")
+        if h.get("similarity", 0) < threshold:
+            continue
+        rel = h.get("path") or ""
+        if not rel or PurePosixPath(rel).is_absolute() or PureWindowsPath(rel).is_absolute():
+            continue
+        # is_file(), not exists(): a hit whose path names a directory — "Fixes"
+        # — passes exists() and is not a note.
+        if not (root / rel).is_file():
+            continue
+        lines.append(f"- {format_link(rel, h.get('title'))}")
     return "\n".join(lines)
 
 

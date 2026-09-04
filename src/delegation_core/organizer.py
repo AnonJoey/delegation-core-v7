@@ -259,7 +259,7 @@ async def heal(engine, vault_manager) -> dict:
 
                 # Re-inject wikilinks using search_threshold (not merge_threshold)
                 hits = vault_manager.search(healed_content[:600], limit=5)
-                links = wikilinks(hits, cfg.search_threshold)
+                links = wikilinks(hits, cfg.search_threshold, cfg.vault)
                 if links:
                     healed_content = healed_content.rstrip() + f"\n\n## Related\n{links}\n"
                     linked_paths = [h["path"] for h in hits
@@ -438,7 +438,7 @@ async def run(engine, vault_manager) -> dict:
             if merged:
                 results["merged"].append(f"{f.name} → {merged_path}")
             else:
-                links = wikilinks(hits, cfg.merge_threshold)
+                links = wikilinks(hits, cfg.merge_threshold, cfg.vault)
                 final = note_content + (f"\n\n## Related\n{links}" if links else "")
 
                 safe = safe_filename(f.stem)
@@ -534,7 +534,7 @@ async def _process_sections(
             if merged:
                 results["merged"].append(f"{src.name}[{title}] → {merged_path}")
             else:
-                links = wikilinks(hits, cfg.merge_threshold)
+                links = wikilinks(hits, cfg.merge_threshold, cfg.vault)
                 final = note_content + (f"\n\n## Related\n{links}" if links else "")
                 safe  = safe_filename(f"{src.stem}–{title}")
                 final = ensure_aliases(final, [clean_display(f"{today_str}-{safe}"), label])

@@ -115,7 +115,7 @@ def _write_vault_note(vault_manager, folder: str, title: str, content: str) -> s
 
     try:
         hits = [h for h in vault_manager.search(full[:600], limit=6) if h.get("path") != rel][:5]
-        links = wikilinks(hits, cfg.merge_threshold)
+        links = wikilinks(hits, cfg.merge_threshold, cfg.vault)
         if links:
             updated = full.rstrip() + f"\n\n## Related\n{links}\n"
             dest.write_text(updated, encoding="utf-8")

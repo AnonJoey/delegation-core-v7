@@ -315,6 +315,14 @@ def test_write_artifacts_to_vault_does_not_add_related_links_to_wiki_articles(cf
     """Articles already carry exact graph-derived cross-links; BGE backlinks on top
     added ~65 near-identical entries each (every community resembles every other)
     and cost a search + rewrite + backlink pass per article."""
+    # The hit has to name a note that actually exists. wikilinks() now takes the
+    # vault root and drops any hit with no file behind it, because a deleted note
+    # leaves its ChromaDB row in place and search() returns the dead path — see
+    # test_linker_wikilinks.py. Until this file was created the fake asserted a
+    # link to reference/other.md while never writing it, so the "report still
+    # gets them" half of this test passed on exactly the behaviour that was wrong.
+    (cfg.vault / "reference").mkdir(parents=True, exist_ok=True)
+    (cfg.vault / "reference" / "other.md").write_text("# Other\n", encoding="utf-8")
     hits = [{"path": "reference/other.md", "title": "Other", "similarity": 0.99}]
     vm = FakeVaultManager(cfg, search_hits=hits)
 

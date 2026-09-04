@@ -42,7 +42,7 @@ def post_write_links(vault, note_path: Path, rel_path: str, folder: str, stem: s
         content = note_path.read_text(encoding="utf-8")
         hits = [h for h in vault.search(content[:600], limit=6)
                 if h.get("path") != rel_path][:5]
-        links = wikilinks(hits, vault.cfg.merge_threshold)
+        links = wikilinks(hits, vault.cfg.merge_threshold, vault.cfg.vault)
         if links:
             updated = content.rstrip() + f"\n\n## Related\n{links}\n"
             note_path.write_text(updated, encoding="utf-8")
