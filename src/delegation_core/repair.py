@@ -90,10 +90,24 @@ def _notas_da_origem(vault: Path, origem: Path) -> list[Path]:
 
 
 def _ja_tratada(nota: Path) -> bool:
+    """A nota ja carrega a marca do toco, ou nao pode ser lida?
+
+    As duas respostas sao True, e a segunda e o ponto. `False` significa "ainda
+    precisa ser reescrita", e devolver isso para uma nota que nem abriu manda o
+    `aplicar()` passar por cima de um arquivo cujo conteudo ninguem viu.
+
+    MEDIDO com uma nota sem permissao de leitura, antes desta mudanca: devolvia
+    False. E a direcao errada da regra que `_unindexed_notes` carrega no proprio
+    docstring, "degrade to 'cannot tell' rather than to 'all fine'": aqui o
+    "tudo certo" e destrutivo, entao quem nao pode ser lido nao pode ser
+    reescrito.
+    """
     try:
         cabeca = nota.read_text(encoding="utf-8")[:800]
-    except OSError:
-        return False
+    except OSError as e:
+        logger.warning("nao consegui ler %s (%s) - tratando como ja tratada para "
+                       "nao reescrever no escuro", nota, e)
+        return True
     return MARCA in cabeca
 
 

@@ -35,10 +35,38 @@ _CODE_HINT_EXTS = frozenset({
 
 
 def _load_registry() -> dict:
-    try:
-        return json.loads(_REGISTRY_FILE.read_text(encoding="utf-8")) if _REGISTRY_FILE.exists() else {}
-    except Exception:
+    """O registro de ingestao, ou dicionario vazio quando o arquivo nao serve.
+
+    A checagem de TIPO existe porque tratar so "nao parseia" deixa passar o caso
+    pior: um JSON valido do tipo errado. MEDIDO antes desta guarda, com todo
+    chamador fazendo `registry[caminho] = ...`:
+
+        ["uma","lista"]  -> list  -> TypeError: list indices must be integers
+        "uma string"     -> str   -> TypeError: 'str' object does not support
+        42               -> int   -> TypeError: 'int' object does not support
+
+    E o TERCEIRO armazem JSON deste projeto a receber a mesma guarda hoje:
+    `jobs.py` e `localqueue.py` ja a tinham, `tracker.py` ganhou de manha e este
+    ficou de fora da contagem. O `ingested_sources.json` desta maquina tem
+    645 KB e 23 caminhos indexados.
+
+    Descarta em voz alta: perder 23 caminhos em silencio faz o proximo
+    `ingest_folder` reindexar tudo sem ninguem entender por que.
+    """
+    if not _REGISTRY_FILE.exists():
         return {}
+    try:
+        dados = json.loads(_REGISTRY_FILE.read_text(encoding="utf-8"))
+    except Exception as e:
+        logger.warning("ingest registry unreadable (%s) - starting empty", e)
+        return {}
+    if not isinstance(dados, dict):
+        logger.warning(
+            "ingest registry at %s holds %s, not a dict - ignoring it. The file "
+            "was not deleted; move it aside if the content matters.",
+            _REGISTRY_FILE, type(dados).__name__)
+        return {}
+    return dados
 
 
 def _atomic_write_registry(registry: dict):
