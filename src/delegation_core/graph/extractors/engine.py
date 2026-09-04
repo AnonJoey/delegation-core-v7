@@ -3,7 +3,8 @@ from __future__ import annotations
 
 import hashlib
 import importlib
-from delegation_core.graph.extractors.base import _LANGUAGE_BUILTIN_GLOBALS, _file_stem, _make_id, _read_text
+from delegation_core.graph.extractors.base import (DEPENDENCIA_AUSENTE, _LANGUAGE_BUILTIN_GLOBALS,
+                                                   _file_stem, _make_id, _read_text)
 from delegation_core.graph.ids import normalize_id
 from delegation_core.graph.extractors.models import LanguageConfig
 from delegation_core.graph.extractors.resolution import _resolve_js_import_target
@@ -2171,19 +2172,32 @@ def _extract_generic(
             # Fallback for PHP: try "language_php" then "language"
             lang_fn = getattr(mod, "language", None)
         if lang_fn is None:
-            return {"nodes": [], "edges": [], "error": f"No language function in {config.ts_module}"}
+            return {"nodes": [], "edges": [],
+                    "error": f"No language function in {config.ts_module}",
+                    "error_kind": DEPENDENCIA_AUSENTE}
         language = Language(lang_fn())
     except ImportError:
-        return {"nodes": [], "edges": [], "error": f"{config.ts_module} not installed"}
+        return {"nodes": [], "edges": [],
+                "error": f"{config.ts_module} not installed",
+                "error_kind": DEPENDENCIA_AUSENTE}
     except TypeError as e:
         # tree-sitter version mismatch: old Language() expects (lib_path),
         # new Language() expects (language_capsule, name). Surface a hint
         # so users see the upgrade path instead of a bare TypeError.
+        #
+        # error_kind, e nao so o texto: o agregador de #1745 classificava por
+        # `"not installed" in erro`, e esta mensagem nao contem essa frase. O
+        # resultado media zero nos e nenhum aviso, que e palavra por palavra o
+        # desfecho que #1745 existe para impedir ("the graph builds
+        # 'successfully' while every such file silently contributes nothing").
+        # E o caso MAIS provavel dos tres: aqui o pacote esta instalado, so nao
+        # casa com o core do tree-sitter.
         hint = (
             f"tree-sitter version mismatch for {config.ts_module}: {e}. "
             "Try: pip install --upgrade tree-sitter tree-sitter-languages"
         )
-        return {"nodes": [], "edges": [], "error": hint}
+        return {"nodes": [], "edges": [], "error": hint,
+                "error_kind": DEPENDENCIA_AUSENTE}
     except Exception as e:
         return {"nodes": [], "edges": [], "error": str(e)}
 

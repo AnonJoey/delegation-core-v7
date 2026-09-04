@@ -36,6 +36,15 @@ def _make_id(*parts: str) -> str:
     return make_id(*parts)
 
 
+# Marca estrutural para "o arquivo nao rendeu nada porque falta dependencia".
+# Classificar isso pelo TEXTO do erro (o agregador de #1745 fazia
+# `"not installed" in erro`) perde toda falha em que o pacote ESTA instalado e
+# nao serve: versao incompativel do tree-sitter, pacote de gramatica com outra
+# API. Nesses casos o grafo era montado sem nenhum no daquele tipo de arquivo e
+# sem aviso nenhum. Quem devolver esta chave e classificado pela estrutura.
+DEPENDENCIA_AUSENTE = "missing_dependency"
+
+
 def _file_stem(path: Path) -> str:
     """Stem used as the node-ID prefix for a file and its symbols.
 

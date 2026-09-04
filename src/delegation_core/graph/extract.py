@@ -25,6 +25,7 @@ from .pascal_resolution import resolve_pascal_inherited_calls
 
 # --- migrated to graphify/extractors/ (see graphify/extractors/MIGRATION.md) ---
 from delegation_core.graph.extractors.base import (  # noqa: F401
+    DEPENDENCIA_AUSENTE,
     _LANGUAGE_BUILTIN_GLOBALS,
     _file_stem,
     _make_id,
@@ -4582,8 +4583,14 @@ def extract(
     _missing_dep_count: dict[str, int] = {}
     _missing_dep_error: dict[str, str] = {}
     for i, _p in enumerate(paths):
-        _err = (per_file[i] or {}).get("error") or ""
-        if "not installed" in _err:
+        _res_i = per_file[i] or {}
+        _err = _res_i.get("error") or ""
+        # A marca estrutural vem primeiro; o casamento por texto fica como
+        # retaguarda para os extractors por linguagem, que ainda frasejam a
+        # mensagem a mao. Classificar SO pelo texto perdia toda falha em que o
+        # pacote esta instalado e nao serve (versao incompativel do
+        # tree-sitter, gramatica com outra API): zero nos e nenhum aviso.
+        if _res_i.get("error_kind") == DEPENDENCIA_AUSENTE or "not installed" in _err:
             _ext = _p.suffix.lower()
             _missing_dep_count[_ext] = _missing_dep_count.get(_ext, 0) + 1
             _missing_dep_error.setdefault(_ext, _err)
