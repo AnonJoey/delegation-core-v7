@@ -202,7 +202,17 @@ def _shortest_unique_suffix(sf: str, all_sfs: "set[str]") -> str:
         suffix = parts[-k:]
         if all(o[-k:] != suffix for o in others):
             return "/".join(suffix)
-    return "/".join(parts)
+    # Nenhum sufixo distingue: outro caminho tem a MESMA lista de segmentos e so
+    # difere no que a divisao descarta (barra dupla, "./" na frente, separador do
+    # Windows). Devolver "/".join(parts) aqui apagava a diferenca e dava o mesmo
+    # rotulo aos dois nos, que e exatamente o que #2032 existe para impedir.
+    # Medido, com {"src//api/index.ts", "src/api/index.ts"}: os dois saiam como
+    # "src/api/index.ts". Devolver `sf` intacto preserva a unica distincao que
+    # sobrou. Pelo build_from_json isso nao acontece, porque _norm_source_file
+    # roda antes e caminhos assim ja chegam colapsados no MESMO source_file (e ai
+    # o rotulo igual esta certo, e o mesmo arquivo); o caminho alcancavel e quem
+    # chama o helper com lista crua.
+    return sf
 
 
 def _file_label_reassignments(items: "list[tuple]") -> dict:
@@ -237,8 +247,20 @@ def _disambiguate_file_node_labels(G: "nx.Graph") -> None:
 
 def disambiguate_file_labels_in_nodes(nodes: "list") -> None:
     """Relabel colliding-basename file nodes on a raw node-dict list, in place
-    (#2032). Used by the extract --no-cluster path, which writes the merged
-    extraction directly without going through build_from_json."""
+    (#2032).
+
+    SEM CHAMADOR NESTE REPOSITORIO. A frase anterior dizia "used by the extract
+    --no-cluster path"; conferido com grep em todo o repo, esse caminho nao
+    existe aqui e a unica desambiguacao que roda e a de `build_from_json`, no
+    grafo ja montado. A funcao fica porque e API publica herdada do graphify, mas
+    quem a chamar precisa saber a diferenca que importa: `build_from_json`
+    normaliza `source_file` antes (`_norm_source_file`, separador do Windows e
+    caminho absoluto), e esta aqui NAO normaliza nada. Passar lista crua com
+    "src\\api\\x.ts" e "src/api/x.ts" trata os dois como arquivos diferentes,
+    enquanto pelo build eles colapsam num so.
+
+    Preso por tests/test_build_rotulo_de_arquivo.py.
+    """
     items = [
         (i, n.get("label"), n.get("source_file"))
         for i, n in enumerate(nodes) if isinstance(n, dict)
