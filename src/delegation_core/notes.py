@@ -256,23 +256,83 @@ def unique_note_path(dest: Path) -> Path:
         n += 1
 
 
+#: Caracteres que um escalar YAML entre aspas duplas NAO aceita literais e que
+#: por isso saem como `\xNN`. Medido varrendo os 256 primeiros codepoints: 64
+#: deles quebram ou deformam o bloco, e sao exatamente estes mais o `\x85`.
+_CONTROLE_YAML = {c for c in range(0x20)} | {0x7f} | set(range(0x80, 0xa1))
+
+
 def yaml_quote_scalar(value: str) -> str:
     """Double-quote a string for safe use as a YAML frontmatter scalar value.
 
     An unquoted scalar containing ": " (colon-space) is ambiguous/invalid YAML
-    (Obsidian and any strict frontmatter parser will choke on it) — quote
-    unconditionally so titles are safe regardless of content.
+    (Obsidian and any strict frontmatter parser will choke on it), so this quotes
+    unconditionally.
+
+    E escapa os caracteres de CONTROLE, que a versao anterior nao escapava
+    apesar de a docstring prometer seguranca "regardless of content". Achado por
+    teste de propriedade em 04/09/2026: a propriedade
+
+        yaml.safe_load("titulo: " + yaml_quote_scalar(s))["titulo"] == s
+
+    caiu com `\x1f` em poucas dezenas de exemplos. Varrendo os 256 primeiros
+    codepoints, SESSENTA E QUATRO quebram ou deformam o bloco, entre eles `\n` e
+    `\r`. Um controle solto dentro de aspas duplas faz o leitor de YAML recusar
+    o documento INTEIRO, que e o mesmo desfecho das duas notas deste vault com
+    frontmatter ilegivel -- e esta funcao existe para impedir exatamente isso.
+
+    Exposicao medida no vault na data: ZERO das 8.596 notas. Corrigido assim
+    mesmo porque `create_note(title=...)` aceita qualquer string de qualquer
+    chamador MCP, e `synthesize`/`classify` derivam titulo do CONTEUDO de
+    documentos ingeridos: o zero de hoje e sobre o que ja entrou.
+
+    Acento, travessao e emoji seguem literais: escapar controle nao pode virar
+    escapar tudo, num vault escrito em portugues.
     """
-    escaped = value.replace("\\", "\\\\").replace('"', '\\"')
-    return f'"{escaped}"'
+    saida = []
+    for ch in value:
+        if ch == "\\":
+            saida.append("\\\\")
+        elif ch == '"':
+            saida.append('\\"')
+        elif ord(ch) in _CONTROLE_YAML:
+            saida.append(f"\\x{ord(ch):02x}")
+        else:
+            saida.append(ch)
+    return '"' + "".join(saida) + '"'
 
 
 def yaml_unquote_scalar(value: str) -> str:
-    """Reverse yaml_quote_scalar() for frontmatter values read back with naive line parsing."""
+    """Reverse yaml_quote_scalar() for frontmatter values read back with naive line parsing.
+
+    Decodifica na MESMA ordem em que a citacao escapou, e nao em passadas
+    independentes: `\\\\x41` e uma barra invertida literal seguida de "x41", e nao
+    a letra A. A versao anterior fazia dois `.replace()` encadeados e ja tinha
+    esse problema para `\\\\"`; com `\\xNN` no meio ele fica visivel.
+    """
     value = value.strip()
-    if len(value) >= 2 and value[0] == '"' and value[-1] == '"':
-        return value[1:-1].replace('\\"', '"').replace("\\\\", "\\")
-    return value
+    if not (len(value) >= 2 and value[0] == '"' and value[-1] == '"'):
+        return value
+    corpo = value[1:-1]
+    saida = []
+    i = 0
+    while i < len(corpo):
+        ch = corpo[i]
+        if ch != "\\" or i + 1 >= len(corpo):
+            saida.append(ch)
+            i += 1
+            continue
+        seguinte = corpo[i + 1]
+        if seguinte == "x" and i + 3 < len(corpo):
+            try:
+                saida.append(chr(int(corpo[i + 2:i + 4], 16)))
+                i += 4
+                continue
+            except ValueError:
+                pass
+        saida.append(seguinte)
+        i += 2
+    return "".join(saida)
 
 
 _LEADING_FRONTMATTER_RE = re.compile(r"^---\n(.*?)\n---\n", re.DOTALL)
