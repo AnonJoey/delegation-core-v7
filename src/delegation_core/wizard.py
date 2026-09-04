@@ -10,6 +10,7 @@ import socket
 import subprocess
 import sys
 from pathlib import Path
+from xml.sax.saxutils import escape as xml_escape
 
 from rich.console import Console
 from rich.panel import Panel
@@ -256,26 +257,38 @@ def _step_vault() -> tuple[Path, list[str]]:
 
 
 def _conflicts_with_config_dir(path: Path) -> bool:
-    """True if `path` is delegation-core's own CONFIG_DIR, or lives inside it.
+    """True when `path` must not be used as a vault.
 
     uninstall.sh / uninstall.bat remove a fixed list of CONFIG_DIR subpaths by
     name (sessions/, config.json, graphs/, ...) without ever touching the
     configured vault_path directly. That guarantee only holds if the vault
     itself is never placed at/under CONFIG_DIR in the first place: otherwise
     a targeted removal could coincidentally delete real vault content that
-    happens to share one of those names. Reject the path here instead.
+    happens to share one of those names — and `Sessions` is a vault folder on
+    every install, against the uninstaller's `sessions/`. Reject the path here
+    instead.
+
+    A path that cannot be resolved is rejected too. This used to `return False`
+    — "no conflict" — for a path it had failed to examine, which is a check that
+    passes when it cannot check. `_unindexed_notes` already carries the rule in
+    its own docstring: degrade to "cannot tell", never to "all fine". The cost
+    of being wrong in this direction is the user picking a different folder; the
+    cost in the other direction is the uninstaller deleting their notes.
     """
     try:
         resolved = path.resolve()
         cfg = CONFIG_DIR.resolve()
     except OSError:
-        return False
+        return True
     return resolved == cfg or cfg in resolved.parents
 
 
 def _warn_config_dir_conflict(path: Path):
-    console.print(f"  [red]That path is delegation-core's own config directory "
-                  f"({CONFIG_DIR}), or is inside it.[/red]")
+    # Two reasons reach here — it really is under CONFIG_DIR, or it could not be
+    # resolved at all — and the message used to assert the first for both.
+    console.print(f"  [red]That path cannot be used as a vault: it is "
+                  f"delegation-core's own config directory ({CONFIG_DIR}), is "
+                  f"inside it, or could not be resolved.[/red]")
     console.print("  [red]Choose a location outside of it: uninstalling could "
                   "otherwise delete vault content.[/red]\n")
 
@@ -477,6 +490,32 @@ def _setup_startup(cfg: Config):
         console.print(f"  [yellow]Warning:[/yellow] Could not configure auto-start: {e}\n")
 
 
+def _systemd_literal(value) -> str:
+    """A user-controlled path as a systemd unit file reads it, not as we meant it.
+
+    `%` opens a specifier in a unit file, and the escape for a literal one is
+    `%%`. The paths interpolated below are chosen by the person running setup,
+    and `%` is a perfectly ordinary character in a directory name.
+
+    Measured on 2026-09-03, with the unit actually loaded and
+    `systemctl show -p ExecStart` asked what it understood::
+
+        written : ExecStart="/home/joey/100%hits/llama-server"
+                    --model "/data/%name%.gguf"
+        loaded  : path=/home/joey/100/home/joeyits/llama-server
+                  argv[]=... --model /data/<unit name>ame%.gguf
+
+    `%h` became the home directory and `%n` the unit name. The service then
+    points at a path that does not exist, the engine never starts at login, and
+    setup has already printed "AI engine will start automatically at login".
+
+    The quoting one line down was added for the same reason — a space in any of
+    these paths splits the command — so the hostility of these values was
+    already known here. This is the second metacharacter, not a new idea.
+    """
+    return str(value).replace("%", "%%")
+
+
 def _startup_systemd(cfg: Config):
     service_dir = Path.home() / ".config" / "systemd" / "user"
     service_dir.mkdir(parents=True, exist_ok=True)
@@ -490,16 +529,17 @@ def _startup_systemd(cfg: Config):
         # ExecStart= uses systemd's own shell-like word splitting on
         # whitespace, paths must be quoted or a space anywhere in the home
         # directory, models dir, or binary path (all user-controlled) splits
-        # into the wrong number of arguments.
-        f'ExecStart="{cfg.llama_binary}"'
-        f' --model "{cfg.llama_model}"'
+        # into the wrong number of arguments. `%` needs _systemd_literal for
+        # the same reason, one layer down: see its docstring.
+        f'ExecStart="{_systemd_literal(cfg.llama_binary)}"'
+        f' --model "{_systemd_literal(cfg.llama_model)}"'
         f" --port {cfg.llama_port}"
         f" --ctx-size {cfg.llama_ctx}"
         f" --n-gpu-layers {cfg.llama_ngl}\n"
         "Restart=on-failure\n"
         "RestartSec=10\n"
-        f"StandardOutput=append:{cfg.llama_log_path}\n"
-        f"StandardError=append:{cfg.llama_log_path}\n\n"
+        f"StandardOutput=append:{_systemd_literal(cfg.llama_log_path)}\n"
+        f"StandardError=append:{_systemd_literal(cfg.llama_log_path)}\n\n"
         "[Install]\n"
         "WantedBy=default.target\n"
     )
@@ -519,24 +559,33 @@ def _startup_launchd(cfg: Config):
     agents_dir = Path.home() / "Library" / "LaunchAgents"
     agents_dir.mkdir(parents=True, exist_ok=True)
 
+    # Um `&`, `<` ou `>` num caminho e legal no macOS e ILEGAL cru em XML: sem
+    # escape o plist sai malformado, `launchctl load` recusa, e o motor nunca
+    # sobe. Medido em 03/09/2026 com "/Users/joey/Documents/AI & ML/llama-server":
+    # "not well-formed (invalid token): line 5, column 38".
+    # E o mesmo problema do `%` do systemd na funcao acima, no formato vizinho:
+    # valor escolhido pelo usuario interpolado cru num formato que da significado
+    # a alguns caracteres.
+    esc = xml_escape
+
     plist = (
         '<?xml version="1.0" encoding="UTF-8"?>\n'
         '<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"'
         ' "http://www.apple.com/DTDs/PropertyList-1.0.dtd">\n'
         '<plist version="1.0"><dict>\n'
-        f'  <key>Label</key><string>{_LLAMA_LABEL}</string>\n'
+        f'  <key>Label</key><string>{esc(_LLAMA_LABEL)}</string>\n'
         '  <key>ProgramArguments</key>\n'
         '  <array>\n'
-        f'    <string>{cfg.llama_binary}</string>\n'
-        f'    <string>--model</string><string>{cfg.llama_model}</string>\n'
+        f'    <string>{esc(str(cfg.llama_binary))}</string>\n'
+        f'    <string>--model</string><string>{esc(str(cfg.llama_model))}</string>\n'
         f'    <string>--port</string><string>{cfg.llama_port}</string>\n'
         f'    <string>--ctx-size</string><string>{cfg.llama_ctx}</string>\n'
         f'    <string>--n-gpu-layers</string><string>{cfg.llama_ngl}</string>\n'
         '  </array>\n'
         '  <key>RunAtLoad</key><true/>\n'
         '  <key>KeepAlive</key><true/>\n'
-        f'  <key>StandardOutPath</key><string>{cfg.llama_log_path}</string>\n'
-        f'  <key>StandardErrorPath</key><string>{cfg.llama_log_path}</string>\n'
+        f'  <key>StandardOutPath</key><string>{esc(str(cfg.llama_log_path))}</string>\n'
+        f'  <key>StandardErrorPath</key><string>{esc(str(cfg.llama_log_path))}</string>\n'
         '</dict></plist>\n'
     )
 
