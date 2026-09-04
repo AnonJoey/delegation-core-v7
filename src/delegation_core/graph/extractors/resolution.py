@@ -294,9 +294,46 @@ def _find_workspace_root(start_dir: Path) -> Path | None:
     return None
 
 def _pnpm_workspace_globs(workspace_file: Path) -> list[str]:
+    """Os globs de `packages:` de um pnpm-workspace.yaml.
+
+    Usa o pyyaml, que ja e dependencia declarada do projeto (pyproject linha 37)
+    e ja e importado em vault.py e sidecar.py. A leitura linha a linha continua
+    logo abaixo como RETAGUARDA, para YAML que o parser de verdade recusa.
+
+    O motivo de a ordem ter invertido: a leitura linha a linha so entende lista
+    em bloco. Conferida contra o pyyaml, ela devolve VAZIO para a forma embutida,
+    que e YAML valido e o pnpm aceita:
+
+        packages: ['apps/*', 'libs/*']   ->  feito a mao []   pyyaml ['apps/*', 'libs/*']
+
+    Vazio aqui significa nenhum pacote de workspace encontrado, entao todo import
+    entre pacotes do monorepo deixa de resolver e vira no externo. Silencioso e
+    total, num arquivo que o usuario escreveu de um jeito legitimo.
+    """
+    texto = workspace_file.read_text(encoding="utf-8", errors="replace")
+    try:
+        import yaml
+        dados = yaml.safe_load(texto)
+    except Exception:
+        dados = None
+    if isinstance(dados, dict):
+        pacotes = dados.get("packages")
+        if isinstance(pacotes, list):
+            return [p for p in pacotes
+                    if isinstance(p, str) and p and not p.startswith("!")]
+    return _globs_linha_a_linha(texto)
+
+
+def _globs_linha_a_linha(texto: str) -> list[str]:
+    """Retaguarda tolerante: le `packages:` sem parser de YAML.
+
+    Aceita coisas que o pyyaml recusa ou interpreta diferente (um traco sem
+    espaco, por exemplo), entao continua util quando o arquivo esta malformado.
+    So entende lista em BLOCO, que e a razao de nao ser mais a primeira escolha.
+    """
     globs: list[str] = []
     in_packages = False
-    for raw_line in workspace_file.read_text(encoding="utf-8", errors="replace").splitlines():
+    for raw_line in texto.splitlines():
         line = raw_line.strip()
         if not line or line.startswith("#"):
             continue
