@@ -672,6 +672,29 @@ def _resolve_lua_import_target(raw_module: str, str_path: str) -> str:
     if not raw_module:
         return ""
     rel = raw_module.replace(".", "/")
+
+    # Um ponto no INICIO vira barra no inicio, e ai `probe / rel` descarta o
+    # `probe` inteiro e sonda a raiz do sistema de arquivos. Medido, com um
+    # arquivo real fora do projeto:
+    #
+    #     require(".tmp.luatest.segredo")  ->  /tmp/luatest/segredo.lua
+    #
+    # E um no de grafo para um arquivo que nao pertence ao repositorio varrido.
+    # Mesma forma do #include absoluto corrigido no commit anterior, no mesmo
+    # arquivo: `Path(dir) / "/x"` nao concatena, substitui.
+    #
+    # Aqui, ao contrario do include em C, isto fecha o vetor INTEIRO e nao so
+    # metade: todo ponto vira barra antes desta linha, entao um `..` nunca
+    # sobrevive a substituicao e nao ha travessia para cima a conter. Nao
+    # precisa do root do scan.
+    #
+    # Nome de modulo Lua e uma sequencia de identificadores separados por ponto,
+    # entao um que comece com ponto ja nao e valido: cai na saida documentada de
+    # "nada casou" (#1075), que preserva a aresta para a passagem de resolucao
+    # de simbolos em vez de derrubar.
+    if rel.startswith("/"):
+        return _make_id(raw_module)
+
     try:
         start_dir = Path(str_path).parent
     except Exception:
