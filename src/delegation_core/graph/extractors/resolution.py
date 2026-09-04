@@ -126,6 +126,19 @@ def _read_tsconfig_aliases(tsconfig: Path, base_dir: Path, seen: set) -> dict[st
         print(f"  warning: failed to parse {tsconfig} ({type(e).__name__}: {e})", file=sys.stderr, flush=True)
         return {}
 
+    # O proprio comentario do `extends` logo abaixo conta o que acontece quando
+    # um campo vem com o tipo errado: "raised AttributeError ... which
+    # _safe_extract turned into a skip of the whole file". A guarda foi posta la
+    # e nao nos campos vizinhos. Medido, NOVE formas de tsconfig levantavam daqui
+    # (compilerOptions null/string/lista, paths null/string/lista, baseUrl nao
+    # string, e a raiz sendo lista ou string), e cada uma some com TODO arquivo
+    # cujo import passe por este tsconfig, nao so com o alias.
+    if not isinstance(data, dict):
+        print(f"  warning: {tsconfig} nao contem um objeto JSON na raiz "
+              f"({type(data).__name__}); ignorando os aliases deste arquivo",
+              file=sys.stderr, flush=True)
+        return {}
+
     aliases: dict[str, list[str]] = {}
     # `extends` may be a string or, since TypeScript 5.0, an array of paths.
     # For an array, parents are processed in order with later entries
@@ -157,12 +170,42 @@ def _read_tsconfig_aliases(tsconfig: Path, base_dir: Path, seen: set) -> dict[st
     # "@services/*": ["services/*"] must resolve to <dir>/src/services rather
     # than <dir>/services. Defaults to "." so configs without baseUrl (paths
     # relative to the tsconfig dir, the TS 4.1+ behavior) keep working.
-    compiler_options = data.get("compilerOptions", {})
-    base_url = compiler_options.get("baseUrl") or "."
+    compiler_options = data.get("compilerOptions")
+    if not isinstance(compiler_options, dict):
+        if compiler_options is not None:
+            print(f"  warning: 'compilerOptions' em {tsconfig} nao e um objeto "
+                  f"({type(compiler_options).__name__}); ignorando",
+                  file=sys.stderr, flush=True)
+        return aliases
+
+    base_url = compiler_options.get("baseUrl")
+    # So string: um baseUrl numerico fazia `base_dir / base_url` levantar
+    # TypeError. O "." e o mesmo default de antes, para configs sem baseUrl.
+    if not isinstance(base_url, str) or not base_url:
+        base_url = "."
     paths_base = base_dir / base_url
-    paths = compiler_options.get("paths", {})
+
+    paths = compiler_options.get("paths")
+    if not isinstance(paths, dict):
+        if paths is not None:
+            print(f"  warning: 'paths' em {tsconfig} nao e um objeto "
+                  f"({type(paths).__name__}); ignorando",
+                  file=sys.stderr, flush=True)
+        return aliases
+
     for alias, targets in paths.items():
         if not targets:
+            continue
+        # Lista, e nao qualquer iteravel: com uma STRING aqui o laco abaixo
+        # percorria os CARACTERES e produzia aliases de lixo, sem levantar nada.
+        # Medido, {"@a/*": "./s/*"} virava
+        # ['<base>', '/', '<base>/s', '/', '<base>/*'].
+        if not isinstance(targets, list):
+            print(f"  warning: o alvo de '{alias}' em {tsconfig} nao e uma lista "
+                  f"({type(targets).__name__}); ignorando este alias",
+                  file=sys.stderr, flush=True)
+            continue
+        if not isinstance(alias, str) or not alias:
             continue
         # Keep ALL targets in declared order — tsc tries each until one resolves
         # on disk. Discarding the fallbacks (#1531) misresolved/dropped imports
