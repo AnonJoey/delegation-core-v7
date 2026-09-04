@@ -93,11 +93,97 @@ def _record_duration(task_name: str, seconds: float) -> None:
         logger.debug("Could not record duration for %s: %s", task_name, e)
 
 
+#: Ratio between the slowest and fastest recorded run above which this task's
+#: history is treated as covering work of more than one size, and the median
+#: stops being a usable prediction. An order of magnitude, deliberately not
+#: tighter: 5.7s against 1.7s is the same job on a quiet and a busy disk, while
+#: 642.3s against 1.7s is not the same job at all.
+_SPREAD_IS_WIDE = 10.0
+
+
 def typical_seconds(task_name: str) -> float | None:
     """Median run time of this task's last completed runs, or None if unknown."""
     history = _load_durations().get(task_name) or []
     history = [s for s in history if isinstance(s, (int, float))]
     return round(statistics.median(history), 1) if history else None
+
+
+def duration_hint(task_name: str) -> dict | None:
+    """What this task's history can honestly say about how long it will take.
+
+    `typical_seconds` alone answers a question the history often cannot support.
+    Measured on this machine on 2026-09-03, the stored runs were::
+
+        vault_reindex [3.5, 1.9, 2.9, 1.7, 2.1, 5.4, 5.7, 642.3, 2.9, 69.8]
+        ingest_folder [2.0, 1.1, 1.5, 238.8, 1168.3, 84.7, 5.6, 24.1, 2241.0, 13.1]
+        graph_build   [21.3, 16.8, 224.4, 177.4, 297.3, 141.2, 565.4, 15.4]
+
+    None of the three is one distribution. They are two: a small job and a large
+    one sharing a task name. The median of the mixture described neither — a
+    reindex started while writing this reported ``typical_seconds: 3.2`` and ran
+    for 178.4s, a 56x miss, and the advice that came with it was to check back in
+    30 seconds.
+
+    So the hint carries the spread as well as the middle, and says outright when
+    the two ends are far enough apart that the middle predicts nothing. A caller
+    that is told "between 1.7s and 642.3s" knows to wait long and check rarely;
+    a caller told "3.2s" does not, and spends its turns finding out.
+
+    Returns None when there is no history at all — the same silence
+    `typical_seconds` keeps, for the same reason.
+    """
+    history = [s for s in (_load_durations().get(task_name) or [])
+               if isinstance(s, (int, float))]
+    if not history:
+        return None
+    fastest, slowest = min(history), max(history)
+    # A zero or negative fastest would make the ratio meaningless (or raise);
+    # a run that fast carries no information about the spread either way.
+    wide = fastest > 0 and (slowest / fastest) >= _SPREAD_IS_WIDE
+    return {
+        "typical_seconds": round(statistics.median(history), 1),
+        "fastest_seconds": round(fastest, 1),
+        "slowest_seconds": round(slowest, 1),
+        "runs_recorded": len(history),
+        "spread_is_wide": wide,
+    }
+
+
+#: Never advise a poll sooner than this: below it the caller spends a turn per
+#: answer for no new information.
+_MIN_POLL_WAIT = 30
+#: Never advise a wait longer than this, however long the job has run. A job
+#: that has outlived every recorded run is also the one most likely to be stuck,
+#: and an hour of silence is too long to notice that.
+_MAX_POLL_WAIT = 600
+
+
+def next_check_seconds(hint: dict, elapsed: float) -> int:
+    """How long to wait before polling this job again.
+
+    The rule this replaces was ``max(int(typical - elapsed) + 5, 30)``, which
+    aims at the median and then, once the job outlives it, floors at a flat 30s
+    beat that never grows. That is the exact behaviour jobs.py's own module
+    docstring says this feature exists to remove: "polling every 30s through a
+    7-minute build".
+
+    Three regimes, in order:
+
+    * **Before the expected finish** — aim just past it, as before.
+    * **Past the median but inside the slowest run on record** — the job is not
+      late, it is one of the big ones; aim just past *that* instead.
+    * **Past everything ever recorded** — nothing in the history describes this
+      run any more, so stop pretending to predict and back off geometrically
+      (half the elapsed time), capped, so a job that runs all night is polled a
+      handful of times rather than a hundred.
+    """
+    typical = hint["typical_seconds"]
+    slowest = hint["slowest_seconds"]
+    if elapsed < typical:
+        return max(int(typical - elapsed) + 5, _MIN_POLL_WAIT)
+    if elapsed < slowest:
+        return max(int(slowest - elapsed) + 5, _MIN_POLL_WAIT)
+    return min(max(int(elapsed / 2), _MIN_POLL_WAIT), _MAX_POLL_WAIT)
 
 
 def submit(task_name: str, fn, *args, **kwargs) -> str:

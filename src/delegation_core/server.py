@@ -989,8 +989,13 @@ async def vault_reindex_bg(force: bool = False) -> str:
     """
     import functools
     fn = functools.partial(_vault.reindex_vault, force=force)
-    job_id = jobs.submit("vault_reindex", fn)
     mode = "full" if force else "incremental"
+    # Keyed by mode, not by task name alone. A full reindex and an incremental
+    # one are different jobs by two orders of magnitude — measured here as 642.3s
+    # against 1.7s — and sharing a bucket made the median describe neither. This
+    # function already knew which one it was launching: `mode` is computed on the
+    # line above and returned to the caller. It just was not used for the bucket.
+    job_id = jobs.submit(f"vault_reindex:{mode}", fn)
     return json.dumps({"job_id": job_id, "status": "running", "mode": mode,
                        "message": f"{mode.capitalize()} reindex started. Call task_status(job_id) to check progress."})
 
@@ -1025,13 +1030,22 @@ async def task_status(job_id: str) -> str:
         from datetime import datetime as dt
         elapsed = (dt.now() - dt.fromisoformat(job["started"])).total_seconds()
         job["elapsed_seconds"] = int(elapsed)
-        typical = jobs.typical_seconds(job["task"])
-        if typical:
-            job["typical_seconds"] = typical
-            # Aim the next poll just past the expected finish; once a job is
-            # already overdue, fall back to a slow steady beat rather than
-            # suggesting a poll in the past.
-            job["check_again_in_seconds"] = max(int(typical - elapsed) + 5, 30)
+        hint = jobs.duration_hint(job["task"])
+        if hint:
+            job["typical_seconds"] = hint["typical_seconds"]
+            job["check_again_in_seconds"] = jobs.next_check_seconds(hint, elapsed)
+            # Reported only when the history cannot support a single number.
+            # A task whose runs span an order of magnitude has been two jobs
+            # under one name, and answering with the median alone told a caller
+            # "3.2 seconds" about a run that took 178.4 — see duration_hint.
+            if hint["spread_is_wide"]:
+                job["fastest_seconds"] = hint["fastest_seconds"]
+                job["slowest_seconds"] = hint["slowest_seconds"]
+                job["estimate_note"] = (
+                    f"This task's {hint['runs_recorded']} recorded runs span "
+                    f"{hint['fastest_seconds']}s to {hint['slowest_seconds']}s, so the median "
+                    f"predicts little. Wait check_again_in_seconds rather than polling."
+                )
     return json.dumps(job)
 
 
