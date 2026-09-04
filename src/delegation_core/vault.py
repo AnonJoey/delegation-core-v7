@@ -1372,6 +1372,34 @@ class VaultManager:
             except Exception:
                 pass
 
+        # O vault inteiro fora do ar responde igual a um vault vazio, e nao pode.
+        #
+        # MEDIDO em 04/09/2026 apontando vault_path para um diretorio que nao
+        # existe: total_notes 0, needs_repair 0, truncated 0, orphans 0,
+        # broken_links 0, unindexed 0, e NENHUMA ressalva. Quem le heartbeat()
+        # conclui que o vault esta saudavel e vazio -- e o mesmo desfecho de um
+        # vault de 8.593 notas que acabou de ser desmontado, renomeado, ou que
+        # mora num drive que nao subiu.
+        #
+        # `_unindexed_notes` ja carrega a regra no proprio docstring: "Health
+        # must degrade to 'cannot tell' rather than to 'all fine'". Ela valia
+        # para o indice ilegivel e nao valia para o vault ausente.
+        #
+        # So a RAIZ e alarme: uma PASTA configurada que nao existe e normal (um
+        # vault que nao usa Tools/ nao tem Tools/), e o passe abaixo ja a pula.
+        if not self.cfg.vault.is_dir():
+            motivo = ("does not exist" if not self.cfg.vault.exists()
+                      else "is not a directory")
+            resultado = {
+                "total_notes": 0, "needs_repair": 0, "truncated": 0,
+                "orphans": 0, "generated_notes": 0, "broken_links": 0,
+                "unindexed": 0, "malformed_frontmatter": 0,
+                "vault_unreadable": f"{self.cfg.vault} {motivo}",
+                "computed_at": datetime.now().isoformat(),
+            }
+            self._last_health_detail = {"_vault": str(self.cfg.vault), **resultado}
+            return resultado
+
         threshold = getattr(self.cfg, "quality_threshold", 0.50)
         # Compared case-insensitively below: a vault whose folder is "Sessions"
         # would otherwise skip nothing and count every session note as an orphan.
