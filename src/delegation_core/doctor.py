@@ -456,8 +456,15 @@ def check_local_fallback(cfg) -> dict:
                 "detail": "no sentry file; automatic reindex is allowed"}
     if not getattr(cfg, "allow_local_index_fallback", True):
         return {"check": "local_fallback", "status": "ok",
-                "detail": "sentry present and local fallback off: the daemon is "
-                          "the only writer, consistently"}
+                # Dizia "the daemon is the only writer, consistently". Essas
+                # duas configuracoes governam o caminho de FALLBACK -- uma CLI
+                # que NAO ALCANCA o daemon -- e nao dizem nada sobre um comando
+                # que nunca tenta o daemon. Em 04/09/2026 quatro comandos
+                # escreviam por fora e este check estava verde. Quem confere a
+                # propriedade que a frase antiga prometia e check_index_writers.
+                "detail": "sentry present and local fallback off: a CLI that "
+                          "cannot reach the daemon will not open the index "
+                          "itself"}
     return {
         "check": "local_fallback", "status": "warn",
         "detail": (f"{sentinela.name} says do not reindex automatically, but "
@@ -466,6 +473,71 @@ def check_local_fallback(cfg) -> dict:
         "fix": 'set "allow_local_index_fallback": false in config.json, or remove '
                f"{sentinela}",
     }
+
+
+
+def _caminho_do_cli():
+    """Onde mora o cli.py DESTA instalacao. Separado para o teste apontar noutro."""
+    from . import cli as _cli
+    return Path(_cli.__file__)
+
+
+def check_index_writers() -> dict:
+    """Todo comando de CLI que abre o indice passa pelo daemon?
+
+    Existe porque `check_local_fallback` respondia essa pergunta sem te-la
+    verificado. A frase dele era "the daemon is the only writer, consistently",
+    e o que ele conferia eram duas chaves de configuracao que governam o caminho
+    de fallback. Rodado nesta maquina em 04/09/2026 o doctor devolveu 10 ok e 0
+    avisos enquanto `note write`, `note update`, `relink` e `graph build`
+    abriam o ChromaDB no proprio processo, com o daemon segurando o mesmo
+    arquivo -- medido com lsof.
+
+    Le o `cli.py` da INSTALACAO, e nao do repositorio, que e o que torna o check
+    util: pega uma instalacao desatualizada, ou remendada a mao, onde um comando
+    ainda escreve por fora. `tests/test_cli_delega_escrita.py` guarda a mesma
+    propriedade no repo, na hora de escrever o codigo; este guarda na maquina
+    de quem instalou.
+
+    Um `cli.py` que nao pode ser lido responde "nao da para saber" e nao "ok":
+    e a regra que este proprio check nasceu para consertar.
+    """
+    import ast
+
+    #: Isentos, com o motivo medido. Espelha _ISENTOS do teste do repo.
+    isentos = {"cmd_note_read", "cmd_note_list", "cmd_doctor"}
+    caminho = _caminho_do_cli()
+    try:
+        fonte = caminho.read_text(encoding="utf-8")
+        arvore = ast.parse(fonte)
+    except Exception as e:
+        return {"check": "index_writers", "status": "warn",
+                "detail": f"could not read the installed CLI at {caminho} ({e}), "
+                          "so whether every command routes through the daemon is "
+                          "unknown"}
+
+    linhas = fonte.splitlines()
+    faltando = []
+    for no in ast.walk(arvore):
+        if not (isinstance(no, ast.FunctionDef) and no.name.startswith("cmd_")):
+            continue
+        corpo = "\n".join(linhas[no.lineno - 1: no.end_lineno])
+        if "VaultManager(" not in corpo or no.name in isentos:
+            continue
+        if "_delegate(" not in corpo:
+            faltando.append(no.name)
+
+    if faltando:
+        return {
+            "check": "index_writers", "status": "warn",
+            "detail": (f"{len(faltando)} CLI command(s) open the index in their own "
+                       f"process without asking the daemon: {', '.join(sorted(faltando))}. "
+                       "With the daemon up that is a second writer on the same "
+                       "SQLite file, and a second copy of the embedding model."),
+            "fix": "upgrade this installation: delegation-core update",
+        }
+    return {"check": "index_writers", "status": "ok",
+            "detail": "every CLI command that opens the index routes through the daemon"}
 
 
 def run_all(cfg) -> dict:
@@ -481,6 +553,7 @@ def run_all(cfg) -> dict:
         check_fts_integrity(cfg),
         check_index_integrity(cfg),
         check_local_fallback(cfg),
+        check_index_writers(),
     ]
     counts = {s: sum(1 for c in checks if c["status"] == s)
               for s in ("ok", "warn", "error", "skip")}
