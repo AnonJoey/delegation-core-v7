@@ -387,7 +387,14 @@ def _merge_alias(frontmatter: str, alias: str) -> str:
     this inserts a line (or one bracket entry) rather than re-serialising YAML
     that this module does not model.
     """
-    despido = alias.strip().strip('"').strip("'").lower()
+    # O alias chega das duas formas: cru de um chamador, e JA CITADO quando vem
+    # do bloco que `compose_note` gerou com yaml_quote_scalar. A funcao ja sabia
+    # disso -- despia as aspas para COMPARAR -- e inseria a forma crua assim
+    # mesmo. Citar os dois casos sem despir produziu `"\"Titulo\""`, alias
+    # duplamente citado que nao resolve, e a suite existente pegou na hora.
+    # Despir com yaml_unquote_scalar, que e o inverso exato de quem cita.
+    cru = yaml_unquote_scalar(alias.strip())
+    despido = cru.strip("'").lower()
     linhas = frontmatter.split("\n")
     for i, linha in enumerate(linhas):
         if not linha.lower().startswith("aliases:"):
@@ -401,7 +408,13 @@ def _merge_alias(frontmatter: str, alias: str) -> str:
                           for x in dentro.split(",") if x.strip()}
             if despido in existentes:
                 return frontmatter
-            novo_inline = f"[{dentro}, {alias}]" if dentro else f"[{alias}]"
+            # Citado, e nao interpolado cru. Um alias com virgula virava DOIS
+            # aliases, um com `]` invalidava o bloco inteiro, e um com ": "
+            # virava um dicionario dentro da lista. `yaml_quote_scalar` esta
+            # quinze linhas acima neste mesmo arquivo e diz no docstring que
+            # existe para isto.
+            citado = yaml_quote_scalar(cru)
+            novo_inline = f"[{dentro}, {citado}]" if dentro else f"[{citado}]"
             linhas[i] = f"aliases: {novo_inline}"
             return "\n".join(linhas)
 
@@ -413,6 +426,9 @@ def _merge_alias(frontmatter: str, alias: str) -> str:
             if item == despido:
                 return frontmatter
             j += 1
-        linhas.insert(j, f"  - {alias}")
+        # O ramo de bloco e imune a virgula e nao aos outros dois: ": " fazia o
+        # item virar mapa, e `#` truncava no comentario ("Sprint #3 do time"
+        # virava "Sprint"). Mesma citacao, pelos mesmos motivos.
+        linhas.insert(j, f"  - {yaml_quote_scalar(cru)}")
         return "\n".join(linhas)
     return frontmatter

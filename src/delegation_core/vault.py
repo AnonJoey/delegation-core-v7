@@ -84,6 +84,40 @@ index_note() calls across both paths.
 """
 
 
+
+def _frontmatter_parses(content: str) -> bool:
+    """Does this note's frontmatter block survive a real YAML parser?
+
+    True for a note with no frontmatter at all: an absent block is not a broken
+    one, and counting it would invent a defect in every plain note.
+
+    PyYAML is a declared dependency of this package (pyproject: pyyaml>=6.0) and
+    already imported lazily by sidecar.py and graph/manifest_ingest.py, so this
+    adds no new requirement. Imported inside the function for the same reason
+    they do it: the health scan is the only caller and it is not on the import
+    path of the daemon's startup.
+    """
+    if not content.startswith("---"):
+        return True
+    # The same regex compose_note uses to find a caller's block, so "what counts
+    # as frontmatter" has one definition here and is not re-guessed.
+    m = _LEADING_FRONTMATTER_RE.match(content)
+    if m is None:
+        # Opens a block and never closes it. Not something YAML can be asked
+        # about, and not something to report as a parse failure either: the
+        # existing `truncated` metric is what covers a note cut off mid-write.
+        return True
+    try:
+        import yaml
+    except ImportError:      # pragma: no cover - declared dependency
+        return True
+    try:
+        yaml.safe_load(m.group(1))
+    except Exception:
+        return False
+    return True
+
+
 class VaultManager:
     def __init__(self, cfg: Config):
         self.cfg = cfg
@@ -1362,6 +1396,8 @@ class VaultManager:
         folder_markers = {f.lower() for f in self.cfg.vault_folders}
         folder_markers.add(self.cfg.vault.name.lower())
         total = needs_repair = truncated = orphans = broken_links = 0
+        malformed_frontmatter = 0
+        malformed_notes: list[dict] = []
         # Collected alongside the counts, not by a second pass: the whole point
         # is that the detail and the summary cannot disagree.
         broken: list[dict] = []
@@ -1375,6 +1411,27 @@ class VaultManager:
         for n in notes:
             total += 1
             content = n["content"]
+            # Validated with a real YAML parser, because the one this module
+            # uses for everything else CANNOT FAIL: `_parse_frontmatter` splits
+            # each line on the first colon and keeps going, so a block that no
+            # YAML reader can open is graded as a healthy note.
+            #
+            # Measured on this vault on 2026-09-03: two transcripts whose title
+            # carried an unquoted "Caveat:" made the whole block unreadable —
+            # title, date and `type: session-transcript` invisible to Obsidian
+            # and to every other YAML consumer — while health reported
+            # needs_repair 0, truncated 0, broken_links 0. The hook that wrote
+            # them has since been fixed to quote the title; nothing ever looked
+            # at the notes it had already written.
+            #
+            # Cost measured before adding it here: 1.013s over 8.596 blocks,
+            # 0.118 ms a note, in a pass that already reads all 8.596 files and
+            # is cached for five minutes. A cheaper heuristic (an unquoted
+            # value containing ": ") would catch those two and miss an
+            # unbalanced bracket — a check that cannot see what it claims to.
+            if not _frontmatter_parses(content):
+                malformed_frontmatter += 1
+                malformed_notes.append({"stem": n["stem"], "folder": n["folder"]})
             try:
                 fm = self._parse_frontmatter(content)
                 nr = fm.get("needs_review", "").lower() == "true"
@@ -1457,6 +1514,7 @@ class VaultManager:
             "generated_notes": generated,
             "broken_links": broken_links,
             "unindexed": len(unindexed_notes),
+            "malformed_frontmatter": malformed_frontmatter,
             "computed_at": datetime.now().isoformat(),
         }
         self._last_health_detail = {
@@ -1466,6 +1524,7 @@ class VaultManager:
             "orphan_items": orphan_notes,
             "needs_repair_items": repair_notes,
             "truncated_items": truncated_notes,
+            "malformed_frontmatter_items": malformed_notes,
             "folder_marker_items": markers,
             "unindexed_items": unindexed_notes,
         }
