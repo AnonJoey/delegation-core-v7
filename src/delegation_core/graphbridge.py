@@ -165,17 +165,52 @@ def _clear_previous_filing(vault_manager, previous_paths: list[str], wiki_dir_re
     stale articles stop surfacing in search immediately rather than at the next
     full reindex.
     """
+    from .notes import resolve_in_vault
+
     cfg = vault_manager.cfg
     stale: list[str] = []
 
-    wiki_root = cfg.vault / wiki_dir_rel
-    if wiki_root.is_dir():
+    # Contencao no unico caminho do projeto que APAGA nota do vault.
+    #
+    # `resolve_in_vault` existe e o docstring dela registra que esta mesma falha
+    # foi corrigida duas vezes antes, em relink_folder e na rota de nota do
+    # dashboard, e que por isso a checagem mora num lugar so "rather than being
+    # re-typed at each new call site". Aqui ela nao era chamada, e a unica
+    # checagem era `is_file()`, que responde True para `../fora_do_vault.md`.
+    #
+    # Nao e explorável hoje: `graph_name` passa por `_slugify`, que derruba tudo
+    # que nao seja [a-zA-Z0-9_-], entao "../../Sessions" chega aqui como
+    # "Sessions". Mas essa defesa e INCIDENTAL -- o slug existe para gerar nome
+    # de diretorio, nao para conter travessia -- e aceitar um ponto no nome, para
+    # um grafo "v1.2", a desfaz sem que nada ligue uma coisa a outra. Medido com
+    # a contencao removida: um wiki_dir_rel de "Reference/graphs/../../Sessions"
+    # fez o rglob varrer Sessions/ e o unlink apagar a nota do usuario.
+    # Conter no VAULT nao basta, e a primeira versao disto so continha no vault:
+    # "Reference/graphs/../../Sessions" resolve para <vault>/Sessions, que esta
+    # dentro do vault e e a pasta de notas do usuario. Medido com essa versao no
+    # lugar: o rglob varreu Sessions/ e a nota do usuario foi apagada assim
+    # mesmo. O que precisa ser verdade e mais estreito: a pasta limpa aqui tem
+    # que ser um filho direto de <vault>/<pasta>/graphs.
+    wiki_root = resolve_in_vault(cfg.vault, wiki_dir_rel)
+    if wiki_root is None or wiki_root.parent.name != WIKI_SUBDIR:
+        logger.warning("graph wiki folder %r is not a %s/<name> directory inside "
+                       "the vault - refusing to clear it", wiki_dir_rel, WIKI_SUBDIR)
+    elif wiki_root.is_dir():
         stale += [str(p.relative_to(cfg.vault)) for p in wiki_root.rglob("*.md")]
     for rel in previous_paths or []:
-        p = cfg.vault / rel
+        p = resolve_in_vault(cfg.vault, rel)
+        if p is None:
+            logger.warning("stale graph note %r resolves outside the vault - "
+                           "refusing to remove it", rel)
+            continue
         if p.is_file() and rel not in stale:
             stale.append(rel)
 
+    # A contencao mora na MONTAGEM de `stale`, acima, e nao aqui: as duas
+    # entradas passam por resolve_in_vault antes de entrar na lista. Uma segunda
+    # checagem neste laco sobreviveu a mutacao -- nenhum teste conseguia
+    # distingui-la -- e uma guarda que nenhum teste alcanca e peso morto que
+    # sugere protecao onde nao ha nenhuma nova. Um lugar so, e ele e testado.
     for rel in stale:
         try:
             (cfg.vault / rel).unlink()
