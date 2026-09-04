@@ -614,18 +614,48 @@ def _resolve_js_import_target(raw: str, str_path: str) -> "tuple[str, Path | Non
     # external reference — the correct outcome for a third-party import.
     return _make_id("ref", raw), None
 
-def _resolve_c_include_path(raw: str, str_path: str) -> "Path | None":
+def _resolve_c_include_path(raw: str, str_path: str, root: "Path | None" = None) -> "Path | None":
     """Resolve a quoted #include path to a real file on disk.
 
     Searches relative to the including file's directory. Returns None for
-    system headers (<...>) or paths that don't exist on disk.
+    system headers (<...>), paths that don't exist on disk, caminhos ABSOLUTOS,
+    e, quando `root` e dado, alvos que caem fora dele.
     """
     if not raw:
         return None
+
+    # Caminho ABSOLUTO nunca e include relativo. `Path(dir) / "/etc/passwd"`
+    # descarta o `dir` inteiro e devolve `/etc/passwd`, entao a forma anterior
+    # resolvia para fora do repositorio e o arquivo virava alvo de aresta.
+    # Medido: `#include "/etc/passwd"` -> /etc/passwd. O `_contained_in_package`
+    # neste mesmo arquivo existe para barrar exatamente isso, e cita a MESMA
+    # string de ataque no proprio docstring ("../../../etc/passwd"); a guarda
+    # estava num dos dois e nao no outro.
+    if Path(raw).is_absolute():
+        return None
+
     candidate = (Path(str_path).parent / raw).resolve()
-    if candidate.is_file():
-        return candidate
-    return None
+    if not candidate.is_file():
+        return None
+
+    # `root` fecha a travessia por `..`, que a checagem acima nao alcanca: um
+    # `#include "../../../etc/passwd"` de um arquivo fundo continua saindo do
+    # repositorio. Nao da para conter sem saber onde o repositorio comeca, e
+    # `..` e legitimo em C (`#include "../common/x.h"`), entao cortar por
+    # contagem seria chute.
+    #
+    # ATENCAO, divida conhecida: os dois chamadores de hoje (_import_c em
+    # extract.py e o de objc.py) NAO tem o root a mao e passam None, entao a
+    # travessia por `..` segue aberta ate alguem fiar o root ate eles. Esta
+    # escrito aqui em vez de ficar por corrigir em silencio.
+    if root is not None:
+        try:
+            if not candidate.is_relative_to(Path(root).resolve()):
+                return None
+        except (OSError, ValueError):
+            return None
+
+    return candidate
 
 def _resolve_lua_import_target(raw_module: str, str_path: str) -> str:
     """Resolve a Lua require() module name to a node id.
