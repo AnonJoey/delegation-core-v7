@@ -157,11 +157,38 @@ class ProcessTracker:
     # ── internals ─────────────────────────────────────────────────────────────
 
     def _read(self) -> list:
+        """Os processos gravados, ou lista vazia quando o arquivo nao serve.
+
+        A checagem de TIPO existe porque tratar so "nao parseia" deixa passar o
+        caso pior: um JSON valido do tipo errado. Medido com o arquivo contendo
+        `{}`, antes desta guarda:
+
+            ProcessTracker.create(...)  ->  AttributeError: 'dict' object has
+                                            no attribute 'append'
+
+        Os outros dois armazens JSON deste projeto ja faziam a mesma checagem --
+        `jobs.py` com `isinstance(data, dict)` e `localqueue.py` com
+        `isinstance(data, list)` -- e este, que guarda os 129 KB do estado que
+        atravessa sessoes, era o unico sem.
+
+        Descarta em voz alta: sobrescrever o estado de processos do usuario em
+        silencio seria pior que estourar, porque pelo menos o AttributeError
+        aparecia.
+        """
         try:
-            return json.loads(self.store_path.read_text(encoding="utf-8"))
+            dados = json.loads(self.store_path.read_text(encoding="utf-8"))
+        except FileNotFoundError:
+            return []
         except Exception as e:
             logger.error("Could not read processes store: %s", e)
             return []
+        if not isinstance(dados, list):
+            logger.error(
+                "processes store at %s holds %s, not a list - ignoring it. The "
+                "file was not deleted; move it aside if the content matters.",
+                self.store_path, type(dados).__name__)
+            return []
+        return dados
 
     def _write(self, processes: list):
         tmp = self.store_path.with_suffix(".tmp")
